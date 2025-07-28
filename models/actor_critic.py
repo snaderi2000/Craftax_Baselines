@@ -212,7 +212,8 @@ class ActorCriticConv(nn.Module):
 
         # embedding = x.reshape(x.shape[0], -1)
         print("DEBUG — raw obs.shape:", obs.shape)
-        x = jnp.transpose(obs, (0, 2, 3, 1))
+        #x = jnp.transpose(obs, (0, 2, 3, 1))
+        x = obs
         # 2) Hard‑coded ImpalaCNN
         x = ImpalaCNN(
             inshape=(3, 63, 63),

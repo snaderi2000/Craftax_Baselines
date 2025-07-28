@@ -94,12 +94,12 @@ def make_train(config):
         if config["ANNEAL_LR"]:
             tx = optax.chain(
                 optax.clip_by_global_norm(config["MAX_GRAD_NORM"]),
-                optax.adam(learning_rate=linear_schedule, eps=1e-5),
+                optax.adam(learning_rate=linear_schedule, eps=1e-8),
             )
         else:
             tx = optax.chain(
                 optax.clip_by_global_norm(config["MAX_GRAD_NORM"]),
-                optax.adam(config["LR"], eps=1e-5),
+                optax.adam(config["LR"], eps=1e-8),
             )
         train_state = TrainState.create(
             apply_fn=network.apply,
@@ -110,8 +110,10 @@ def make_train(config):
         # INIT ENV
         rng, _rng = jax.random.split(rng)
         obsv, env_state = env.reset(_rng, env_params)
-
-        # TRAIN LOOP
+        
+        
+        
+              # TRAIN LOOP
         def _update_step(runner_state, unused):
             # COLLECT TRAJECTORIES
             def _env_step(runner_state, unused):
@@ -134,6 +136,8 @@ def make_train(config):
                 obsv, env_state, reward, done, info = env.step(
                     _rng, env_state, action, env_params
                 )
+                
+                
 
                 transition = Transition(
                     done=done,
@@ -193,6 +197,7 @@ def make_train(config):
                 return advantages, advantages + traj_batch.value
 
             advantages, targets = _calculate_gae(traj_batch, last_val)
+            advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
 
             # UPDATE NETWORK
             def _update_epoch(update_state, unused):
@@ -200,51 +205,36 @@ def make_train(config):
                     traj_batch, advantages, targets = batch_info
 
                     # Policy/value network
-                    def _loss_fn(params, traj_batch, gae, targets):
+                    def _loss_fn(params, traj_batch, advs, targets):
                         # RERUN NETWORK
                         pi, value = network.apply(params, traj_batch.obs)
-                        log_prob = pi.log_prob(traj_batch.action)
+                        
+                        new_logp = pi.log_prob(traj_batch.action)
+                        ratio   = jnp.exp(new_logp - traj_batch.log_prob)
 
-                        # CALCULATE VALUE LOSS
-                        value_pred_clipped = traj_batch.value + (
-                            value - traj_batch.value
-                        ).clip(-config["CLIP_EPS"], config["CLIP_EPS"])
-                        value_losses = jnp.square(value - targets)
-                        value_losses_clipped = jnp.square(value_pred_clipped - targets)
-                        value_loss = (
-                            0.5 * jnp.maximum(value_losses, value_losses_clipped).mean()
-                        )
+                        unclipped = ratio * advs
+                        clipped   = jnp.clip(ratio, 1.0 - config["CLIP_EPS"], 1.0 + config["CLIP_EPS"]) * advs
+                        loss_actor = -jnp.minimum(unclipped, clipped).mean()
+                        
+                        value_loss = 0.5 * jnp.square(value - targets).mean() # scalar
 
-                        # CALCULATE ACTOR LOSS
-                        ratio = jnp.exp(log_prob - traj_batch.log_prob)
-                        gae = (gae - gae.mean()) / (gae.std() + 1e-8)
-                        loss_actor1 = ratio * gae
-                        loss_actor2 = (
-                            jnp.clip(
-                                ratio,
-                                1.0 - config["CLIP_EPS"],
-                                1.0 + config["CLIP_EPS"],
-                            )
-                            * gae
-                        )
-                        loss_actor = -jnp.minimum(loss_actor1, loss_actor2)
-                        loss_actor = loss_actor.mean()
                         entropy = pi.entropy().mean()
 
                         total_loss = (
                             loss_actor
-                            + config["VF_COEF"] * value_loss
-                            - config["ENT_COEF"] * entropy
+                            + config["VF_COEF"]  * value_loss   # e.g. 0.5
+                            - config["ENT_COEF"] * entropy      # e.g. 0.01
                         )
+
                         return total_loss, (value_loss, loss_actor, entropy)
 
                     grad_fn = jax.value_and_grad(_loss_fn, has_aux=True)
-                    total_loss, grads = grad_fn(
+                    (total_loss, (value_loss, loss_actor, entropy)), grads = grad_fn(
                         train_state.params, traj_batch, advantages, targets
                     )
                     train_state = train_state.apply_gradients(grads=grads)
 
-                    losses = (total_loss, 0)
+                    losses = (total_loss, value_loss, loss_actor, entropy)
                     return train_state, losses
 
                 (
