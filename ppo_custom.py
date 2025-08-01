@@ -136,8 +136,6 @@ def make_train(config):
                 obsv, env_state, reward, done, info = env.step(
                     _rng, env_state, action, env_params
                 )
-                
-                
 
                 transition = Transition(
                     done=done,
