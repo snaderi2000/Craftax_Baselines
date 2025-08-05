@@ -6,6 +6,7 @@ from typing import Sequence, Optional, Dict, Union, Tuple
 from dataclasses import field
 import math
 import distrax
+import jax
 
 class FanInInitReLULayer(nn.Module):
     inchan: int
@@ -270,7 +271,7 @@ class ImpalaCNN_RNN(nn.Module):
     inshape: Sequence[int]
     chans: Sequence[int]
     nblock: int
-    init_norm_kwargs: Dict = field(default_factory=lambda: {'batch_norm': True, 'batch_norm_kwargs': {'momentum': 0.99}})
+    init_norm_kwargs: Dict = field(default_factory=lambda: {'batch_norm': True, 'batch_norm_kwargs': {'momentum': 0.10}})
     first_conv_norm: bool = False
     train: bool = True
 
@@ -318,7 +319,7 @@ class ActorCriticConvRNN(nn.Module):
     # ------------------------------------------------------------------
 
     head_width: int = 2048
-    n_res_blocks: int = 2
+    n_res_blocks: int = 1
     train: bool = True
 
     @nn.compact
@@ -347,6 +348,7 @@ class ActorCriticConvRNN(nn.Module):
         do_gru = (self.use_gru and self.rnn_hidden > 0)
 
         if do_gru:
+            #jax.debug.print("[GRU ON] using GRU with rnn_hidden = {}", self.rnn_hidden)
             if h is None:
                 # Allow caller to omit h when first calling the net
                 h = jnp.zeros((z.shape[0], self.rnn_hidden), z.dtype)
@@ -359,6 +361,7 @@ class ActorCriticConvRNN(nn.Module):
             y = nn.relu(h_next)
 
         else:
+            #jax.debug.print("[GRU OFF] skipping GRU, using h.shape = {}", h.shape if h is not None else "(None)")
             # “No-GRU” mode:   y = []   and h passes through unchanged
             y       = jnp.zeros((z.shape[0], 0), z.dtype)   # keeps concat clean
             h_next  = h if h is not None else jnp.zeros((z.shape[0], 0), z.dtype)
