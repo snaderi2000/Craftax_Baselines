@@ -93,8 +93,8 @@ def make_train(config):
             network = ActorCriticConvRNN(
                 action_dim   = env.action_space(env_params).n,
                 head_width   = config["LAYER_SIZE"],   # 2048 in the paper
-                rnn_hidden   = 0,                      # ← 0 = “no-GRU” ablation
-                use_gru      = False                   # optional explicit flag
+                rnn_hidden   = 256,                      # ← 0 = “no-GRU” ablation
+                use_gru      = True                  # optional explicit flag
             )
 
         rng, _rng = jax.random.split(rng)
@@ -150,6 +150,7 @@ def make_train(config):
                     last_obs,
                     rng,
                     update_step,
+                    h
                 ) = runner_state
 
                 # SELECT ACTION
@@ -165,11 +166,14 @@ def make_train(config):
 
                 # 3) run apply_fn in TRAIN mode, allowing batch_stats to mutate
                 #    note how we pull out the updated stats in new_model_state
-                ((pi, value, _), new_model_state) = train_state.apply_fn(
+                ((pi, value, h_next), new_model_state) = train_state.apply_fn(
                     vars,
                     last_obs,
+                    h,
                     mutable=['batch_stats']  # allow BatchNorm to write new running‐stats
                 )
+
+                #jax.debug.print("env_step step={}  h_next mean={}", update_step, jnp.mean(h_next))
 
 
                 # 4) stash the updated batch_stats back into your TrainState
@@ -195,12 +199,18 @@ def make_train(config):
                     next_obs=obsv,
                     info=info,
                 )
+
+                # ——— Reset hidden where episodes have ended ———
+                # `done` has shape (num_envs,), so we add a trailing axis to broadcast
+                h_next = jnp.where(done[:, None], jnp.zeros_like(h_next), h_next)
+
                 runner_state = (
                     train_state,
                     env_state,
                     obsv,
                     rng,
                     update_step,
+                    h_next
                 )
                 return runner_state, transition
 
@@ -215,6 +225,7 @@ def make_train(config):
                 last_obs,
                 rng,
                 update_step,
+                h
             ) = runner_state
             #_, last_val = network.apply(train_state.params, last_obs)
             vars = {
@@ -224,6 +235,7 @@ def make_train(config):
             ((_, last_val, _), new_model_state) = train_state.apply_fn(
                 vars,
                 last_obs,
+                h,
                 mutable=['batch_stats'],   # allow BatchNorm to write its running stats
             )
             train_state = train_state.replace(
@@ -273,7 +285,7 @@ def make_train(config):
                                 'batch_stats': batch_stats}
 
                         # 2) rerun the network in train mode, allow BN to update
-                        ((pi, value, _), new_model_state) = train_state.apply_fn(
+                        ((pi, value, h_next), new_model_state) = train_state.apply_fn(
                             vars,
                             traj_batch.obs,
                             mutable=['batch_stats']  # let BatchNorm write its running‐stats
@@ -376,6 +388,8 @@ def make_train(config):
                 traj_batch.info,
             )
 
+            # unpack runner_state to pull out your new hidden state h
+
             rng = update_state[-1]
 
             # wandb logging
@@ -397,17 +411,22 @@ def make_train(config):
                 last_obs,
                 rng,
                 update_step + 1,
+                h
             )
             return runner_state, metric
 
         rng, _rng = jax.random.split(rng)
-        runner_state = (
-            train_state,
-            env_state,
-            obsv,
-            _rng,
-            0,
-        )
+        # runner_state = (
+        #     train_state,
+        #     env_state,
+        #     obsv,
+        #     _rng,
+        #     0,
+        # )
+
+        h0 = jnp.zeros((config["NUM_ENVS"], network.rnn_hidden))
+        runner_state = (train_state, env_state, obsv, rng, 0, h0)
+
         runner_state, metric = jax.lax.scan(
             _update_step, runner_state, None, config["NUM_UPDATES"]
         )
