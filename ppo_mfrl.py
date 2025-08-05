@@ -47,6 +47,7 @@ class Transition(NamedTuple):
     log_prob: jnp.ndarray
     obs: jnp.ndarray
     next_obs: jnp.ndarray
+    h: jnp.ndarray
     info: jnp.ndarray
 
 
@@ -173,7 +174,6 @@ def make_train(config):
                     mutable=['batch_stats']  # allow BatchNorm to write new running‐stats
                 )
 
-                #jax.debug.print("env_step step={}  h_next mean={}", update_step, jnp.mean(h_next))
 
 
                 # 4) stash the updated batch_stats back into your TrainState
@@ -197,6 +197,7 @@ def make_train(config):
                     log_prob=log_prob,
                     obs=last_obs,
                     next_obs=obsv,
+                    h=h_next,
                     info=info,
                 )
 
@@ -288,6 +289,7 @@ def make_train(config):
                         ((pi, value, h_next), new_model_state) = train_state.apply_fn(
                             vars,
                             traj_batch.obs,
+                            traj_batch.h,
                             mutable=['batch_stats']  # let BatchNorm write its running‐stats
                         )
 
