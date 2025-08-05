@@ -2,7 +2,7 @@ import jax.numpy as jnp
 import flax.linen as nn
 import numpy as np
 from flax.linen.initializers import constant, orthogonal
-from typing import Sequence, Optional, Dict, Union
+from typing import Sequence, Optional, Dict, Union, Tuple
 from dataclasses import field
 import math
 import distrax
@@ -192,6 +192,9 @@ class ImpalaCNN(nn.Module):
 
 
 
+
+
+
 class ActorCriticConv(nn.Module):
     action_dim: Sequence[int]
     layer_width: int
@@ -260,17 +263,142 @@ class ActorCriticConv(nn.Module):
 
 
 
+#Make the actor critic with a rnn
+
+
+class ImpalaCNN_RNN(nn.Module):
+    inshape: Sequence[int]
+    chans: Sequence[int]
+    nblock: int
+    init_norm_kwargs: Dict = field(default_factory=lambda: {'batch_norm': True, 'batch_norm_kwargs': {'momentum': 0.99}})
+    first_conv_norm: bool = False
+    train: bool = True
+
+    post_pool_groups: Optional[int] = None
+
+    @nn.compact
+    def __call__(self, x):
+        # x: [B, H, W, C]  (NHWC)
+        c, h, w = self.inshape
+       
+        # apply down stacks
+        for i, outchan in enumerate(self.chans):
+            use_first_norm = True if i > 0 else self.first_conv_norm
+            x = CnnDownStack(
+                inchan=c,
+                nblock=self.nblock,
+                outchan=outchan,
+                init_scale=1.0 / math.sqrt(len(self.chans)),
+                pool=True,
+                post_pool_groups=self.post_pool_groups,
+                init_norm_kwargs=self.init_norm_kwargs,
+                first_conv_norm=use_first_norm,
+                train=self.train
+            )(x)
+            # update channel count for next stack
+            c = outchan
+        x = nn.relu(x)           # <<< before flatten
+        # flatten
+        x = x.reshape((x.shape[0], -1))
+       
+        return x
 
 
 
 
 
 
+class ActorCriticConvRNN(nn.Module):
+    action_dim: int
+    cnn_chans: Sequence[int] = (64, 64, 128)
 
+    # --- GRU controls -------------------------------------------------
+    rnn_hidden: int = 256          # set to 0 for “no-GRU” ablation
+    use_gru: bool   = False         # optional explicit flag
+    # ------------------------------------------------------------------
 
+    head_width: int = 2048
+    n_res_blocks: int = 2
+    train: bool = True
 
+    @nn.compact
+    def __call__(self,
+                 obs: jnp.ndarray,
+                 h: Optional[jnp.ndarray] = None
+                 ) -> Tuple[distrax.Categorical,
+                            jnp.ndarray,
+                            jnp.ndarray]:
 
+        # --------------------------------------------------------------
+        # 1. CNN encoder  z_t  (8192-dim)
+        # --------------------------------------------------------------
+        z = ImpalaCNN_RNN(
+                inshape=(3, 63, 63),
+                chans=self.cnn_chans,
+                nblock=2,
+                first_conv_norm=True,
+                post_pool_groups=None,
+                train=self.train
+            )(obs)                      # (B, 8192)
 
+        # --------------------------------------------------------------
+        # 2. Optional GRU pathway  (y_t, h_next)
+        # --------------------------------------------------------------
+        do_gru = (self.use_gru and self.rnn_hidden > 0)
+
+        if do_gru:
+            if h is None:
+                # Allow caller to omit h when first calling the net
+                h = jnp.zeros((z.shape[0], self.rnn_hidden), z.dtype)
+
+            x = nn.LayerNorm()(z)
+            x = nn.Dense(self.rnn_hidden)(x)
+            x = nn.relu(x)
+
+            h_next, _ = nn.GRUCell(features=self.rnn_hidden)(h, x)
+            y = nn.relu(h_next)
+
+        else:
+            # “No-GRU” mode:   y = []   and h passes through unchanged
+            y       = jnp.zeros((z.shape[0], 0), z.dtype)   # keeps concat clean
+            h_next  = h if h is not None else jnp.zeros((z.shape[0], 0), z.dtype)
+
+        # --------------------------------------------------------------
+        # 3. Shared embedding  [z_t , y_t]
+        # --------------------------------------------------------------
+        shared = jnp.concatenate([z, y], axis=-1)           # (B, 8192 [+ 256])
+
+        # --------------------------------------------------------------
+        # 4. Actor head
+        # --------------------------------------------------------------
+        a = nn.LayerNorm()(shared)
+        a = nn.relu(nn.Dense(self.head_width)(a))
+        for _ in range(self.n_res_blocks):
+            res = a
+            a = nn.relu(nn.Dense(self.head_width)(a))
+            a = nn.relu(nn.Dense(self.head_width)(a) + res)
+        a = nn.LayerNorm()(a)
+        logits = nn.Dense(self.action_dim,
+                          kernel_init=orthogonal(0.01),
+                          bias_init=constant(0.0))(a)
+        pi = distrax.Categorical(logits=logits)
+
+        # --------------------------------------------------------------
+        # 5. Critic head
+        # --------------------------------------------------------------
+        v = nn.LayerNorm()(shared)
+        v = nn.relu(nn.Dense(self.head_width)(v))
+        for _ in range(self.n_res_blocks):
+            res = v
+            v = nn.relu(nn.Dense(self.head_width)(v))
+            v = nn.relu(nn.Dense(self.head_width)(v) + res)
+        v = nn.LayerNorm()(v)
+        value = jnp.squeeze(nn.Dense(1,
+                                     kernel_init=orthogonal(1.0),
+                                     bias_init=constant(0.0))(v),
+                            axis=-1)
+
+        return pi, value, h_next
 
 
 
@@ -284,6 +412,76 @@ class ActorCriticConv(nn.Module):
 
 
 ################################################################################
+
+
+# class ActorCriticConvRNN(nn.Module):
+#     action_dim: int
+#     cnn_chans: Sequence[int] = (64, 64, 128)
+#     rnn_hidden: int = 256
+#     head_width: int = 2048
+#     n_res_blocks: int = 2
+#     train: bool = True
+
+#     @nn.compact
+#     def __call__(self,
+#                  obs: jnp.ndarray,
+#                  h: jnp.ndarray
+#                  ) -> Tuple[distrax.Categorical, jnp.ndarray, jnp.ndarray]:
+#         # 1) Impala CNN → z_t
+#         z = ImpalaCNN_RNN(
+#             inshape=(3, 63, 63),
+#             chans=self.cnn_chans,
+#             nblock=2,
+#             first_conv_norm=True,
+#             post_pool_groups=None,
+#             train=self.train
+#         )(obs)  # [B, cnn_outsize * spatial]
+
+#         # 2) Pre-RNN projection to rnn_hidden
+#         x = nn.LayerNorm()(z)
+#         x = nn.Dense(self.rnn_hidden)(x)
+#         x = nn.relu(x)  # [B, rnn_hidden]
+
+#         # 3) GRU cell update (needs features)
+#         h_next, _ = nn.GRUCell(features=self.rnn_hidden)(h, x)  # h_next: [B, rnn_hidden]
+#         y = nn.relu(h_next)
+
+#         # 4) Shared embedding
+#         shared = jnp.concatenate([z, y], axis=-1)  # [B, flattened_cnn_features + rnn_hidden]
+
+#         # 5) Actor head
+#         a = nn.LayerNorm()(shared)
+#         a = nn.Dense(self.head_width)(a)
+#         a = nn.relu(a)
+#         for i_res_block in range(self.n_res_blocks):
+#             res = a
+#             a = nn.Dense(self.head_width)(a); a = nn.relu(a)
+#             a = nn.Dense(self.head_width)(a)
+#             a = nn.relu(a + res)
+#         a = nn.LayerNorm()(a)
+#         logits = nn.Dense(self.action_dim,
+#                           kernel_init=orthogonal(0.01),
+#                           bias_init=constant(0.0))(a)
+#         pi = distrax.Categorical(logits=logits)
+
+#         # 6) Critic head
+#         v = nn.LayerNorm()(shared)
+#         v = nn.Dense(self.head_width)(v); v = nn.relu(v)
+#         for i_res_block in range(self.n_res_blocks):
+#             res = v
+#             v = nn.Dense(self.head_width)(v); v = nn.relu(v)
+#             v = nn.Dense(self.head_width)(v)
+#             v = nn.relu(v + res)
+#         v = nn.LayerNorm()(v)
+#         v = nn.Dense(1,
+#                      kernel_init=orthogonal(1.0),
+#                      bias_init=constant(0.0))(v)
+#         value = jnp.squeeze(v, axis=-1)  # [B]
+
+#         return pi, value, h_next
+
+
+
 class ActorCritic(nn.Module):
     action_dim: Sequence[int]
     layer_width: int
