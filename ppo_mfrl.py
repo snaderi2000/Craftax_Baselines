@@ -8,6 +8,9 @@ import jax.numpy as jnp
 import numpy as np
 import optax
 from craftax.craftax_env import make_craftax_env_from_name
+from flax.core.frozen_dict import unfreeze
+
+
 
 import wandb
 from typing import Any, NamedTuple
@@ -38,6 +41,8 @@ from wrappers import (
 
 class TrainState(train_state.TrainState):
     batch_stats: Any
+    q_mean:     jnp.ndarray   # scalar  (running mean  μ_target)
+    q_var:      jnp.ndarray   # scalar  (running var   σ²_target)
 
 class Transition(NamedTuple):
     done: jnp.ndarray
@@ -47,6 +52,7 @@ class Transition(NamedTuple):
     log_prob: jnp.ndarray
     obs: jnp.ndarray
     next_obs: jnp.ndarray
+    h: jnp.ndarray
     info: jnp.ndarray
 
 
@@ -93,8 +99,8 @@ def make_train(config):
             network = ActorCriticConvRNN(
                 action_dim   = env.action_space(env_params).n,
                 head_width   = config["LAYER_SIZE"],   # 2048 in the paper
-                rnn_hidden   = 0,                      # ← 0 = “no-GRU” ablation
-                use_gru      = 0                  # optional explicit flag
+                rnn_hidden   = config.get("RNN_HIDDEN", 256),  # ← 0 = “no-GRU” ablation
+                use_gru      = config.get("USE_GRU", True)     # optional explicit flag
             )
 
         rng, _rng = jax.random.split(rng)
@@ -105,6 +111,12 @@ def make_train(config):
         params = variables["params"]
         batch_stats = variables["batch_stats"]
 
+
+        def count_parameters(params):
+            flat_params = jax.tree_util.tree_leaves(unfreeze(params))
+            return sum(p.size for p in flat_params)
+
+        print("Total parameters:", count_parameters(params))
         
         
         #network_params = network.init(_rng, init_x)
@@ -131,6 +143,8 @@ def make_train(config):
             params=params,
             batch_stats=batch_stats,
             tx=tx,
+            q_mean=jnp.array(0.0),
+            q_var=jnp.array(1.0),
         )
 
 
@@ -173,7 +187,6 @@ def make_train(config):
                     mutable=['batch_stats']  # allow BatchNorm to write new running‐stats
                 )
 
-                #jax.debug.print("env_step step={}  h_next mean={}", update_step, jnp.mean(h_next))
 
 
                 # 4) stash the updated batch_stats back into your TrainState
@@ -182,6 +195,9 @@ def make_train(config):
 
                 action = pi.sample(seed=_rng)
                 log_prob = pi.log_prob(action)
+
+                q_mean, q_var = train_state.q_mean, train_state.q_var
+                value_raw = value * jnp.sqrt(q_var) + q_mean      # <- restore units
 
                 # STEP ENV
                 rng, _rng = jax.random.split(rng)
@@ -192,11 +208,12 @@ def make_train(config):
                 transition = Transition(
                     done=done,
                     action=action,
-                    value=value,
+                    value=value_raw,     #  <<< here
                     reward=reward,
                     log_prob=log_prob,
                     obs=last_obs,
                     next_obs=obsv,
+                    h=h, #h_next
                     info=info,
                 )
 
@@ -241,6 +258,9 @@ def make_train(config):
             train_state = train_state.replace(
                 batch_stats=new_model_state['batch_stats']
             )
+            
+            q_mean, q_var = train_state.q_mean, train_state.q_var
+            last_val = last_val * jnp.sqrt(q_var) + q_mean     # undo standardisation
 
 
             def _calculate_gae(traj_batch, last_val):
@@ -268,6 +288,7 @@ def make_train(config):
                 return advantages, advantages + traj_batch.value
 
             advantages, targets = _calculate_gae(traj_batch, last_val)
+            #jax.debug.print("adv std={:.3f}", jnp.std(advantages))
             advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
 
             # UPDATE NETWORK
@@ -275,8 +296,23 @@ def make_train(config):
                 def _update_minbatch(train_state, batch_info):
                     traj_batch, advantages, targets = batch_info
 
+
+                    ema_decay = config["ALPHA"]   #add a command line argument for this
+                    q_mean, q_var = train_state.q_mean, train_state.q_var
+
+                    batch_mean = jax.lax.stop_gradient(jnp.mean(targets))
+                    batch_var  = jax.lax.stop_gradient(jnp.var(targets))
+
+                    q_mean_new = ema_decay * q_mean + (1 - ema_decay) * batch_mean
+                    q_var_new  = ema_decay * q_var  + (1 - ema_decay) * batch_var
+
+                    targets_std = jax.lax.stop_gradient(
+                        (targets - q_mean_new) / jnp.sqrt(q_var_new + 1e-8)
+                    )
+
+
                     # Policy/value network
-                    def _loss_fn(params, batch_stats, traj_batch, advs, targets):
+                    def _loss_fn(params, batch_stats, traj_batch, advs, targets_std):
                         # RERUN NETWORK
                         #pi, value = network.apply(params, traj_batch.obs)
 
@@ -288,6 +324,7 @@ def make_train(config):
                         ((pi, value, h_next), new_model_state) = train_state.apply_fn(
                             vars,
                             traj_batch.obs,
+                            traj_batch.h,
                             mutable=['batch_stats']  # let BatchNorm write its running‐stats
                         )
 
@@ -299,7 +336,7 @@ def make_train(config):
                         clipped   = jnp.clip(ratio, 1.0 - config["CLIP_EPS"], 1.0 + config["CLIP_EPS"]) * advs
                         loss_actor = -jnp.minimum(unclipped, clipped).mean()
                         
-                        value_loss = 0.5 * jnp.square(value - targets).mean() # scalar
+                        value_loss = 0.5 * jnp.square(value - targets_std).mean() # scalar
 
                         entropy = pi.entropy().mean()
 
@@ -323,11 +360,12 @@ def make_train(config):
                         train_state.batch_stats,
                         traj_batch,
                         advantages,
-                        targets,
+                        targets_std,
                     )
+                    #jax.debug.print("value_loss={:.3f}", value_loss)
                     
                     train_state = train_state.apply_gradients(grads=grads)
-                    train_state = train_state.replace(batch_stats=new_batch_stats)
+                    train_state = train_state.replace(batch_stats=new_batch_stats, q_mean=q_mean_new, q_var=q_var_new)
 
                     losses = (total_loss, value_loss, loss_actor, entropy)
                     return train_state,  (total_loss, value_loss, loss_actor, entropy)
@@ -352,12 +390,21 @@ def make_train(config):
                 shuffled_batch = jax.tree.map(
                     lambda x: jnp.take(x, permutation, axis=0), batch
                 )
-                minibatches = jax.tree.map(
-                    lambda x: jnp.reshape(
-                        x, [config["NUM_MINIBATCHES"], -1] + list(x.shape[1:])
-                    ),
-                    shuffled_batch,
-                )
+                # minibatches = jax.tree.map(
+                #     lambda x: jnp.reshape(
+                #         x, [config["NUM_MINIBATCHES"], -1] + list(x.shape[1:])
+                #     ),
+                #     shuffled_batch,
+                # )
+
+                # This helper function explicitly calculates the minibatch size, avoiding the error.
+                def create_minibatches(x):
+                    minibatch_size = x.shape[0] // config["NUM_MINIBATCHES"]
+                    return jnp.reshape(x, (config["NUM_MINIBATCHES"], minibatch_size) + x.shape[1:])
+
+                # Use the new robust function to create the minibatches
+                minibatches = jax.tree.map(create_minibatches, shuffled_batch)
+
                 train_state, losses = jax.lax.scan(
                     _update_minbatch, train_state, minibatches
                 )
@@ -380,6 +427,8 @@ def make_train(config):
             update_state, loss_info = jax.lax.scan(
                 _update_epoch, update_state, None, config["UPDATE_EPOCHS"]
             )
+
+            #jax.debug.print("upd {}/{} q̂ μ={:.3f} σ={:.3f}", update_step, config["NUM_UPDATES"], train_state.q_mean, jnp.sqrt(train_state.q_var))
 
             train_state = update_state[0]
             metric = jax.tree.map(
@@ -522,6 +571,9 @@ if __name__ == "__main__":
         "--use_optimistic_resets", action=argparse.BooleanOptionalAction, default=True
     )
     parser.add_argument("--optimistic_reset_ratio", type=int, default=16)
+    parser.add_argument("--alpha", type=float, default=0.95)
+    parser.add_argument("--rnn_hidden", type=int, default=256)
+    parser.add_argument("--use_gru", action=argparse.BooleanOptionalAction, default=True)
 
     args, rest_args = parser.parse_known_args(sys.argv[1:])
     if rest_args:
