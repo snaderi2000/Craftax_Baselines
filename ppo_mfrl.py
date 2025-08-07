@@ -213,7 +213,7 @@ def make_train(config):
                     log_prob=log_prob,
                     obs=last_obs,
                     next_obs=obsv,
-                    h=h_next,
+                    h=h, #h_next
                     info=info,
                 )
 
@@ -390,12 +390,21 @@ def make_train(config):
                 shuffled_batch = jax.tree.map(
                     lambda x: jnp.take(x, permutation, axis=0), batch
                 )
-                minibatches = jax.tree.map(
-                    lambda x: jnp.reshape(
-                        x, [config["NUM_MINIBATCHES"], -1] + list(x.shape[1:])
-                    ),
-                    shuffled_batch,
-                )
+                # minibatches = jax.tree.map(
+                #     lambda x: jnp.reshape(
+                #         x, [config["NUM_MINIBATCHES"], -1] + list(x.shape[1:])
+                #     ),
+                #     shuffled_batch,
+                # )
+
+                # This helper function explicitly calculates the minibatch size, avoiding the error.
+                def create_minibatches(x):
+                    minibatch_size = x.shape[0] // config["NUM_MINIBATCHES"]
+                    return jnp.reshape(x, (config["NUM_MINIBATCHES"], minibatch_size) + x.shape[1:])
+
+                # Use the new robust function to create the minibatches
+                minibatches = jax.tree.map(create_minibatches, shuffled_batch)
+
                 train_state, losses = jax.lax.scan(
                     _update_minbatch, train_state, minibatches
                 )
