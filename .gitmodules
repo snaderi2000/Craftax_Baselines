@@ -1,0 +1,3 @@
+[submodule "world_model/third_party/nanoGPT-jax"]
+	path = world_model/third_party/nanoGPT-jax
+	url = git@github.com:snaderi2000/nanoGPT-jax.git
