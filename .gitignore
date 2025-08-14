@@ -168,3 +168,4 @@ cython_debug/
 .idea/
 texture_cache.pbz2
 texture_cache*.pbz2
+/craftax_replay_buffer/
