@@ -4,6 +4,7 @@ res/
 runs/
 *.mp4
 *.gif
+*.msgpack
 
 play_data
 
