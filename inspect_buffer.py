@@ -21,7 +21,7 @@ def inspect_buffer(vault_name: str, vault_uid: str):
             "dones": jnp.zeros((), dtype=bool),
         }
         buffer_for_init = fbx.make_trajectory_buffer(
-            max_length_time_axis=128000 // 48,
+            max_length_time_axis=12800 // 48,
             min_length_time_axis=20, add_batch_size=48,
             sample_batch_size=32, sample_sequence_length=20, period=1,
         )

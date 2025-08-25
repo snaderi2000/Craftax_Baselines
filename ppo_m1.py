@@ -25,6 +25,11 @@ from orbax.checkpoint import (
     CheckpointManager,
 )
 
+
+from flashbax.utils import get_tree_shape_prefix
+
+
+
 from logz.batch_logging import batch_log, create_log_dict
 from models.actor_critic import (
     ActorCriticConv,
@@ -37,8 +42,27 @@ from wrappers import (
     AutoResetEnvWrapper,
 )
 
+
+from datetime import datetime
+
+
 # Code adapted from the original implementation made by Chris Lu
 # Original code located at https://github.com/luchris429/purejaxrl
+
+def write_entire_buffer_once(vault: Vault, fbx_state):
+    """Write the entire buffer snapshot to the vault, handling wrap-around if full."""
+    T = get_tree_shape_prefix(fbx_state.experience, n_axes=2)[1]  # time-axis length
+    k = int(fbx_state.current_index)                              # next-write index (ring head)
+
+    if bool(fbx_state.is_full):
+        # Chronological order is [k:T) then [0:k)
+        n1 = vault.write(fbx_state, source_interval=(k, T), dest_start=vault.vault_index)
+        n2 = vault.write(fbx_state, source_interval=(0, k), dest_start=vault.vault_index)
+        return n1 + n2
+    else:
+        # Not full yet: data is [0:k)
+        return vault.write(fbx_state, source_interval=(0, k), dest_start=vault.vault_index)
+
 
 
 class TrainState(train_state.TrainState):
@@ -568,29 +592,55 @@ def run_ppo(config):
     print("SPS: ", config["TOTAL_TIMESTEPS"] / (t1 - t0))
 
 
-       # --- (Corrected save block) ---
-     # --- (Corrected save block using vault_uid) ---
+    #    # --- (Corrected save block) ---
+    #  # --- (Corrected save block using vault_uid) ---
+    # if config["SAVE_BUFFER"]:
+    #     print("\n--- Saving Final Replay Buffer ---")
+        
+    #     final_runner_state = jax.tree.map(lambda x: x[0], out["runner_state"])
+    #     final_buffer_state = final_runner_state[-1]
+        
+    #     # Use a specific, consistent UID for saving
+    #     VAULT_UID = "my_first_buffer_run"
+
+    #     # Initialize the Vault with the UID
+    #     vault = Vault(
+    #         vault_name="craftax_replay_buffer",
+    #         experience_structure=final_buffer_state.experience,
+    #         rel_dir=".",
+    #         vault_uid=VAULT_UID
+    #     )
+        
+    #     # Write the data to disk
+    #     vault.write(final_buffer_state)
+    #     print(f"✅ Replay buffer saved with UID: {VAULT_UID}")
+    # # -----------------------------------------------
+
+        # --- SAVE BUFFER WITH NUMPY ---
+    # --- Corrected save block (stable UID + wrap-around safe) ---
     if config["SAVE_BUFFER"]:
         print("\n--- Saving Final Replay Buffer ---")
-        
+
         final_runner_state = jax.tree.map(lambda x: x[0], out["runner_state"])
         final_buffer_state = final_runner_state[-1]
-        
-        # Use a specific, consistent UID for saving
-        VAULT_UID = "my_first_buffer_run"
 
-        # Initialize the Vault with the UID
+        # Use a stable UID you control (CLI arg or timestamp). Example:
+        VAULT_UID = config.get("VAULT_UID") or "my_first_buffer_run"
+        # Prefer an absolute base dir to avoid CWD surprises:
+        REL_DIR = "/home/synaderi/Craftax_Baselines"
+
         vault = Vault(
             vault_name="craftax_replay_buffer",
-            experience_structure=final_buffer_state.experience,
-            rel_dir=".",
+            experience_structure=final_buffer_state.experience,  # creating (or reusing) this UID
+            rel_dir=REL_DIR,
             vault_uid=VAULT_UID
         )
+
+        n_written = write_entire_buffer_once(vault, final_buffer_state)
+        print(f"✅ Saved {n_written} timesteps to: {REL_DIR}/craftax_replay_buffer/{VAULT_UID}")
+
         
-        # Write the data to disk
-        vault.write(final_buffer_state)
-        print(f"✅ Replay buffer saved with UID: {VAULT_UID}")
-    # -----------------------------------------------
+
 
 
     if config["USE_WANDB"]:
@@ -656,9 +706,10 @@ if __name__ == "__main__":
     parser.add_argument("--alpha", type=float, default=0.95)
     parser.add_argument("--rnn_hidden", type=int, default=256)
     parser.add_argument("--use_gru", action=argparse.BooleanOptionalAction, default=True)
-    parser.add_argument("--buffer_size", type=int, default=12800)
+    parser.add_argument("--buffer_size", type=int, default=128000)
     parser.add_argument("--t_wm", type=int, default=20, help="Trajectory length for the TWM.")
     parser.add_argument("--save_buffer", action="store_true", help="Save the final replay buffer to disk.")
+    parser.add_argument("--vault_uid", type=str, default=None)
 
     args, rest_args = parser.parse_known_args(sys.argv[1:])
     if rest_args:

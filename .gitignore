@@ -3,6 +3,7 @@ wandb/
 res/
 runs/
 *.mp4
+*.gif
 
 play_data
 
