@@ -15,12 +15,25 @@ def create_log_dict(info, config):
     }
 
     sum_achievements = 0
+    achievement_rates = []
+
     for k, v in info.items():
         if "achievements" in k.lower():
             to_log[k] = v
+            achievement_rates.append(v) # collect for score
             sum_achievements += v / 100.0
 
     to_log["achievements"] = sum_achievements
+
+    if len(achievement_rates) > 0:
+        reward = sum_achievements / len(achievement_rates) * 100
+        to_log["reward"] = reward
+
+    if len(achievement_rates) > 0:
+        rates = np.array(achievement_rates, dtype =np.float32)
+        score = np.exp(np.mean(np.log1p(rates))) - 1
+        to_log["score"] = score
+
 
     if config.get("TRAIN_ICM") or config.get("USE_RND"):
         to_log["intrinsic_reward"] = info["reward_i"]
@@ -62,6 +75,7 @@ def batch_log(update_step, log, config):
                     "e_mean",
                     "e_std",
                     "rnd_loss",
+                    "score",
                 ]:
                     agg_logs[key] = np.mean(agg)
                 else:

@@ -10,10 +10,13 @@ import optax
 from craftax.craftax_env import make_craftax_env_from_name
 from flax.core.frozen_dict import unfreeze
 
+
 import flashbax as fbx
 from flashbax.vault import Vault
 from pathlib import Path
 from flashbax.utils import get_tree_shape_prefix
+
+
 
 import wandb
 from typing import Any, NamedTuple
@@ -26,11 +29,6 @@ from orbax.checkpoint import (
     CheckpointManager,
 )
 
-
-from flashbax.utils import get_tree_shape_prefix
-
-
-
 from logz.batch_logging import batch_log, create_log_dict
 from models.actor_critic import (
     ActorCriticConv,
@@ -42,6 +40,9 @@ from wrappers import (
     BatchEnvWrapper,
     AutoResetEnvWrapper,
 )
+
+# Code adapted from the original implementation made by Chris Lu
+# Original code located at https://github.com/luchris429/purejaxrl
 
 
 from datetime import datetime
@@ -63,7 +64,6 @@ def write_entire_buffer_once(vault: Vault, fbx_state):
     else:
         # Not full yet: data is [0:k)
         return vault.write(fbx_state, source_interval=(0, k), dest_start=vault.vault_index)
-
 
 
 class TrainState(train_state.TrainState):
@@ -174,6 +174,7 @@ def make_train(config):
             q_var=jnp.array(1.0),
         )
 
+
         # --- ADD THIS BLOCK TO INITIALIZE THE BUFFER ---
         print("Initializing Flashbax replay buffer...")
         # Define the structure of what we want to save from each timestep
@@ -198,6 +199,7 @@ def make_train(config):
         buffer_state = buffer.init(example_item)
         # --------------------------------------------------
 
+
         # INIT ENV
         rng, _rng = jax.random.split(rng)
         obsv, env_state = env.reset(_rng, env_params)
@@ -206,11 +208,9 @@ def make_train(config):
         
               # TRAIN LOOP
         def _update_step(runner_state, unused):
-
-            # Unpack the new runner_state which includes the buffer_state
-            train_state, env_state, last_obs, rng, update_step, h, buffer_state = runner_state
-
             # COLLECT TRAJECTORIES
+
+            train_state, env_state, last_obs, rng, update_step, h, buffer_state = runner_state
             def _env_step(runner_state, unused):
                 (
                     train_state,
@@ -285,10 +285,7 @@ def make_train(config):
                 )
                 return runner_state, transition
 
-            # runner_state, traj_batch = jax.lax.scan(
-            #     _env_step, runner_state, None, config["NUM_STEPS"]
-            # )
-
+ 
             runner_state_in = (train_state, env_state, last_obs, rng, update_step, h)
             runner_state_out, traj_batch = jax.lax.scan(
                 _env_step, runner_state_in, None, config["NUM_STEPS"]
@@ -313,14 +310,14 @@ def make_train(config):
             # Add the data to the buffer
             buffer_state = buffer.add(buffer_state, data_to_add)
             # -----------------------------------------------
-
+           
 
             # CALCULATE ADVANTAGE
             (
                 train_state,
                 env_state,
                 last_obs,
-                new_rng, # <-- This is the updated RNG key
+                rng,
                 update_step,
                 h
             ) = runner_state_out
@@ -502,7 +499,7 @@ def make_train(config):
                 traj_batch,
                 advantages,
                 targets,
-                rng, # <-- Use the correct, updated RNG
+                rng,
             )
             update_state, loss_info = jax.lax.scan(
                 _update_epoch, update_state, None, config["UPDATE_EPOCHS"]
@@ -534,14 +531,6 @@ def make_train(config):
                     update_step,
                 )
 
-            # runner_state = (
-            #     train_state,
-            #     env_state,
-            #     last_obs,
-            #     rng,
-            #     update_step + 1,
-            #     h
-            # )
             runner_state = (train_state, env_state, last_obs, rng, update_step + 1, h, buffer_state)
             return runner_state, metric
 
@@ -564,7 +553,6 @@ def make_train(config):
         return {"runner_state": runner_state}  # , "info": metric}
 
     return train
-
 
 def run_ppo(config):
     config = {k.upper(): v for k, v in config.__dict__.items()}
@@ -592,58 +580,6 @@ def run_ppo(config):
     print("Time to run experiment", t1 - t0)
     print("SPS: ", config["TOTAL_TIMESTEPS"] / (t1 - t0))
 
-
-    #    # --- (Corrected save block) ---
-    #  # --- (Corrected save block using vault_uid) ---
-    # if config["SAVE_BUFFER"]:
-    #     print("\n--- Saving Final Replay Buffer ---")
-        
-    #     final_runner_state = jax.tree.map(lambda x: x[0], out["runner_state"])
-    #     final_buffer_state = final_runner_state[-1]
-        
-    #     # Use a specific, consistent UID for saving
-    #     VAULT_UID = "my_first_buffer_run"
-
-    #     # Initialize the Vault with the UID
-    #     vault = Vault(
-    #         vault_name="craftax_replay_buffer",
-    #         experience_structure=final_buffer_state.experience,
-    #         rel_dir=".",
-    #         vault_uid=VAULT_UID
-    #     )
-        
-    #     # Write the data to disk
-    #     vault.write(final_buffer_state)
-    #     print(f"✅ Replay buffer saved with UID: {VAULT_UID}")
-    # # -----------------------------------------------
-
-        # --- SAVE BUFFER WITH NUMPY ---
-    # --- Corrected save block (stable UID + wrap-around safe) ---
-    if config["SAVE_BUFFER"]:
-        print("\n--- Saving Final Replay Buffer ---")
-
-        final_runner_state = jax.tree.map(lambda x: x[0], out["runner_state"])
-        final_buffer_state = final_runner_state[-1]
-
-        # Use a stable UID you control (CLI arg or timestamp). Example:
-        VAULT_UID = config.get("VAULT_UID") or "my_first_buffer_run"
-        # Prefer an absolute base dir to avoid CWD surprises:
-        REL_DIR = "/home/synaderi/Craftax_Baselines"
-
-        vault = Vault(
-            vault_name="craftax_replay_buffer",
-            experience_structure=final_buffer_state.experience,  # creating (or reusing) this UID
-            rel_dir=REL_DIR,
-            vault_uid=VAULT_UID
-        )
-
-        n_written = write_entire_buffer_once(vault, final_buffer_state)
-        print(f"✅ Saved {n_written} timesteps to: {REL_DIR}/craftax_replay_buffer/{VAULT_UID}")
-
-        
-
-
-
     if config["USE_WANDB"]:
 
         def _save_network(rs_index, dir_name):
@@ -664,28 +600,50 @@ def run_ppo(config):
         if config["SAVE_POLICY"]:
             _save_network(0, "policies")
 
+    if config["SAVE_BUFFER"]:
+        print("\n--- Saving Final Replay Buffer ---")
+
+        final_runner_state = jax.tree.map(lambda x: x[0], out["runner_state"])
+        final_buffer_state = final_runner_state[-1]
+
+        # Use a stable UID you control (CLI arg or timestamp). Example:
+        VAULT_UID = config.get("VAULT_UID") or "my_first_buffer_run"
+        # Prefer an absolute base dir to avoid CWD surprises:
+        REL_DIR = "/home/synaderi/Craftax_Baselines"
+
+        vault = Vault(
+            vault_name="craftax_replay_buffer",
+            experience_structure=final_buffer_state.experience,  # creating (or reusing) this UID
+            rel_dir=REL_DIR,
+            vault_uid=VAULT_UID
+        )
+
+        n_written = write_entire_buffer_once(vault, final_buffer_state)
+        print(f"✅ Saved {n_written} timesteps to: {REL_DIR}/craftax_replay_buffer/{VAULT_UID}")           
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--env_name", type=str, default="Craftax-Classic-Pixels-v1")
+    parser.add_argument("--env_name", type=str, default="Craftax-Symbolic-v1")
     parser.add_argument(
         "--num_envs",
         type=int,
-        default=48,
+        default=1024,
     )
     parser.add_argument(
-        "--total_timesteps", type=lambda x: int(float(x)), default=1e6
+        "--total_timesteps", type=lambda x: int(float(x)), default=1e9
     )  # Allow scientific notation
-    parser.add_argument("--lr", type=float, default=0.00045)
-    parser.add_argument("--num_steps", type=int, default=96)
-    parser.add_argument("--update_epochs", type=int, default=4)
+    parser.add_argument("--lr", type=float, default=3.0e-4)
+    parser.add_argument("--num_steps", type=int, default=512)
+    parser.add_argument("--update_epochs", type=int, default=250)
     parser.add_argument("--num_minibatches", type=int, default=8)
-    parser.add_argument("--gamma", type=float, default=0.925)
-    parser.add_argument("--gae_lambda", type=float, default=0.625)
+    parser.add_argument("--gamma", type=float, default=0.95)
+    parser.add_argument("--gae_lambda", type=float, default=0.65)
     parser.add_argument("--clip_eps", type=float, default=0.2)
     parser.add_argument("--ent_coef", type=float, default=0.01)
-    parser.add_argument("--vf_coef", type=float, default=1.0)
+    parser.add_argument("--vf_coef", type=float, default=0.5)
     parser.add_argument("--max_grad_norm", type=float, default=0.5)
+    parser.add_argument("--activation", type=str, default="tanh")
     parser.add_argument(
         "--anneal_lr", action=argparse.BooleanOptionalAction, default=True
     )
@@ -697,11 +655,11 @@ if __name__ == "__main__":
     )
     parser.add_argument("--save_policy", action="store_true")
     parser.add_argument("--num_repeats", type=int, default=1)
-    parser.add_argument("--layer_size", type=int, default=2048)
+    parser.add_argument("--layer_size", type=int, default=1024)
     parser.add_argument("--wandb_project", type=str)
     parser.add_argument("--wandb_entity", type=str)
     parser.add_argument(
-        "--use_optimistic_resets", action=argparse.BooleanOptionalAction, default=False
+        "--use_optimistic_resets", action=argparse.BooleanOptionalAction, default=True
     )
     parser.add_argument("--optimistic_reset_ratio", type=int, default=16)
     parser.add_argument("--alpha", type=float, default=0.95)
@@ -711,6 +669,7 @@ if __name__ == "__main__":
     parser.add_argument("--t_wm", type=int, default=20, help="Trajectory length for the TWM.")
     parser.add_argument("--save_buffer", action="store_true", help="Save the final replay buffer to disk.")
     parser.add_argument("--vault_uid", type=str, default=None)
+
 
     args, rest_args = parser.parse_known_args(sys.argv[1:])
     if rest_args:
