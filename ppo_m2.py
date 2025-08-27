@@ -665,7 +665,12 @@ if __name__ == "__main__":
     parser.add_argument("--alpha", type=float, default=0.95)
     parser.add_argument("--rnn_hidden", type=int, default=256)
     parser.add_argument("--use_gru", action=argparse.BooleanOptionalAction, default=True)
-    parser.add_argument("--buffer_size", type=int, default=128000)
+    parser.add_argument(
+        "--buffer_size",
+        type=int,
+        default=1048576,
+        help="Total replay buffer size. Should be at least num_envs * num_steps.",
+    )
     parser.add_argument("--t_wm", type=int, default=20, help="Trajectory length for the TWM.")
     parser.add_argument("--save_buffer", action="store_true", help="Save the final replay buffer to disk.")
     parser.add_argument("--vault_uid", type=str, default=None)
