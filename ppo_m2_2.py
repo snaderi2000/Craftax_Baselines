@@ -98,6 +98,101 @@ class Transition(NamedTuple):
     info: jnp.ndarray
 
 
+# JIT compiled training steps for world model and tokenizer
+@partial(jax.jit) 
+def tokenizer_train_step(state, batch, tokenizer_model): # <-- ADDED tokenizer_model
+    rng, dropout_rng = jax.random.split(state.rng)
+
+    def loss_fn(params):
+        obs_5d = batch['obs'] # Note: 'observations' was renamed to 'obs' in the buffer
+        B, T, H, W, C = obs_5d.shape
+        obs_4d = obs_5d.reshape(B * T, H, W, C)
+        
+        # We need to compute the loss to get the gradients
+        loss, _ = compute_tokenizer_loss(
+            model=tokenizer_model, # <-- USE THE ARGUMENT
+            params=params, 
+            batch={'observations': obs_4d},
+            rngs={'dropout': dropout_rng}
+        )
+        return loss
+
+    loss, grads = jax.value_and_grad(loss_fn)(state.params)
+    state = state.apply_gradients(grads=grads)
+    return state.replace(rng=rng), loss
+
+@partial(jax.jit)
+def twm_train_step(wm_state, tokenizer_params, batch, world_model, tokenizer_model): # <-- ADDED MODELS
+    rng, dropout_rng = jax.random.split(wm_state.rng)
+    
+    def loss_fn(params):
+        # Prepare batch for TWM loss function
+        # This logic should be inside the loss function for purity
+        batch_copy = batch.copy()
+        batch_copy['ends'] = batch_copy.pop('dones')
+        batch_copy['observations'] = batch_copy.pop('obs')
+        batch_copy['mask_padding'] = jnp.ones_like(batch_copy['actions'], dtype=jnp.bool_)
+
+        loss, loss_info = compute_wm_loss(
+            world_model_params=params, 
+            tokenizer_params=tokenizer_params,
+            world_model=world_model,    # <-- USE THE ARGUMENT
+            tokenizer=tokenizer_model, # <-- USE THE ARGUMENT
+            batch=batch_copy, 
+            rngs={'dropout': dropout_rng}
+        )
+        # Log the loss for debugging
+        jax.debug.print("TWM Loss: {x}", x=loss_info['total_loss'])
+        return loss
+    
+    grads = jax.grad(loss_fn)(wm_state.params)
+    new_wm_state = wm_state.apply_gradients(grads=grads)
+    return new_wm_state.replace(rng=rng)
+
+
+
+@partial(jax.jit, static_argnames=("buffer","n_tok_iters", "n_wm_iters"))
+def update_world_model(
+    tok_state, wm_state, buffer_state, rng, 
+    buffer, tokenizer_apply, world_model_apply, 
+    n_tok_iters, n_wm_iters
+):
+    
+    # --- Create partial functions for the loops ---
+    # This pre-fills the static arguments for the training steps
+    tok_step_partial = partial(tokenizer_train_step, tokenizer_model=tokenizer_apply)
+    
+    def sample_and_run_tok(i, carry):
+        tok_state, rng = carry
+        rng, sample_key = jax.random.split(rng)
+        batch = buffer.sample(buffer_state, sample_key).experience
+        tok_state, loss = tok_step_partial(tok_state, batch)
+        # Optional: For debugging, you can print the loss
+        # jax.debug.print("Tok Loss iter {i}: {loss}", i=i, loss=loss)
+        return tok_state, rng
+
+    # --- Phase 1: Update Tokenizer ---
+    tok_state, rng = jax.lax.fori_loop(0, n_tok_iters, sample_and_run_tok, (tok_state, rng))
+
+    frozen_tokenizer_params = jax.lax.stop_gradient(tok_state.params)
+    wm_step_partial = partial(twm_train_step, world_model=world_model, tokenizer_model=tokenizer_apply)
+    
+    def sample_and_run_wm(i, carry):
+        wm_state, rng = carry
+        rng, sample_key = jax.random.split(rng)
+        batch = buffer.sample(buffer_state, sample_key).experience
+        wm_state = wm_step_partial(wm_state, frozen_tokenizer_params, batch)
+        return wm_state, rng
+        
+    # --- Phase 2: Update World Model ---
+    wm_state, rng = jax.lax.fori_loop(0, n_wm_iters, sample_and_run_wm, (wm_state, rng))
+    
+    return tok_state, wm_state, rng
+
+
+
+
+
 def make_train(config):
     config["NUM_UPDATES"] = (
         config["TOTAL_TIMESTEPS"] // config["NUM_STEPS"] // config["NUM_ENVS"]
@@ -197,6 +292,14 @@ def make_train(config):
         dummy_tokens = jnp.zeros((1, config["T_WM"] * (config["TOKENS_PER_OBS"] + 1)), dtype=jnp.int32)
         wm_params = world_model.init(wm_key, dummy_tokens, train=False)['params']
 
+
+        def tokenizer_apply_fn(params, *args, **kwargs):
+            return tokenizer.apply(params, *args, **kwargs)
+
+        # Wrap WorldModel.apply
+        def world_model_apply_fn(params, *args, **kwargs):
+            return world_model.apply(params, *args, **kwargs)
+
         def count_parameters(params):
             flat_params = jax.tree_util.tree_leaves(unfreeze(params))
             return sum(p.size for p in flat_params)
@@ -273,97 +376,12 @@ def make_train(config):
 
 
 
-        # JIT compiled training steps for world model and tokenizer
-        @partial(jax.jit, static_argnames=['tokenizer_model']) 
-        def tokenizer_train_step(state, batch, tokenizer_model): # <-- ADDED tokenizer_model
-            rng, dropout_rng = jax.random.split(state.rng)
 
-            def loss_fn(params):
-                obs_5d = batch['obs'] # Note: 'observations' was renamed to 'obs' in the buffer
-                B, T, H, W, C = obs_5d.shape
-                obs_4d = obs_5d.reshape(B * T, H, W, C)
-                
-                # We need to compute the loss to get the gradients
-                loss, _ = compute_tokenizer_loss(
-                    model=tokenizer_model, # <-- USE THE ARGUMENT
-                    params=params, 
-                    batch={'observations': obs_4d},
-                    rngs={'dropout': dropout_rng}
-                )
-                return loss
+            
 
-            # We only need the gradients, so we can use jax.grad
-            grads = jax.grad(loss_fn)(state.params)
-            state = state.apply_gradients(grads=grads)
-            return state.replace(rng=rng)
 
-        @partial(jax.jit, static_argnames=['world_model', 'tokenizer_model'])
-        def twm_train_step(wm_state, tokenizer_params, batch, world_model, tokenizer_model): # <-- ADDED MODELS
-            rng, dropout_rng = jax.random.split(wm_state.rng)
             
-            def loss_fn(params):
-                # Prepare batch for TWM loss function
-                # This logic should be inside the loss function for purity
-                batch_copy = batch.copy()
-                batch_copy['ends'] = batch_copy.pop('dones')
-                batch_copy['observations'] = batch_copy.pop('obs')
-                batch_copy['mask_padding'] = jnp.ones_like(batch_copy['actions'], dtype=jnp.bool_)
 
-                loss, loss_info = compute_wm_loss(
-                    world_model_params=params, 
-                    tokenizer_params=tokenizer_params,
-                    world_model=world_model,    # <-- USE THE ARGUMENT
-                    tokenizer=tokenizer_model, # <-- USE THE ARGUMENT
-                    batch=batch_copy, 
-                    rngs={'dropout': dropout_rng}
-                )
-                # Log the loss for debugging
-                jax.debug.print("TWM Loss: {x}", x=loss_info['total_loss'])
-                return loss
-            
-            grads = jax.grad(loss_fn)(wm_state.params)
-            new_wm_state = wm_state.apply_gradients(grads=grads)
-            return new_wm_state.replace(rng=rng)
-            
-        @partial(jax.jit, static_argnames=['buffer', 'tokenizer', 'world_model'])
-        def update_world_model(tok_state, wm_state, buffer_state, rng, buffer, tokenizer, world_model):
-            """
-            Samples data from the buffer and trains the tokenizer and TWM.
-            """
-            # --- Phase 1: Update Tokenizer ---
-            def train_tok_body_fn(i, state):
-                tok_state, rng = state
-                rng, sample_key = jax.random.split(rng)
-                
-                # Sample a batch of trajectories from the live buffer
-                batch = buffer.sample(buffer_state, sample_key).experience
-                
-                # Perform one gradient update step
-                tok_state = tokenizer_train_step(tok_state, batch, tokenizer)
-                return tok_state, rng
-
-            # Run the tokenizer training loop
-            tok_state, rng = jax.lax.fori_loop(0, config["N_TOK_ITERS"], train_tok_body_fn, (tok_state, rng))
-            
-            # Freeze tokenizer params for TWM training
-            frozen_tokenizer_params = jax.lax.stop_gradient(tok_state.params)
-
-            # --- Phase 2: Update World Model ---
-            def train_wm_body_fn(i, state):
-                wm_state, rng = state
-                rng, sample_key = jax.random.split(rng)
-                
-                # Sample a new batch of trajectories
-                batch = buffer.sample(buffer_state, sample_key).experience
-                
-                # Perform one gradient update step
-                wm_state = twm_train_step(wm_state, frozen_tokenizer_params, batch, world_model, tokenizer)
-                return wm_state, rng
-            
-            # Run the world model training loop
-            wm_state, rng = jax.lax.fori_loop(0, config["N_WM_ITERS"], train_wm_body_fn, (wm_state, rng))
-            
-            return tok_state, wm_state, rng
 
 
         # INIT ENV
@@ -689,8 +707,10 @@ def make_train(config):
                 buffer_state, 
                 rng,
                 buffer,      # Pass the buffer object
-                tokenizer,   # Pass the tokenizer model object
-                world_model  # Pass the world_model object
+                tokenizer_apply_fn,   # Pass the tokenizer model object
+                world_model_apply_fn,  # Pass the world_model object
+                n_tok_iters=config["N_TOK_ITERS"],
+                n_wm_iters=config["N_WM_ITERS"]
             )
 
             # wandb logging

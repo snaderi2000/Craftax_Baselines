@@ -8,7 +8,7 @@ from typing import Optional, Tuple, List
 from functools import partial
 
 # Import the functional KV cache structures and functions
-from kv_caching import KVCacheState, create_keys_values, update_kv_cache
+from .kv_caching import KVCacheState, create_keys_values, update_kv_cache
 
 # --- Configuration ---
 

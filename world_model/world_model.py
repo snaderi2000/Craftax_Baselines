@@ -7,9 +7,9 @@ from einops import rearrange
 from typing import Any, List, Optional, Tuple
 
 # Import modules directly
-from tokenizer import Tokenizer
-from transformer import Transformer, TransformerConfig
-from kv_caching import KVCacheState
+from .tokenizer import Tokenizer
+from .transformer import Transformer, TransformerConfig
+from .kv_caching import KVCacheState
 
 @dataclass
 class WorldModelOutput:
