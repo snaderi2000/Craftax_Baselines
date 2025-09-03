@@ -373,6 +373,7 @@ def make_train(config):
         
         
               # TRAIN LOOP
+        @jax.jit
         def _update_step(runner_state, unused):
             # COLLECT TRAJECTORIES
             print(">>> JAX: EXECUTING a compiled training step.")
@@ -605,7 +606,7 @@ def make_train(config):
                         advantages,
                         targets_std,
                     )
-                    #jax.debug.print("value_loss={:.3f}", value_loss)
+                    jax.debug.print("value_loss={:.3f}", value_loss)
                     
                     train_state = train_state.apply_gradients(grads=grads)
                     train_state = train_state.replace(batch_stats=new_batch_stats, q_mean=q_mean_new, q_var=q_var_new)
@@ -683,13 +684,13 @@ def make_train(config):
             #rng = update_state[-1]
 
             # Update the world model and tokenizer using data from the buffer
-            tokenizer_state, wm_state, rng = update_world_model(
-                tokenizer_state, 
-                wm_state, 
-                buffer_state, 
-                rng,   
-                buffer
-            )
+            # tokenizer_state, wm_state, rng = update_world_model(
+            #     tokenizer_state, 
+            #     wm_state, 
+            #     buffer_state, 
+            #     rng,   
+            #     buffer
+            # )
 
             # wandb logging
             if config["DEBUG"] and config["USE_WANDB"]:
@@ -713,9 +714,34 @@ def make_train(config):
         # Add buffer_state to the runner_state tuple
         runner_state = (train_state, tokenizer_state, wm_state, env_state, obsv, rng, 0, h0, buffer_state)
 
-        runner_state, metric = jax.lax.scan(
-            _update_step, runner_state, None, config["NUM_UPDATES"]
-        )
+        # runner_state, metric = jax.lax.scan(
+        #     _update_step, runner_state, None, config["NUM_UPDATES"]
+        # )
+
+        # The main training loop
+        print(">>> Starting training loop...")
+        for update_num in range(1, config["NUM_UPDATES"] + 1):
+            
+            # === Part 1: PPO Update on Real Data ===
+            print(f"--- Step {update_num}: Running PPO Update ---")
+            # This calls your modified _update_step (now PPO-only)
+            runner_state, metric = _update_step(runner_state, None) 
+
+            # === Part 2: World Model Update ===
+            print(f"--- Step {update_num}: Running World Model Update ---")
+            
+            # Unpack the states needed for the world model update
+            train_state, tokenizer_state, wm_state, env_state, last_obs, rng, update_step_count, h, buffer_state = runner_state
+            
+            # Call the JIT'd world model update function
+            tokenizer_state, wm_state, rng = update_world_model(
+                tokenizer_state, wm_state, buffer_state, rng, buffer
+            )
+            
+            # Re-assemble the runner_state for the next iteration
+            runner_state = (train_state, tokenizer_state, wm_state, env_state, last_obs, rng, update_step_count, h, buffer_state)
+
+
         return {"runner_state": runner_state}  # , "info": metric}
 
     return train
@@ -737,8 +763,11 @@ def run_ppo(config):
     rng = jax.random.PRNGKey(config["SEED"])
     rngs = jax.random.split(rng, config["NUM_REPEATS"])
 
-    train_jit = jax.jit(make_train(config))
-    train_vmap = jax.vmap(train_jit)
+    # train_jit = jax.jit(make_train(config))
+    # train_vmap = jax.vmap(train_jit)
+
+    train = make_train(config)
+    train_vmap = jax.vmap(train)
 
     print("\n>>> PYTHON: About to call the JIT-compiled function. The long pause is the one-time compilation.")
     t0 = time.time()
