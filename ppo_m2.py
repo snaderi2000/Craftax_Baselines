@@ -291,7 +291,7 @@ def make_train(config):
                     rngs={'dropout': dropout_rng}
                 )
                 return loss_object.total_loss
-
+            #jax.debug.print("Tokenizer loss: {x}", x=loss_object.total_loss)      
             # We only need the gradients, so we can use jax.grad
             grads = jax.grad(loss_fn)(state.params)
             state = state.apply_gradients(grads=grads)
