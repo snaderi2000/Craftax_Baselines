@@ -57,25 +57,24 @@ def batch_log(update_step, log, config):
 
     if len(batch_logs[update_step]) == config["NUM_REPEATS"]:
         agg_logs = {}
-        for key in batch_logs[update_step][0]:
+        # unified logs: collect keys from the first record
+        all_keys = list(batch_logs[update_step][0].keys())
+        for key in all_keys:
             agg = []
             if key in ["goal_heatmap"]:
-                agg = [batch_logs[update_step][0][key]]
+                agg = [batch_logs[update_step][0].get(key)]
             else:
                 for i in range(config["NUM_REPEATS"]):
-                    val = batch_logs[update_step][i][key]
-                    if not jnp.isnan(val):
+                    val = batch_logs[update_step][i].get(key)
+                    if val is not None and not (isinstance(val, float) and np.isnan(val)):
                         agg.append(val)
 
             if len(agg) > 0:
                 if key in [
                     "episode_length",
                     "episode_return",
-                    "exploration_bonus",
-                    "e_mean",
-                    "e_std",
-                    "rnd_loss",
                     "score",
+                    "wm/loss_total",
                 ]:
                     agg_logs[key] = np.mean(agg)
                 else:
@@ -95,3 +94,8 @@ def batch_log(update_step, log, config):
                 agg_logs["sps"] = sps
 
         wandb.log(agg_logs)
+        # free memory for this step
+        del batch_logs[update_step]
+
+
+# removed log_wm_loss; unified logging handles wm/loss_total
