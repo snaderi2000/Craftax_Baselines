@@ -283,19 +283,23 @@ def make_train(config):
                 B, T, H, W, C = obs_5d.shape
                 obs_4d = obs_5d.reshape(B * T, H, W, C)
                 
-                # We need to compute the loss to get the gradients
+                # Compute full loss object to extract components
                 loss_object = compute_tokenizer_loss(
-                    model=tokenizer, # <-- USE THE ARGUMENT
+                    model=tokenizer,
                     params=params, 
                     batch={'observations': obs_4d},
                     rngs={'dropout': dropout_rng}
                 )
-                return loss_object.total_loss
-            #jax.debug.print("Tokenizer loss: {x}", x=loss_object.total_loss)      
-            # Use value_and_grad to keep loss on-device and enable remat if needed
-            grads = jax.grad(loss_fn)(state.params)
+                aux = (
+                    loss_object.total_loss,
+                    loss_object.reconstruction_loss,
+                    loss_object.codebook_loss,
+                    loss_object.commitment_loss,
+                )
+                return loss_object.total_loss, aux
+            (loss_val, aux), grads = jax.value_and_grad(loss_fn, has_aux=True)(state.params)
             state = state.apply_gradients(grads=grads)
-            return state.replace(rng=rng)
+            return state.replace(rng=rng), aux
 
         @jax.jit
         def twm_train_step(wm_state, tokenizer_params, batch): 
@@ -332,18 +336,21 @@ def make_train(config):
             """
             # --- Phase 1: Update Tokenizer ---
             def train_tok_body_fn(i, state):
-                tok_state, rng = state
+                tok_state, rng, loss_sum = state
                 rng, sample_key = jax.random.split(rng)
                 
                 # Sample a batch of trajectories from the live buffer
                 batch = buffer.sample(buffer_state, sample_key).experience
                 
                 # Perform one gradient update step
-                tok_state = tokenizer_train_step(tok_state, batch)
-                return tok_state, rng
+                tok_state, losses = tokenizer_train_step(tok_state, batch)
+                loss_sum = loss_sum + jnp.array(losses)
+                return tok_state, rng, loss_sum
 
-            # Run the tokenizer training loop
-            tok_state, rng = jax.lax.fori_loop(0, config["N_TOK_ITERS"], train_tok_body_fn, (tok_state, rng))
+            # Run the tokenizer training loop and compute mean losses (total, rec, codebook, commitment)
+            tok_init = (tok_state, rng, jnp.zeros((4,), dtype=jnp.float32))
+            tok_state, rng, tok_loss_sum = jax.lax.fori_loop(0, config["N_TOK_ITERS"], train_tok_body_fn, tok_init)
+            tok_loss_mean = tok_loss_sum / jnp.maximum(1, config["N_TOK_ITERS"])
             
             # Freeze tokenizer params for TWM training
             frozen_tokenizer_params = jax.lax.stop_gradient(tok_state.params)
@@ -366,7 +373,7 @@ def make_train(config):
             wm_state, rng, wm_loss_sum = jax.lax.fori_loop(0, config["N_WM_ITERS"], train_wm_body_fn, init_state)
             wm_loss_mean = wm_loss_sum / jnp.maximum(1, config["N_WM_ITERS"])
             
-            return tok_state, wm_state, rng, wm_loss_mean
+            return tok_state, wm_state, rng, tok_loss_mean, wm_loss_mean
 
 
         # INIT ENV
@@ -998,7 +1005,7 @@ def make_train(config):
             train_state, tokenizer_state, wm_state, env_state, last_obs, rng, update_step_count, h, buffer_state = runner_state
             
             # Call the JIT'd world model update function
-            tokenizer_state, wm_state, rng, wm_loss_mean = update_world_model(
+            tokenizer_state, wm_state, rng, tok_loss_mean, wm_loss_mean = update_world_model(
                 tokenizer_state, wm_state, buffer_state, rng, buffer
             )
              
@@ -1016,15 +1023,23 @@ def make_train(config):
                 )
             # === Part 4: Unified logging via a single host callback ===
             if config["DEBUG"] and config["USE_WANDB"]:
-                def unified_log_callback(metric_host, wm_loss_host, step_host):
+                def unified_log_callback(metric_host, tok_losses_host, wm_loss_host, step_host):
                     import numpy as np
                     step_scalar = int(np.asarray(step_host).reshape(-1)[0])
                     to_log = create_log_dict(metric_host, config)
+                    # tokenizer losses: (total, rec, codebook, commitment)
+                    tok_losses = np.asarray(tok_losses_host)
+                    if tok_losses.shape[0] == 4:
+                        to_log["tokenizer/loss_total"] = float(tok_losses[0])
+                        to_log["tokenizer/reconstruction_loss"] = float(tok_losses[1])
+                        to_log["tokenizer/codebook_loss"] = float(tok_losses[2])
+                        to_log["tokenizer/commitment_loss"] = float(tok_losses[3])
                     to_log["wm/loss_total"] = float(np.asarray(wm_loss_host))
                     batch_log(step_scalar, to_log, config)
                 jax.debug.callback(
                     unified_log_callback,
                     metric,
+                    tok_loss_mean,
                     wm_loss_mean,
                     update_step_count,
                 )
