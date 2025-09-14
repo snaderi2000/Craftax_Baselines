@@ -275,27 +275,36 @@ def make_train(config):
 
         # JIT compiled training steps for world model and tokenizer
         @jax.jit
-        def tokenizer_train_step(state, batch): 
+        def tokenizer_train_step(state, batch):
+
             rng, dropout_rng = jax.random.split(state.rng)
 
             def loss_fn(params):
-                obs_5d = batch['obs'] # Note: 'observations' was renamed to 'obs' in the buffer
+                obs_5d = batch['obs'] / 255.0
                 B, T, H, W, C = obs_5d.shape
                 obs_4d = obs_5d.reshape(B * T, H, W, C)
                 
-                # Compute full loss object to extract components
+                # --- 💡 FIX: Replicate the logic from train.py exactly ---
+                training_batch = batch.copy()
+                # Rename 'obs' to 'observations' for the loss function
+                training_batch['observations'] = training_batch.pop('obs') 
+                # Replace the 5D obs with the reshaped 4D obs
+                training_batch['observations'] = obs_4d
+
                 loss_object = compute_tokenizer_loss(
                     model=tokenizer,
                     params=params, 
-                    batch={'observations': obs_4d},
+                    batch=training_batch, # Pass the full, modified batch
                     rngs={'dropout': dropout_rng}
                 )
+
                 aux = (
                     loss_object.total_loss,
                     loss_object.reconstruction_loss,
                     loss_object.codebook_loss,
                     loss_object.commitment_loss,
                 )
+                jax.debug.print("Tokenizer Loss: {x}", x=loss_object.total_loss)
                 return loss_object.total_loss, aux
             (loss_val, aux), grads = jax.value_and_grad(loss_fn, has_aux=True)(state.params)
             state = state.apply_gradients(grads=grads)
@@ -329,8 +338,8 @@ def make_train(config):
             new_wm_state = wm_state.apply_gradients(grads=grads)
             return new_wm_state.replace(rng=rng), loss_val
             
-        @partial(jax.jit, static_argnames=['buffer'])
-        def update_world_model(tok_state, wm_state, buffer_state, rng, buffer):
+        @partial(jax.jit, static_argnames=['buffer', 'n_tok_iters', 'n_wm_iters'])
+        def update_world_model(n_tok_iters,n_wm_iters,tok_state, wm_state, buffer_state, rng, buffer):
             """
             Samples data from the buffer and trains the tokenizer and TWM.
             """
@@ -349,8 +358,8 @@ def make_train(config):
 
             # Run the tokenizer training loop and compute mean losses (total, rec, codebook, commitment)
             tok_init = (tok_state, rng, jnp.zeros((4,), dtype=jnp.float32))
-            tok_state, rng, tok_loss_sum = jax.lax.fori_loop(0, config["N_TOK_ITERS"], train_tok_body_fn, tok_init)
-            tok_loss_mean = tok_loss_sum / jnp.maximum(1, config["N_TOK_ITERS"])
+            tok_state, rng, tok_loss_sum = jax.lax.fori_loop(0, n_tok_iters, train_tok_body_fn, tok_init)
+            tok_loss_mean = tok_loss_sum / jnp.maximum(1, n_tok_iters)
             
             # Freeze tokenizer params for TWM training
             frozen_tokenizer_params = jax.lax.stop_gradient(tok_state.params)
@@ -370,8 +379,8 @@ def make_train(config):
             
             # Run the world model training loop and compute mean loss
             init_state = (wm_state, rng, jnp.array(0.0, dtype=jnp.float32))
-            wm_state, rng, wm_loss_sum = jax.lax.fori_loop(0, config["N_WM_ITERS"], train_wm_body_fn, init_state)
-            wm_loss_mean = wm_loss_sum / jnp.maximum(1, config["N_WM_ITERS"])
+            wm_state, rng, wm_loss_sum = jax.lax.fori_loop(0, n_wm_iters, train_wm_body_fn, init_state)
+            wm_loss_mean = wm_loss_sum / jnp.maximum(1, n_wm_iters)
             
             return tok_state, wm_state, rng, tok_loss_mean, wm_loss_mean
 
@@ -683,6 +692,8 @@ def make_train(config):
             )
 
             train_state = update_state[0]
+            # mean value loss across epochs and minibatches
+            value_loss_mean_real = jnp.mean(loss_info[1])
             metric = jax.tree.map(
                 lambda x: (x * traj_batch.info["returned_episode"]).sum()
                 / traj_batch.info["returned_episode"].sum(),
@@ -717,7 +728,7 @@ def make_train(config):
 
 
             runner_state = (train_state, tokenizer_state, wm_state, env_state, last_obs, rng, update_step + 1, h, buffer_state)
-            return runner_state, metric
+            return runner_state, metric, value_loss_mean_real
 
         @partial(jax.jit, static_argnames=['buffer'])
         def rollout_imagined_trajectories(train_state, tokenizer_params, wm_params, buffer_state, rng, buffer):
@@ -972,7 +983,8 @@ def make_train(config):
             update_state, loss_info = jax.lax.scan(
                 _update_epoch, update_state, None, config.get("IMAG_UPDATE_EPOCHS", 1)
             )
-            return update_state[0], update_state[-1]
+            imag_value_loss_mean = jnp.mean(loss_info[1])
+            return update_state[0], update_state[-1], imag_value_loss_mean
 
         rng, _rng = jax.random.split(rng)
 
@@ -985,6 +997,9 @@ def make_train(config):
         # )
 
         # The main training loop
+
+
+        SAVE_INTERVAL = 50 
         print(">>> Starting training loop...")
         for update_num in range(1, config["NUM_UPDATES"] + 1):
             
@@ -992,13 +1007,16 @@ def make_train(config):
             if update_num == 1:
                 total_env_steps = 0
             
-            # === Part 1: PPO Update on Real Data ===
-            print(f"--- Step {int(update_num)}: Running PPO Update (real env data) ---")
+            # === Part 1 and 2: PPO Update on Real Data ===
+           # print(f"--- Step {int(update_num)}: Running PPO Update (real env data) ---")
             # This calls your modified _update_step (now PPO-only)
-            runner_state, metric = _update_step(runner_state, None) 
+            runner_state, metric, value_loss_mean_real = _update_step(runner_state, None) 
+
+
+            update_step_count = runner_state[6]
             total_env_steps += config["NUM_ENVS"] * config["NUM_STEPS"]
 
-            # === Part 2: World Model Update ===
+            # === Part 3: World Model Update ===
             print(f"--- Step {int(update_num)}: Running World Model Update ---")
             
             # Unpack the states needed for the world model update
@@ -1006,25 +1024,31 @@ def make_train(config):
             
             # Call the JIT'd world model update function
             tokenizer_state, wm_state, rng, tok_loss_mean, wm_loss_mean = update_world_model(
-                tokenizer_state, wm_state, buffer_state, rng, buffer
+                config["N_TOK_ITERS"],config["N_WM_ITERS"],tokenizer_state, wm_state, buffer_state, rng, buffer
             )
              
             # Re-assemble the runner_state for the next iteration
             runner_state = (train_state, tokenizer_state, wm_state, env_state, last_obs, rng, update_step_count, h, buffer_state)
 
-            # === Part 3: PPO Update on Imagined Data (M2) ===
+            # default when imagined PPO doesn't run
+            value_loss_mean_imag = jnp.array(np.nan, dtype=jnp.float32)
+            print("HI") 
+
+            #tok_loss_mean = jnp.full((4,), np.nan, dtype=jnp.float32)
+            #wm_loss_mean = jnp.array(np.nan, dtype=jnp.float32)
+            print("test")   
+            # === Part 4: PPO Update on Imagined Data (M2) ===
             if config.get("USE_IMAGINED_UPDATES", False) and (total_env_steps >= config["T_BP"]):
                 print(f"--- Step {int(update_num)}: Running PPO Update (imagined data) ---")
                 imagined_traj_batch, train_state, rng = rollout_imagined_trajectories(
                     train_state, tokenizer_state.params, wm_state.params, buffer_state, rng, buffer
                 )
-                train_state, rng = update_on_imagined_trajectories(
+                train_state, rng, value_loss_mean_imag = update_on_imagined_trajectories(
                     train_state, imagined_traj_batch, rng
                 )
-            # === Part 4: Unified logging via a single host callback ===
+            # === Part 5: Unified logging via a single host callback ===
             if config["DEBUG"] and config["USE_WANDB"]:
-                def unified_log_callback(metric_host, tok_losses_host, wm_loss_host, step_host):
-                    import numpy as np
+                def unified_log_callback(metric_host, tok_losses_host, wm_loss_host, val_loss_real_host, val_loss_imag_host, step_host):
                     step_scalar = int(np.asarray(step_host).reshape(-1)[0])
                     to_log = create_log_dict(metric_host, config)
                     # tokenizer losses: (total, rec, codebook, commitment)
@@ -1035,12 +1059,18 @@ def make_train(config):
                         to_log["tokenizer/codebook_loss"] = float(tok_losses[2])
                         to_log["tokenizer/commitment_loss"] = float(tok_losses[3])
                     to_log["wm/loss_total"] = float(np.asarray(wm_loss_host))
+                    to_log["ppo/value_loss_real"] = float(np.asarray(val_loss_real_host))
+                    v_im = float(np.asarray(val_loss_imag_host))
+                    if not np.isnan(v_im):
+                        to_log["ppo/value_loss_imag"] = v_im
                     batch_log(step_scalar, to_log, config)
                 jax.debug.callback(
                     unified_log_callback,
                     metric,
                     tok_loss_mean,
                     wm_loss_mean,
+                    value_loss_mean_real,
+                    value_loss_mean_imag,
                     update_step_count,
                 )
                 # Re-assemble runner_state with updated train_state and rng
@@ -1055,6 +1085,54 @@ def make_train(config):
                     h,
                     buffer_state,
                 )
+
+            # logging for runs without world model
+            # if config["DEBUG"] and config["USE_WANDB"]:
+            #     def env_log_callback(metric_host, val_loss_host, step_host):
+            #         import numpy as np
+            #         step_scalar = int(np.asarray(step_host).reshape(-1)[0])
+            #         to_log = create_log_dict(metric_host, config)
+            #         to_log["ppo/value_loss"] = float(np.asarray(val_loss_host))
+            #         batch_log(step_scalar, to_log, config)
+            #     jax.debug.callback(
+            #         env_log_callback,
+            #         metric,
+            #         value_loss_mean_real,
+            #         update_step_count,
+            #     )
+
+            # Periodically save the models
+            if (update_num % SAVE_INTERVAL == 0) or (update_num == config["NUM_UPDATES"]):
+                print(f"--- Step {update_num}: Saving model checkpoints ---")
+                
+                # Unpack the states from the runner_state
+                (train_state,
+                tokenizer_state,
+                wm_state,
+                env_state,
+                last_obs,
+                rng,
+                update_step_count,
+                h,
+                buffer_state,
+                ) = runner_state
+
+                # Use Orbax to save each state to a separate directory
+                # (This reuses the same logic as your _save_network function)
+                orbax_checkpointer = PyTreeCheckpointer()
+                
+                # Save Tokenizer
+                tok_path = os.path.join(wandb.run.dir, "tokenizer_checkpoints", f"update_{update_num}")
+                orbax_checkpointer.save(tok_path, tokenizer_state)
+
+                # Save World Model
+                wm_path = os.path.join(wandb.run.dir, "wm_checkpoints", f"update_{update_num}")
+                orbax_checkpointer.save(wm_path, wm_state)
+
+                # Save Policy (Actor-Critic)
+                ac_path = os.path.join(wandb.run.dir, "policy_checkpoints", f"update_{update_num}")
+                orbax_checkpointer.save(ac_path, train_state)
+
 
 
         return {"runner_state": runner_state}  # , "info": metric}
@@ -1081,12 +1159,21 @@ def run_ppo(config):
     # train_jit = jax.jit(make_train(config))
     # train_vmap = jax.vmap(train_jit)
 
-    train = make_train(config)
-    train_vmap = jax.vmap(train)
+    # train = make_train(config)
+    # train_vmap = jax.vmap(train)
+
+
+    train_fn = make_train(config)
 
     print("\n>>> PYTHON: About to call the JIT-compiled function. The long pause is the one-time compilation.")
     t0 = time.time()
-    out = train_vmap(rngs)
+    #out = train_vmap(rngs)
+    all_outputs = []
+    for i, run_rng in enumerate(rngs):
+        print(f"\n>>> Starting training run {i+1}/{config['NUM_REPEATS']}...")
+        # `out` will be updated with the result of the LAST run
+        out = train_fn(run_rng)
+        all_outputs.append(out)
     t1 = time.time()
     print("Time to run experiment", t1 - t0)
     print("SPS: ", config["TOTAL_TIMESTEPS"] / (t1 - t0))
@@ -1114,7 +1201,7 @@ def run_ppo(config):
     if config["SAVE_BUFFER"]:
         print("\n--- Saving Final Replay Buffer ---")
 
-        final_runner_state = jax.tree.map(lambda x: x[0], out["runner_state"])
+        final_runner_state = out["runner_state"] #jax.tree.map(lambda x: x[0], out["runner_state"])
         final_buffer_state = final_runner_state[-1]
 
         # Use a stable UID you control (CLI arg or timestamp). Example:
@@ -1198,6 +1285,7 @@ if __name__ == "__main__":
     parser.add_argument("--wm_batch_size", type=int, default=16, help="Batch size sampled from replay for WM/tokenizer training.")
     parser.add_argument("--use_imagined_updates", action=argparse.BooleanOptionalAction, default=False, help="Enable PPO updates on imagined trajectories (M2).")
     parser.add_argument("--t_bp", type=int, default=0, help="Warmup env steps before enabling imagined PPO updates.")
+    parser.add_argument("--imag_update_epochs", type=int, default=1)
 
 
 

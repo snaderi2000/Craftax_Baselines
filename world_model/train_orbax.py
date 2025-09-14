@@ -1,12 +1,14 @@
-# train.py
+# train.py (Modified to save with Orbax)
 
 import jax
 import jax.numpy as jnp
 import optax
 from flax.training import train_state
-from flax import serialization
 from functools import partial
 import os
+
+# --- 💡 ADDED IMPORT 💡 ---
+from orbax.checkpoint import PyTreeCheckpointer
 
 # Import all our modules and the data loader
 from .sample import make_replay_samplers
@@ -29,19 +31,12 @@ def create_train_state(module, params, learning_rate, rng):
     )
 
 def main():
-    print("🚀 Starting full training process (Algorithm 5)...")
-    TOKENIZER_CHECKPOINT = "./trained_models/tokenizer_params_32_25k.msgpack"
-    WM_CHECKPOINT = "./trained_models/world_model_params_32_25k.msgpack"
-
+    print("🚀 Starting full training process...")
+    
     # --- 1. Hyperparameters ---
     VAULT_UID = "chilla"
-    RESUME_TRAINING = True # Set to True to load a checkpoint
-    MODEL_VERSION = "_2" # The suffix of the model you want to resume, e.g., "_2", "_3"
-    # NT = f"./trained_models/tokenizer_params{MODEL_VERSION}.msgpack"
-    # WM_CHECKPOINT = f"./trained_models/world_model_params{MODEL_VERSION}.msgpack"TOKENIZER_CHECKPOI
-
     
-    # Training loop settings from the paper
+    # Training loop settings
     N_ITERS_TOK = 3000
     N_ITERS_TWM = 3000
     
@@ -90,27 +85,7 @@ def main():
     wm_state = create_train_state(world_model, wm_params, LEARNING_RATE, wm_init_key)
     
     print("✅ Models initialized.")
-    if RESUME_TRAINING:
-        print(f"🔄 Resuming training from checkpoints with version '{MODEL_VERSION}'...")
-        try:
-            # Load Tokenizer parameters
-            with open(TOKENIZER_CHECKPOINT, "rb") as f:
-                tok_bytes = f.read()
-                # Use the existing state to provide the structure for the loaded params
-                loaded_tok_params = serialization.from_bytes(tokenizer_state.params, tok_bytes)
-                # Replace the random params with the loaded ones
-                tokenizer_state = tokenizer_state.replace(params=loaded_tok_params)
-
-            # Load World Model parameters
-            with open(WM_CHECKPOINT, "rb") as f:
-                wm_bytes = f.read()
-                loaded_wm_params = serialization.from_bytes(wm_state.params, wm_bytes)
-                wm_state = wm_state.replace(params=loaded_wm_params)
-
-            print(f"✅ Successfully loaded parameters.")
-        except FileNotFoundError:
-            print(f"⚠️ Checkpoint files not found. Starting training from scratch.")
-
+    # (Removed the legacy resume logic for simplicity)
 
     # --- 4. Define JIT-compiled Training Steps ---
     @jax.jit
@@ -118,42 +93,29 @@ def main():
         rng, dropout_rng = jax.random.split(state.rng)
 
         def loss_fn(params):
-            # --- START of CHANGE ---
-            # The batch has 5D observations: (B, T, H, W, C)
             obs_5d = batch['observations']
             B, T, H, W, C = obs_5d.shape
-
-            # The Tokenizer's CNN expects a 4D batch of images: (B*T, H, W, C)
             obs_4d = obs_5d.reshape(B * T, H, W, C)
-
-            # Create a new batch dictionary with the reshaped data
             training_batch = batch.copy()
             training_batch['observations'] = obs_4d
-            # --- END of CHANGE ---
-
+            
             loss_info = compute_tokenizer_loss(
                 model=tokenizer, 
                 params=params, 
-                batch=training_batch, # Use the new batch with reshaped data
+                batch=training_batch,
                 rngs={'dropout': dropout_rng}
             )
-
-
-
-
             aux_losses = (
                 loss_info.total_loss,
                 loss_info.reconstruction_loss,
                 loss_info.codebook_loss,
                 loss_info.commitment_loss,
             )
-
             return loss_info.total_loss, aux_losses
 
         (loss, losses_tuple), grads = jax.value_and_grad(loss_fn, has_aux=True)(state.params)
         state = state.apply_gradients(grads=grads)
         return state.replace(rng=rng), losses_tuple
-
 
     @jax.jit
     def twm_train_step(wm_state, tokenizer_params, batch):
@@ -171,19 +133,18 @@ def main():
         new_wm_state = wm_state.apply_gradients(grads=grads)
         return new_wm_state.replace(rng=rng), loss_info
 
-    # --- 5. Run Training Loops (Algorithm 5) ---
+    # --- 5. Run Training Loops ---
     main_rng = jax.random.PRNGKey(42)
 
     print("\n--- Phase 1: Updating Tokenizer ---")
     for i in range(N_ITERS_TOK):
         main_rng, sample_key = jax.random.split(main_rng)
         batch = sample_train(sample_key)
-        batch['observations'] = batch.pop('obs') # Rename for consistency
+        batch['observations'] = batch.pop('obs')
 
         tokenizer_state, tok_losses = tokenizer_train_step(tokenizer_state, batch)
         
         if (i + 1) % 50 == 0:
-            #print(f"Tokenizer training step {i+1}/{N_ITERS_TOK} | Loss: {tok_loss:.4f}")
             total, recon, codebook, commit = tok_losses
             print(
                 f"Step {i+1}/{N_ITERS_TOK} | "
@@ -193,12 +154,6 @@ def main():
                 f"Commit: {commit:.4f}"
             )
 
-
-
-
-
-
-
     print("\n--- Phase 2: Updating Transformer World Model ---")
     frozen_tokenizer_params = jax.lax.stop_gradient(tokenizer_state.params)
     
@@ -206,7 +161,6 @@ def main():
         main_rng, sample_key = jax.random.split(main_rng)
         batch = sample_train(sample_key)
         
-        # Prepare batch for TWM loss function
         batch['ends'] = batch.pop('dones')
         batch['observations'] = batch.pop('obs')
         batch['mask_padding'] = jnp.ones_like(batch['actions'], dtype=jnp.bool_)
@@ -216,22 +170,27 @@ def main():
         if (i + 1) % 50 == 0:
             print(f"TWM training step {i+1}/{N_ITERS_TWM} | Total Loss: {loss_info.total_loss:.4f} | Obs Loss: {loss_info.loss_obs:.4f}")
 
-    # --- 6. Save the Final Model Parameters ---
-    print("\n💾 Saving trained model parameters...")
-    model_dir = "./trained_models"
-    os.makedirs(model_dir, exist_ok=True)
-    
-    # Save tokenizer
-    tok_bytes = serialization.to_bytes(tokenizer_state.params)
-    with open(os.path.join(model_dir, "tokenizer_params_32_35k.msgpack"), "wb") as f:
-        f.write(tok_bytes)
-        
-    # Save world model
-    wm_bytes = serialization.to_bytes(wm_state.params)
-    with open(os.path.join(model_dir, "world_model_params_32_35k.msgpack"), "wb") as f:
-        f.write(wm_bytes)
 
-    print("\n✅ Training script finished.")
+    # --- 6. Save the Final Model Parameters with Orbax ---
+    print("\n💾 Saving trained models with Orbax...")
+    model_dir = "./trained_models_orbax"
+    os.makedirs(model_dir, exist_ok=True)
+
+    # Convert the relative path to an absolute path
+    abs_model_dir = os.path.abspath(model_dir)
+
+    orbax_checkpointer = PyTreeCheckpointer()
+
+    # Save tokenizer state using the absolute path
+    tok_path = os.path.join(abs_model_dir, "tokenizer")
+    orbax_checkpointer.save(tok_path, tokenizer_state)
+
+    # Save world model state using the absolute path
+    wm_path = os.path.join(abs_model_dir, "world_model")
+    orbax_checkpointer.save(wm_path, wm_state)
+
+    print(f"\n✅ Training script finished. Models saved to {abs_model_dir}")		
+
 
 if __name__ == "__main__":
     main()

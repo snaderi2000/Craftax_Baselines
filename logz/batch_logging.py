@@ -75,6 +75,8 @@ def batch_log(update_step, log, config):
                     "episode_return",
                     "score",
                     "wm/loss_total",
+                    "ppo/value_loss_real",
+                    "ppo/value_loss_imag",
                 ]:
                     agg_logs[key] = np.mean(agg)
                 else:
