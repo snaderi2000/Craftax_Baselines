@@ -55,7 +55,8 @@ class SelfAttention(nn.Module):
         new_kv_cache = None
         current_seq_len = 0
         if kv_cache is not None:
-            current_seq_len = kv_cache.k.size
+            #current_seq_len = kv_cache.k.size
+            current_seq_len = kv_cache.k.data.shape[2]
             new_kv_cache = update_kv_cache(kv_cache, k, v)
             k, v = new_kv_cache.k.data, new_kv_cache.v.data
 
@@ -65,7 +66,8 @@ class SelfAttention(nn.Module):
         # Create mask on the fly
         L = k.shape[2]
         if self.config.attention == 'causal':
-            mask = nn.make_causal_mask(jnp.ones((1, L)))
+            #mask = nn.make_causal_mask(jnp.ones((1, L)))
+            mask = jnp.tril(jnp.ones((self.config.max_tokens, self.config.max_tokens)))
         elif self.config.attention == 'block_causal':
             causal_mask = jnp.tril(jnp.ones((L, L)))
             block_diag_mask = jax.scipy.linalg.block_diag(
@@ -75,8 +77,12 @@ class SelfAttention(nn.Module):
             mask = jnp.maximum(causal_mask, full_block_mask)
         
         # Apply mask to the relevant slice of the attention matrix
-        mask_slice = jax.lax.dynamic_slice(mask, (current_seq_len, 0), (T, L))
-        att = jnp.where(mask_slice, att, -jnp.inf)
+        #mask_slice = jax.lax.dynamic_slice(mask, (current_seq_len, 0), (T, L))
+        #att = jnp.where(mask_slice, att, -jnp.inf)
+
+        mask_slice = mask[current_seq_len:current_seq_len + T, :current_seq_len + T]
+        att = jnp.where(mask_slice[None, None, :, :], att, -jnp.inf)
+
         
         att = nn.softmax(att, axis=-1)
         att = nn.Dropout(self.config.attn_pdrop)(att, deterministic=not train)

@@ -181,7 +181,7 @@ def make_train(config):
         wm_config = TransformerConfig(
             tokens_per_block=config["TOKENS_PER_OBS"] + 1, 
             max_blocks=config["T_WM"], 
-            attention='block_causal',
+            attention='causal',
             num_layers=3, 
             num_heads=8, 
             embed_dim=config["EMBED_DIM"], # The embedding dimension is 128 
@@ -793,7 +793,7 @@ def make_train(config):
                     vars,
                     current_obs,
                     h,
-                    mutable=['batch_stats']
+                    mutable=False #['batch_stats']
                 )
                 action = pi.sample(seed=rng_pi)
                 log_prob = pi.log_prob(action)
@@ -865,7 +865,7 @@ def make_train(config):
                 vars,
                 imagined_traj_batch.next_obs[-1],
                 imagined_traj_batch.h[-1],
-                mutable=['batch_stats']
+                mutable=False#['batch_stats']
             )
             q_mean, q_var = train_state.q_mean, train_state.q_var
             last_val = last_val * jnp.sqrt(q_var) + q_mean
@@ -926,7 +926,7 @@ def make_train(config):
                             vars,
                             traj_batch.obs,
                             traj_batch.h,
-                            mutable=['batch_stats']
+                            mutable=False#['batch_stats']
                         )
                         # Numeric guards (imagined PPO only)
                         advs = jnp.nan_to_num(advs, nan=0.0)
