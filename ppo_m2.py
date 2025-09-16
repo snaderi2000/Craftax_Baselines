@@ -262,8 +262,8 @@ def make_train(config):
             max_length_time_axis=config["BUFFER_SIZE"] // config["NUM_ENVS"],
             min_length_time_axis=config["T_WM"], # Can't sample a sequence until you have one
             add_batch_size=config["NUM_ENVS"],
-            # --- ADD THE MISSING ARGUMENTS ---
-            sample_batch_size=config.get("WM_BATCH_SIZE", 16), # configurable to control GPU memory
+            # --- Use a 3x larger sample for WM/tokenizer and slice into thirds ---
+            sample_batch_size=config["WM_BATCH_SIZE"] * 3,
             sample_sequence_length=config["T_WM"], # This is T_WM from the paper
             period=1, # This is a standard value, allowing sampling to start at any valid step
         )
@@ -343,19 +343,16 @@ def make_train(config):
         def update_world_model(n_tok_iters, n_wm_iters, tok_state, wm_state, buffer_state, rng, buffer):
             wm_batch_size = config["WM_BATCH_SIZE"]
 
-
-            large_batch_sampler = fbx.make_trajectory_buffer(
-                max_length_time_axis=config["BUFFER_SIZE"] // config["NUM_ENVS"],
-                min_length_time_axis=config["T_WM"],
-                add_batch_size=config["NUM_ENVS"],
-                sample_batch_size=wm_batch_size * 3,
-                sample_sequence_length=config["T_WM"],
-                period=1,
-            )
-
-
+            # Sample a single large batch (3x) from the SAME buffer used for add()
             rng, sample_key = jax.random.split(rng)
-            large_batch = large_batch_sampler.sample(buffer_state, sample_key).experience
+            large_batch = buffer.sample(buffer_state, sample_key).experience
+
+            # Utility to slice a PyTree batch along the first axis
+            def get_slice(tree, start, size):
+                return jax.tree_util.tree_map(
+                    lambda x: jax.lax.dynamic_slice_in_dim(x, start, size, axis=0),
+                    tree
+                )
 
 
             # --- Phase 1: Update Tokenizer ---
@@ -363,11 +360,7 @@ def make_train(config):
                 tok_state, rng, loss_sum = state
                 
                 start_index = (i % 3) * wm_batch_size
-                batch_slice = jax.tree_util.tree_map(
-                    # --- 💡 FIX WAS HERE 💡 ---
-                    lambda x: jax.lax.dynamic_slice_in_dim(x, start_index, wm_batch_size, axis=0),
-                    large_batch
-                )
+                batch_slice = get_slice(large_batch, start_index, wm_batch_size)
                 
                 tok_state, losses = tokenizer_train_step(tok_state, batch_slice)
                 loss_sum = loss_sum + jnp.array(losses)
@@ -387,11 +380,7 @@ def make_train(config):
                 wm_state, rng, loss_sum = state
                 
                 start_index = (i % 3) * wm_batch_size
-                batch_slice = jax.tree_util.tree_map(
-                    # --- 💡 AND FIX WAS HERE 💡 ---
-                    lambda x: jax.lax.dynamic_slice_in_dim(x, start_index, wm_batch_size, axis=0),
-                    large_batch
-                )
+                batch_slice = get_slice(large_batch, start_index, wm_batch_size)
 
                 wm_state, loss_val = twm_train_step(wm_state, frozen_tokenizer_params, batch_slice)
                 loss_sum = loss_sum + loss_val
