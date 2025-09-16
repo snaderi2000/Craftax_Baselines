@@ -25,8 +25,8 @@ def generate_and_visualize_rollout():
     
     # --- Point to your new checkpoints ---
     # Find your latest run ID in the wandb/ directory
-    RUN_ID = "run-20250913_165616-cp2mk218"
-    CHECKPOINT_STEP = 43  # The update step you want to visualize
+    RUN_ID = "run-20250915_151706-vj1yjw65"
+    CHECKPOINT_STEP = 150  # The update step you want to visualize
     script_dir = os.path.dirname(os.path.abspath(__file__))
     MODEL_DIR = os.path.join(script_dir, '..', 'wandb', RUN_ID, 'files')
 
@@ -45,7 +45,7 @@ def generate_and_visualize_rollout():
     _, sample_val, _ = make_replay_samplers(
         vault_uid=VAULT_UID, T_wm=seq_len, batch_envs=batch_size
     )
-    key = jax.random.PRNGKey(69)
+    key = jax.random.PRNGKey(609)
     key, sample_key = jax.random.split(key)
     batch = sample_val(sample_key)
     print("✅ Sampled a validation batch.")

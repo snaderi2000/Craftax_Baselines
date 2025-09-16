@@ -337,47 +337,66 @@ def make_train(config):
             loss_val, grads = jax.value_and_grad(loss_fn)(wm_state.params)
             new_wm_state = wm_state.apply_gradients(grads=grads)
             return new_wm_state.replace(rng=rng), loss_val
-            
+
+
         @partial(jax.jit, static_argnames=['buffer', 'n_tok_iters', 'n_wm_iters'])
-        def update_world_model(n_tok_iters,n_wm_iters,tok_state, wm_state, buffer_state, rng, buffer):
-            """
-            Samples data from the buffer and trains the tokenizer and TWM.
-            """
+        def update_world_model(n_tok_iters, n_wm_iters, tok_state, wm_state, buffer_state, rng, buffer):
+            wm_batch_size = config["WM_BATCH_SIZE"]
+
+
+            large_batch_sampler = fbx.make_trajectory_buffer(
+                max_length_time_axis=config["BUFFER_SIZE"] // config["NUM_ENVS"],
+                min_length_time_axis=config["T_WM"],
+                add_batch_size=config["NUM_ENVS"],
+                sample_batch_size=wm_batch_size * 3,
+                sample_sequence_length=config["T_WM"],
+                period=1,
+            )
+
+
+            rng, sample_key = jax.random.split(rng)
+            large_batch = large_batch_sampler.sample(buffer_state, sample_key).experience
+
+
             # --- Phase 1: Update Tokenizer ---
             def train_tok_body_fn(i, state):
                 tok_state, rng, loss_sum = state
-                rng, sample_key = jax.random.split(rng)
                 
-                # Sample a batch of trajectories from the live buffer
-                batch = buffer.sample(buffer_state, sample_key).experience
+                start_index = (i % 3) * wm_batch_size
+                batch_slice = jax.tree_util.tree_map(
+                    # --- 💡 FIX WAS HERE 💡 ---
+                    lambda x: jax.lax.dynamic_slice_in_dim(x, start_index, wm_batch_size, axis=0),
+                    large_batch
+                )
                 
-                # Perform one gradient update step
-                tok_state, losses = tokenizer_train_step(tok_state, batch)
+                tok_state, losses = tokenizer_train_step(tok_state, batch_slice)
                 loss_sum = loss_sum + jnp.array(losses)
                 return tok_state, rng, loss_sum
 
-            # Run the tokenizer training loop and compute mean losses (total, rec, codebook, commitment)
+
+            
             tok_init = (tok_state, rng, jnp.zeros((4,), dtype=jnp.float32))
             tok_state, rng, tok_loss_sum = jax.lax.fori_loop(0, n_tok_iters, train_tok_body_fn, tok_init)
             tok_loss_mean = tok_loss_sum / jnp.maximum(1, n_tok_iters)
             
-            # Freeze tokenizer params for TWM training
             frozen_tokenizer_params = jax.lax.stop_gradient(tok_state.params)
+
 
             # --- Phase 2: Update World Model ---
             def train_wm_body_fn(i, state):
                 wm_state, rng, loss_sum = state
-                rng, sample_key = jax.random.split(rng)
                 
-                # Sample a new batch of trajectories
-                batch = buffer.sample(buffer_state, sample_key).experience
-                
-                # Perform one gradient update step
-                wm_state, loss_val = twm_train_step(wm_state, frozen_tokenizer_params, batch)
+                start_index = (i % 3) * wm_batch_size
+                batch_slice = jax.tree_util.tree_map(
+                    # --- 💡 AND FIX WAS HERE 💡 ---
+                    lambda x: jax.lax.dynamic_slice_in_dim(x, start_index, wm_batch_size, axis=0),
+                    large_batch
+                )
+
+                wm_state, loss_val = twm_train_step(wm_state, frozen_tokenizer_params, batch_slice)
                 loss_sum = loss_sum + loss_val
                 return wm_state, rng, loss_sum
             
-            # Run the world model training loop and compute mean loss
             init_state = (wm_state, rng, jnp.array(0.0, dtype=jnp.float32))
             wm_state, rng, wm_loss_sum = jax.lax.fori_loop(0, n_wm_iters, train_wm_body_fn, init_state)
             wm_loss_mean = wm_loss_sum / jnp.maximum(1, n_wm_iters)
@@ -385,13 +404,21 @@ def make_train(config):
             return tok_state, wm_state, rng, tok_loss_mean, wm_loss_mean
 
 
+
+
+
+
+
+
+
+
+
         # INIT ENV
         rng, _rng = jax.random.split(rng)
         obsv, env_state = env.reset(_rng, env_params)
         
         
-        
-              # TRAIN LOOP
+        # TRAIN LOOP
         @jax.jit
         def _update_step(runner_state, unused):
             # COLLECT TRAJECTORIES
