@@ -280,6 +280,13 @@ def make_train(config):
         buffer_state = buffer.init(example_item)
         # --------------------------------------------------
 
+        # --- Debug: Verify buffer invariants at creation ---
+        print("Replay buffer initialized with:")
+        print("  obs shape:", buffer_state.experience['obs'].shape)
+        print("  actions shape:", buffer_state.experience['actions'].shape)
+        print("  rewards shape:", buffer_state.experience['rewards'].shape)
+        print("  dones shape:", buffer_state.experience['dones'].shape)
+
 
 
         # JIT compiled training steps for world model and tokenizer
@@ -355,6 +362,36 @@ def make_train(config):
             # Sample a single large batch (3x) from the SAME buffer used for add()
             rng, sample_key = jax.random.split(rng)
             large_batch = buffer.sample(buffer_state, sample_key).experience
+
+            # Log what we're sampling back from the buffer
+            jax.debug.print(
+                "[SAMPLE] obs min={m}, max={M}, mean={mean}, done ratio={d}, B={B},T={T},H={H},W={W},C={C}",
+                m=jnp.min(large_batch['obs']),
+                M=jnp.max(large_batch['obs']),
+                mean=jnp.mean(large_batch['obs']),
+                d=jnp.mean(large_batch['dones'].astype(jnp.float32)),
+                B=large_batch['obs'].shape[0],
+                T=large_batch['obs'].shape[1],
+                H=large_batch['obs'].shape[2],
+                W=large_batch['obs'].shape[3],
+                C=large_batch['obs'].shape[4],
+            )
+
+            # Host-side assert callback to catch any corruption early
+            def _assert_valid_batch_host(obs_min, obs_max, obs_nan, rew_nan, dones_dtype):
+                assert obs_min >= 0 and obs_max <= 255, "Invalid obs values!"
+                assert not obs_nan, "NaN in obs!"
+                assert not rew_nan, "NaN in rewards!"
+                assert dones_dtype == bool, "Dones must be boolean!"
+
+            jax.debug.callback(
+                _assert_valid_batch_host,
+                jnp.min(large_batch['obs']),
+                jnp.max(large_batch['obs']),
+                jnp.isnan(large_batch['obs']).any(),
+                jnp.isnan(large_batch['rewards']).any(),
+                (large_batch['dones'].dtype == jnp.bool_).item(),
+            )
 
             # Utility to slice a PyTree batch along the first axis
             def get_slice(tree, start, size):
@@ -518,8 +555,29 @@ def make_train(config):
             }
             
 
+            # Log what we're adding to the buffer
+            jax.debug.print(
+                "[ADD] obs min={m}, max={M}, mean={mean}, done ratio={d}, B={B},T={T},H={H},W={W},C={C}",
+                m=jnp.min(data_to_add['obs']),
+                M=jnp.max(data_to_add['obs']),
+                mean=jnp.mean(data_to_add['obs']),
+                d=jnp.mean(data_to_add['dones'].astype(jnp.float32)),
+                B=data_to_add['obs'].shape[0],
+                T=data_to_add['obs'].shape[1],
+                H=data_to_add['obs'].shape[2],
+                W=data_to_add['obs'].shape[3],
+                C=data_to_add['obs'].shape[4],
+            )
+
             # Add the data to the buffer
             buffer_state = buffer.add(buffer_state, data_to_add)
+
+            # Track buffer fill level
+            jax.debug.print(
+                "Buffer fill status: current_index={i}, is_full={f}",
+                i=buffer_state.current_index,
+                f=buffer_state.is_full,
+            )
             # -----------------------------------------------
            
 
