@@ -134,12 +134,21 @@ def make_train(config):
         # INIT NETWORK
         if "Symbolic" in config["ENV_NAME"]:
             network = ActorCritic(env.action_space(env_params).n, config["LAYER_SIZE"])
+            network_eval = ActorCritic(env.action_space(env_params).n, config["LAYER_SIZE"])  # same for API consistency
         else:
             network = ActorCriticConvRNN(
                 action_dim   = env.action_space(env_params).n,
                 head_width   = config["LAYER_SIZE"],   # 2048 in the paper
                 rnn_hidden   = config.get("RNN_HIDDEN", 256),  # ← 0 = “no-GRU” ablation
                 use_gru      = config.get("USE_GRU", True)     # optional explicit flag
+            )
+            # Evaluation-mode network (disables BatchNorm updates)
+            network_eval = ActorCriticConvRNN(
+                action_dim   = env.action_space(env_params).n,
+                head_width   = config["LAYER_SIZE"],
+                rnn_hidden   = config.get("RNN_HIDDEN", 256),
+                use_gru      = config.get("USE_GRU", True),
+                train=False
             )
 
         rng, _rng = jax.random.split(rng)
@@ -778,11 +787,11 @@ def make_train(config):
                     'params':      train_state.params,
                     'batch_stats': train_state.batch_stats,
                 }
-                ((pi, value, h_next), _) = train_state.apply_fn(
+                (pi, value, h_next) = network_eval.apply(
                     vars,
                     current_obs,
                     h,
-                    mutable=False #['batch_stats']
+                    mutable=False
                 )
                 action = pi.sample(seed=rng_pi)
                 log_prob = pi.log_prob(action)
@@ -850,11 +859,11 @@ def make_train(config):
                 'params':      train_state.params,
                 'batch_stats': train_state.batch_stats,
             }
-            ((_, last_val, _), _) = train_state.apply_fn(
+            (_, last_val, _) = network_eval.apply(
                 vars,
                 imagined_traj_batch.next_obs[-1],
                 imagined_traj_batch.h[-1],
-                mutable=False#['batch_stats']
+                mutable=False
             )
             q_mean, q_var = train_state.q_mean, train_state.q_var
             last_val = last_val * jnp.sqrt(q_var) + q_mean
@@ -911,11 +920,11 @@ def make_train(config):
                             'params':      params,
                             'batch_stats': batch_stats
                         }
-                        ((pi, value, h_next), _) = train_state.apply_fn(
+                        (pi, value, h_next) = network_eval.apply(
                             vars,
                             traj_batch.obs,
                             traj_batch.h,
-                            mutable=False#['batch_stats']
+                            mutable=False
                         )
                         # Numeric guards (imagined PPO only)
                         advs = jnp.nan_to_num(advs, nan=0.0)
