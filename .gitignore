@@ -172,3 +172,4 @@ texture_cache.pbz2
 texture_cache*.pbz2
 /craftax_replay_buffer/
 trained_models_orbax/
+.DS_Store
