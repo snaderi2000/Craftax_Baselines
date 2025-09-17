@@ -73,6 +73,12 @@ class WorldModel(nn.Module):
         num_steps = tokens.shape[1]
         prev_steps = 0 if past_keys_values is None else past_keys_values[0].k.size
         pos_indices = prev_steps + jnp.arange(num_steps)
+        jax.debug.print(
+            "[POS EMB] prev_steps={prev}, num_steps={steps}, pos_indices_head={pi}",
+            prev=prev_steps,
+            steps=num_steps,
+            pi=pos_indices[:5],
+        )
         sequences = sequences_flat + self.pos_emb(pos_indices)
 
         # --- Transformer ---
@@ -111,28 +117,44 @@ def _masked_cross_entropy(logits: jnp.ndarray, labels: jnp.ndarray) -> jnp.ndarr
     return (loss * mask).sum() / jnp.maximum(mask.sum(), 1)
 
 def compute_labels_world_model(
-    obs_tokens: jnp.ndarray,
-    rewards: jnp.ndarray,
-    ends: jnp.ndarray,
-    mask_padding: jnp.ndarray
-) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
-    """Computes the ground-truth labels for the world model's predictions."""
-    mask_fill = jnp.logical_not(mask_padding)
-    
-    # Observation labels are the next token in the sequence
-    labels_obs_unraveled = rearrange(obs_tokens, 'b t k -> b (t k)')
-    labels_obs_shifted = labels_obs_unraveled[:, 1:]
-    
-    # Mask out padding tokens
-    mask_fill_obs = jnp.repeat(mask_fill, obs_tokens.shape[-1], axis=1)[:, :-1]
-    labels_observations = jnp.where(mask_fill_obs, -100, labels_obs_shifted).flatten()
-    
-    # Reward and end labels
-    labels_rewards = (jnp.sign(rewards) + 1).astype(jnp.int32)
-    labels_rewards = jnp.where(mask_fill, -100, labels_rewards).flatten()
-    labels_ends = jnp.where(mask_fill, -100, ends.astype(jnp.int32)).flatten()
+    obs_tokens: jnp.ndarray,   # (B, T, K)
+    rewards: jnp.ndarray,      # (B, T)
+    ends: jnp.ndarray,         # (B, T)  (0/1)
+    mask_padding: jnp.ndarray  # (B, T)  bool
+):
+    """
+      - Flatten obs tokens to (B, T*K), shift by 1 for next-token targets
+      - Use -100 to ignore loss where mask is True
+      - Rewards mapped to {-1,0,1} -> {0,1,2}
+    NOTE: This assumes mask_padding==True means 'keep' (valid). If in your pipeline
+          mask_padding==True means 'padding', flip the NOT below.
+    """
+    # At most one 'done' per sequence (optional guard)
+    assert bool(jnp.all(jnp.sum(ends, axis=1) <= 1)), "Each sequence should have ≤1 done."
+
+    # PyTorch used: mask_fill = ~mask_padding, and masked_fill(..., -100)
+    # Here: mask_fill == True where we want to fill (ignore) with -100
+    mask_fill = jnp.logical_not(mask_padding)   # flip this if your convention differs
+
+    # ---- Observation token labels ----
+    # Broadcast mask_fill to obs_token shape (B, T, K)
+    mask_fill_obs = jnp.broadcast_to(mask_fill[..., None], obs_tokens.shape)
+    # Set ignored positions to -100 *before* flattening & shifting
+    obs_tokens_masked = jnp.where(mask_fill_obs, -100, obs_tokens)
+    # Flatten to (B, T*K) then shift by 1 (global next-token)
+    labels_observations = rearrange(obs_tokens_masked, 'b t k -> b (t k)')[:, 1:]
+    labels_observations = labels_observations.reshape(-1)  # (B*(T*K-1),)
+
+    # ---- Reward labels ----
+    labels_rewards = (jnp.sign(rewards) + 1).astype(jnp.int32)  # {-1,0,1}->{0,1,2}
+    labels_rewards = jnp.where(mask_fill, -100, labels_rewards).reshape(-1)
+
+    # ---- End (done) labels ----
+    labels_ends = ends.astype(jnp.int32)
+    labels_ends = jnp.where(mask_fill, -100, labels_ends).reshape(-1)
 
     return labels_observations, labels_rewards, labels_ends
+
 
 def compute_wm_loss(
     world_model_params: Any,
@@ -145,7 +167,7 @@ def compute_wm_loss(
     # 1. Tokenize observations
     obs_5d = batch['observations']
     B, T, H, W, C = obs_5d.shape
-    obs_4d = obs_5d.reshape(B * T, H, W, C)
+    obs_4d = obs_5d.reshape(B * T, H, W, C).astype(jnp.float32) / 255.0 #normalized 
 
     encode_output = tokenizer.apply(
         {'params': tokenizer_params},
@@ -170,6 +192,25 @@ def compute_wm_loss(
     # 4. Compute ground-truth labels
     labels_observations, labels_rewards, labels_ends = compute_labels_world_model(
         obs_tokens, batch['rewards'], batch['ends'], batch['mask_padding']
+    )
+    # Debug shapes of inputs & labels before computing losses
+    jax.debug.print(
+        "[WM LOSS] Obs tokens shape=({ob},{ot},{ok}), Actions shape=({ab},{at}), Rewards shape=({rb},{rt}), Ends shape=({eb},{et})",
+        ob=jnp.asarray(obs_tokens.shape[0]),
+        ot=jnp.asarray(obs_tokens.shape[1]),
+        ok=jnp.asarray(obs_tokens.shape[2]),
+        ab=jnp.asarray(batch['actions'].shape[0]),
+        at=jnp.asarray(batch['actions'].shape[1]),
+        rb=jnp.asarray(batch['rewards'].shape[0]),
+        rt=jnp.asarray(batch['rewards'].shape[1]),
+        eb=jnp.asarray(batch['ends'].shape[0]),
+        et=jnp.asarray(batch['ends'].shape[1]),
+    )
+    jax.debug.print(
+        "[WM LOSS] Labels: Obs={lo_shape}, Rewards={lr_shape}, Ends={le_shape}",
+        lo_shape=jnp.asarray(labels_observations.shape),
+        lr_shape=jnp.asarray(labels_rewards.shape),
+        le_shape=jnp.asarray(labels_ends.shape),
     )
     
     # 5. Compute individual losses
