@@ -378,11 +378,11 @@ def make_train(config):
             )
 
             # Host-side assert callback to catch any corruption early
-            def _assert_valid_batch_host(obs_min, obs_max, obs_nan, rew_nan, dones_dtype):
+            def _assert_valid_batch_host(obs_min, obs_max, obs_nan, rew_nan, dones_is_bool):
                 assert obs_min >= 0 and obs_max <= 255, "Invalid obs values!"
                 assert not obs_nan, "NaN in obs!"
                 assert not rew_nan, "NaN in rewards!"
-                assert dones_dtype == bool, "Dones must be boolean!"
+                assert bool(dones_is_bool), "Dones must be boolean!"
 
             jax.debug.callback(
                 _assert_valid_batch_host,
@@ -390,7 +390,7 @@ def make_train(config):
                 jnp.max(large_batch['obs']),
                 jnp.isnan(large_batch['obs']).any(),
                 jnp.isnan(large_batch['rewards']).any(),
-                (large_batch['dones'].dtype == jnp.bool_).item(),
+                jnp.asarray(large_batch['dones'].dtype == jnp.bool_),
             )
 
             # Utility to slice a PyTree batch along the first axis
@@ -543,9 +543,34 @@ def make_train(config):
             # --- ADD THIS BLOCK TO POPULATE THE BUFFER ---
             # Create a dictionary with the data we want to store
 
+            # Scan stacks along time first → traj_batch shapes are (T, B, ...).
+            # Buffer expects (B, T, ...), so we transpose to (env, time, ...).
+            # Log shapes before/after to verify ordering.
+            jax.debug.print(
+                "[SCAN] traj_batch.obs shape: T={T}, B={B}",
+                T=jnp.asarray(traj_batch.obs.shape[0]),
+                B=jnp.asarray(traj_batch.obs.shape[1]),
+            )
             transposed_traj = jax.tree.map(
                 lambda x: jnp.swapaxes(x, 0, 1),
                 traj_batch
+            )
+            jax.debug.print(
+                "[TRANSPOSED] obs shape: B={B}, T={T}",
+                B=jnp.asarray(transposed_traj.obs.shape[0]),
+                T=jnp.asarray(transposed_traj.obs.shape[1]),
+            )
+
+            # Assert we are adding (B, T, ...) matching (NUM_ENVS, NUM_STEPS)
+            def _assert_add_shapes(B, T, exp_B, exp_T):
+                assert int(B) == int(exp_B) and int(T) == int(exp_T), \
+                    f"Buffer add expects (B,T)=({int(exp_B)},{int(exp_T)}), got ({int(B)},{int(T)})"
+            jax.debug.callback(
+                _assert_add_shapes,
+                jnp.asarray(transposed_traj.obs.shape[0]),
+                jnp.asarray(transposed_traj.obs.shape[1]),
+                jnp.asarray(config["NUM_ENVS"]),
+                jnp.asarray(config["NUM_STEPS"]),
             )
             data_to_add = {
                 "obs": (transposed_traj.obs * 255).astype(jnp.uint8),
