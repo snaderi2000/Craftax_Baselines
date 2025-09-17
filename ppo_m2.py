@@ -348,11 +348,17 @@ def make_train(config):
                 )
                 # Debug print only (no W&B logging from JIT path)
                 jax.debug.print("TWM Loss: {x}", x=loss_object.total_loss)
-                return loss_object.total_loss
+                # Return total with aux components for logging
+                return loss_object.total_loss, (
+                    loss_object.loss_obs,
+                    loss_object.loss_rewards,
+                    loss_object.loss_ends,
+                )
             
-            loss_val, grads = jax.value_and_grad(loss_fn)(wm_state.params)
+            (loss_val, (loss_obs, loss_rewards, loss_ends)), grads = jax.value_and_grad(loss_fn, has_aux=True)(wm_state.params)
             new_wm_state = wm_state.apply_gradients(grads=grads)
-            return new_wm_state.replace(rng=rng), loss_val
+            wm_comp = jnp.stack([loss_obs, loss_rewards, loss_ends])
+            return new_wm_state.replace(rng=rng), (loss_val, wm_comp)
 
 
         @partial(jax.jit, static_argnames=['buffer', 'n_tok_iters', 'n_wm_iters'])
@@ -423,20 +429,22 @@ def make_train(config):
 
             # --- Phase 2: Update World Model ---
             def train_wm_body_fn(i, state):
-                wm_state, rng, loss_sum = state
+                wm_state, rng, loss_sum, comp_sum = state
                 
                 start_index = (i % 3) * wm_batch_size
                 batch_slice = get_slice(large_batch, start_index, wm_batch_size)
 
-                wm_state, loss_val = twm_train_step(wm_state, frozen_tokenizer_params, batch_slice)
+                wm_state, (loss_val, comp_vec) = twm_train_step(wm_state, frozen_tokenizer_params, batch_slice)
                 loss_sum = loss_sum + loss_val
-                return wm_state, rng, loss_sum
+                comp_sum = comp_sum + comp_vec
+                return wm_state, rng, loss_sum, comp_sum
             
-            init_state = (wm_state, rng, jnp.array(0.0, dtype=jnp.float32))
-            wm_state, rng, wm_loss_sum = jax.lax.fori_loop(0, n_wm_iters, train_wm_body_fn, init_state)
+            init_state = (wm_state, rng, jnp.array(0.0, dtype=jnp.float32), jnp.zeros((3,), dtype=jnp.float32))
+            wm_state, rng, wm_loss_sum, wm_comp_sum = jax.lax.fori_loop(0, n_wm_iters, train_wm_body_fn, init_state)
             wm_loss_mean = wm_loss_sum / jnp.maximum(1, n_wm_iters)
+            wm_loss_components_mean = wm_comp_sum / jnp.maximum(1, n_wm_iters)
             
-            return tok_state, wm_state, rng, tok_loss_mean, wm_loss_mean
+            return tok_state, wm_state, rng, tok_loss_mean, wm_loss_mean, wm_loss_components_mean
 
 
 
@@ -1131,7 +1139,7 @@ def make_train(config):
             train_state, tokenizer_state, wm_state, env_state, last_obs, rng, update_step_count, h, buffer_state = runner_state
             
             # Call the JIT'd world model update function
-            tokenizer_state, wm_state, rng, tok_loss_mean, wm_loss_mean = update_world_model(
+            tokenizer_state, wm_state, rng, tok_loss_mean, wm_loss_mean, wm_comp_mean = update_world_model(
                 config["N_TOK_ITERS"],config["N_WM_ITERS"],tokenizer_state, wm_state, buffer_state, rng, buffer
             )
              
@@ -1156,7 +1164,7 @@ def make_train(config):
                 )
             # === Part 5: Unified logging via a single host callback ===
             if config["DEBUG"] and config["USE_WANDB"]:
-                def unified_log_callback(metric_host, tok_losses_host, wm_loss_host, val_loss_real_host, val_loss_imag_host, step_host):
+                def unified_log_callback(metric_host, tok_losses_host, wm_loss_host, wm_comp_host, val_loss_real_host, val_loss_imag_host, step_host):
                     step_scalar = int(np.asarray(step_host).reshape(-1)[0])
                     to_log = create_log_dict(metric_host, config)
                     # tokenizer losses: (total, rec, codebook, commitment)
@@ -1167,6 +1175,12 @@ def make_train(config):
                         to_log["tokenizer/codebook_loss"] = float(tok_losses[2])
                         to_log["tokenizer/commitment_loss"] = float(tok_losses[3])
                     to_log["wm/loss_total"] = float(np.asarray(wm_loss_host))
+                    # wm_comp_host is [loss_obs, loss_rewards, loss_ends]
+                    wm_comp = np.asarray(wm_comp_host)
+                    if wm_comp.shape[0] == 3:
+                        to_log["wm/loss_obs"] = float(wm_comp[0])
+                        to_log["wm/loss_rewards"] = float(wm_comp[1])
+                        to_log["wm/loss_ends"] = float(wm_comp[2])
                     to_log["ppo/value_loss_real"] = float(np.asarray(val_loss_real_host))
                     v_im = float(np.asarray(val_loss_imag_host))
                     if not np.isnan(v_im):
@@ -1177,6 +1191,7 @@ def make_train(config):
                     metric,
                     tok_loss_mean,
                     wm_loss_mean,
+                    wm_comp_mean,
                     value_loss_mean_real,
                     value_loss_mean_imag,
                     update_step_count,

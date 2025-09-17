@@ -75,6 +75,9 @@ def batch_log(update_step, log, config):
                     "episode_return",
                     "score",
                     "wm/loss_total",
+                    "wm/loss_obs",
+                    "wm/loss_rewards",
+                    "wm/loss_ends",
                     "ppo/value_loss_real",
                     "ppo/value_loss_imag",
                 ]:

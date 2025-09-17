@@ -73,12 +73,12 @@ class WorldModel(nn.Module):
         num_steps = tokens.shape[1]
         prev_steps = 0 if past_keys_values is None else past_keys_values[0].k.size
         pos_indices = prev_steps + jnp.arange(num_steps)
-        jax.debug.print(
-            "[POS EMB] prev_steps={prev}, num_steps={steps}, pos_indices_head={pi}",
-            prev=prev_steps,
-            steps=num_steps,
-            pi=pos_indices[:5],
-        )
+        # jax.debug.print(
+        #     "[POS EMB] prev_steps={prev}, num_steps={steps}, pos_indices_head={pi}",
+        #     prev=prev_steps,
+        #     steps=num_steps,
+        #     pi=pos_indices[:5],
+        # )
         sequences = sequences_flat + self.pos_emb(pos_indices)
 
         # --- Transformer ---
@@ -131,10 +131,10 @@ def compute_labels_world_model(
     """
     # At most one 'done' per sequence (optional guard)
     # assert bool(jnp.all(jnp.sum(ends, axis=1) <= 1)), "Each sequence should have ≤1 done."
-    jax.debug.print(
-        "[CHECK] max done per sequence = {x}",
-        x=jnp.max(jnp.sum(ends, axis=1))
-    )
+    # jax.debug.print(
+    #     "[CHECK] max done per sequence = {x}",
+    #     x=jnp.max(jnp.sum(ends, axis=1))
+    # )
 
     # PyTorch used: mask_fill = ~mask_padding, and masked_fill(..., -100)
     # Here: mask_fill == True where we want to fill (ignore) with -100
@@ -198,24 +198,24 @@ def compute_wm_loss(
         obs_tokens, batch['rewards'], batch['ends'], batch['mask_padding']
     )
     # Debug shapes of inputs & labels before computing losses
-    jax.debug.print(
-        "[WM LOSS] Obs tokens shape=({ob},{ot},{ok}), Actions shape=({ab},{at}), Rewards shape=({rb},{rt}), Ends shape=({eb},{et})",
-        ob=jnp.asarray(obs_tokens.shape[0]),
-        ot=jnp.asarray(obs_tokens.shape[1]),
-        ok=jnp.asarray(obs_tokens.shape[2]),
-        ab=jnp.asarray(batch['actions'].shape[0]),
-        at=jnp.asarray(batch['actions'].shape[1]),
-        rb=jnp.asarray(batch['rewards'].shape[0]),
-        rt=jnp.asarray(batch['rewards'].shape[1]),
-        eb=jnp.asarray(batch['ends'].shape[0]),
-        et=jnp.asarray(batch['ends'].shape[1]),
-    )
-    jax.debug.print(
-        "[WM LOSS] Labels: Obs={lo_shape}, Rewards={lr_shape}, Ends={le_shape}",
-        lo_shape=jnp.asarray(labels_observations.shape),
-        lr_shape=jnp.asarray(labels_rewards.shape),
-        le_shape=jnp.asarray(labels_ends.shape),
-    )
+    # jax.debug.print(
+    #     "[WM LOSS] Obs tokens shape=({ob},{ot},{ok}), Actions shape=({ab},{at}), Rewards shape=({rb},{rt}), Ends shape=({eb},{et})",
+    #     ob=jnp.asarray(obs_tokens.shape[0]),
+    #     ot=jnp.asarray(obs_tokens.shape[1]),
+    #     ok=jnp.asarray(obs_tokens.shape[2]),
+    #     ab=jnp.asarray(batch['actions'].shape[0]),
+    #     at=jnp.asarray(batch['actions'].shape[1]),
+    #     rb=jnp.asarray(batch['rewards'].shape[0]),
+    #     rt=jnp.asarray(batch['rewards'].shape[1]),
+    #     eb=jnp.asarray(batch['ends'].shape[0]),
+    #     et=jnp.asarray(batch['ends'].shape[1]),
+    # )
+    # jax.debug.print(
+    #     "[WM LOSS] Labels: Obs={lo_shape}, Rewards={lr_shape}, Ends={le_shape}",
+    #     lo_shape=jnp.asarray(labels_observations.shape),
+    #     lr_shape=jnp.asarray(labels_rewards.shape),
+    #     le_shape=jnp.asarray(labels_ends.shape),
+    # )
     
     # 5. Compute individual losses
 
