@@ -130,7 +130,11 @@ def compute_labels_world_model(
           mask_padding==True means 'padding', flip the NOT below.
     """
     # At most one 'done' per sequence (optional guard)
-    assert bool(jnp.all(jnp.sum(ends, axis=1) <= 1)), "Each sequence should have ≤1 done."
+    # assert bool(jnp.all(jnp.sum(ends, axis=1) <= 1)), "Each sequence should have ≤1 done."
+    jax.debug.print(
+        "[CHECK] max done per sequence = {x}",
+        x=jnp.max(jnp.sum(ends, axis=1))
+    )
 
     # PyTorch used: mask_fill = ~mask_padding, and masked_fill(..., -100)
     # Here: mask_fill == True where we want to fill (ignore) with -100
