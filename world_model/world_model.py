@@ -222,6 +222,13 @@ def compute_wm_loss(
     # The logits tensor has predictions for a sequence of length N,
     # but labels are for a sequence of N-1. We slice off the last prediction.
     logits_obs_for_loss = outputs.logits_observations[:, :-1, :]
+    # Assert alignment: number of predictions == number of labels per batch
+    assert (
+        logits_obs_for_loss.shape[1]
+        == labels_observations.shape[0] // logits_obs_for_loss.shape[0]
+    ), (
+        f"Mismatch: {logits_obs_for_loss.shape=} vs {labels_observations.shape=}"
+    )
 
     loss_obs = _masked_cross_entropy(
         rearrange(logits_obs_for_loss, 'b s v -> (b s) v'), # Note the new rearrange pattern
