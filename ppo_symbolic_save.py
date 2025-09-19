@@ -63,14 +63,16 @@ def save_batch_to_disk(traj_batch, update_step, config):
     batch_size = config["NUM_STEPS"] * config["NUM_ENVS"]
     
     # Use np.array() to pull the data from JAX's device memory to the host CPU
-    flat_batch = jax.tree_util.tree_map(
+    flat_batch_tuple = jax.tree_util.tree_map(
         lambda x: np.array(x).reshape((batch_size,) + x.shape[2:]), 
         traj_batch
     )
-    
+
+    flat_batch_dict = flat_batch_tuple._asdict()    
+        
     # Save the flattened batch with a unique name for each update step
     file_name = os.path.join(save_path, f"batch_{update_step}.npz")
-    np.savez_compressed(file_name, **flat_batch)
+    np.savez_compressed(file_name, **flat_batch_dict)
     print(f"✅ Saved batch {update_step} to {file_name}")
 
 
