@@ -770,8 +770,7 @@ if __name__ == "__main__":
         help="Directory to save the trajectory files."
     )
     
-
-    args, rest_args = parser.parse_known_args(sys.argv[1:])
+        args, rest_args = parser.parse_known_args(sys.argv[1:])
     if rest_args:
         raise ValueError(f"Unknown args {rest_args}")
 
@@ -781,7 +780,15 @@ if __name__ == "__main__":
     if args.seed is None:
         args.seed = np.random.randint(2**31)
 
-    # --- 2. Initialize and Start Saver Process (If needed) ---
+    # =================================================================
+    # SECTION 2: CREATE THE MAIN CONFIG DICTIONARY
+    # This must happen BEFORE the saver process is created.
+    # =================================================================
+    config = {k.upper(): v for k, v in args.__dict__.items()}
+
+    # =================================================================
+    # SECTION 3: INITIALIZE AND START SAVER PROCESS (if needed)
+    # =================================================================
     save_queue = None
     saver_process = None
     
@@ -789,29 +796,31 @@ if __name__ == "__main__":
         print("🚀 Starting asynchronous saver process...")
         save_queue = Queue()
         
-        # We pass args.__dict__ to give the worker its own copy of the config
+        # IMPORTANT: Pass the uppercase 'config' dictionary here
         saver_process = Process(
             target=saver_worker,
-            args=(save_queue, args.buffer_save_path, args.__dict__),
+            args=(save_queue, args.buffer_save_path, config),
         )
         saver_process.start()
-        
-    # --- 3. Run the Main Training Function ---
-    # Convert args to a dictionary for the config
-    config = {k.upper(): v for k, v in args.__dict__.items()}
 
+    # =================================================================
+    # SECTION 4: RUN THE MAIN TRAINING
+    # =================================================================
     if args.jit:
         run_ppo(config, queue=save_queue)
     else:
         with jax.disable_jit():
             run_ppo(config, queue=save_queue)
-            
-    # --- 4. Cleanly Shut Down the Saver Process (If it was started) ---
+
+    # =================================================================
+    # SECTION 5: CLEANLY SHUT DOWN THE SAVER PROCESS
+    # =================================================================
     if saver_process:
         print("🛑 Shutting down saver process...")
         save_queue.put(None)  # Send the "exit" signal
-        saver_process.join()  # Wait for the worker to finish saving everything
+        saver_process.join()  # Wait for the worker to finish
         print("Saver process shut down cleanly.")
+
 
 
 
