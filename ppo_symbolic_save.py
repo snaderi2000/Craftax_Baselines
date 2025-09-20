@@ -52,11 +52,13 @@ class Transition(NamedTuple):
     next_obs: jnp.ndarray
     info: jnp.ndarray
 
-
 def saver_worker(queue, save_path, config):
+    """A worker process that pulls data from a queue and saves it."""
+    
+    # This is the crucial line:
+    # Tell this specific process to only use the CPU for JAX operations.
     os.environ["JAX_PLATFORMS"] = "cpu"
     
-    """A worker process that pulls data from a queue and saves it."""
     os.makedirs(save_path, exist_ok=True)
     batch_size = config["NUM_STEPS"] * config["NUM_ENVS"]
     
