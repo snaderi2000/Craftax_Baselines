@@ -788,15 +788,15 @@ if __name__ == "__main__":
 
 
     if config["USE_WANDB"]:
-    wandb.init(
-        project=config["WANDB_PROJECT"],
-        entity=config["WANDB_ENTITY"],
-        config=config,
-        name=config["ENV_NAME"]
-        + "-"
-        + str(int(config["TOTAL_TIMESTEPS"] // 1e6))
-        + "M",
-    )
+        wandb.init(
+            project=config["WANDB_PROJECT"],
+            entity=config["WANDB_ENTITY"],
+            config=config,
+            name=config["ENV_NAME"]
+            + "-"
+            + str(int(config["TOTAL_TIMESTEPS"] // 1e6))
+            + "M",
+        )
 
 
     # =================================================================
