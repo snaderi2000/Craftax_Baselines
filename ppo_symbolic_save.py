@@ -677,25 +677,25 @@ def run_ppo(config, queue: Queue = None):
     print("Time to run experiment", t1 - t0)
     print("SPS: ", config["TOTAL_TIMESTEPS"] / (t1 - t0))
 
-    if config["USE_WANDB"]:
+    # if config["USE_WANDB"]:
 
-        def _save_network(rs_index, dir_name):
-            train_states = out["runner_state"][rs_index]
-            train_state = jax.tree.map(lambda x: x[0], train_states)
-            orbax_checkpointer = PyTreeCheckpointer()
-            options = CheckpointManagerOptions(max_to_keep=1, create=True)
-            path = os.path.join(wandb.run.dir, dir_name)
-            checkpoint_manager = CheckpointManager(path, orbax_checkpointer, options)
-            print(f"saved runner state to {path}")
-            save_args = orbax_utils.save_args_from_target(train_state)
-            checkpoint_manager.save(
-                config["TOTAL_TIMESTEPS"],
-                train_state,
-                save_kwargs={"save_args": save_args},
-            )
+    #     def _save_network(rs_index, dir_name):
+    #         train_states = out["runner_state"][rs_index]
+    #         train_state = jax.tree.map(lambda x: x[0], train_states)
+    #         orbax_checkpointer = PyTreeCheckpointer()
+    #         options = CheckpointManagerOptions(max_to_keep=1, create=True)
+    #         path = os.path.join(wandb.run.dir, dir_name)
+    #         checkpoint_manager = CheckpointManager(path, orbax_checkpointer, options)
+    #         print(f"saved runner state to {path}")
+    #         save_args = orbax_utils.save_args_from_target(train_state)
+    #         checkpoint_manager.save(
+    #             config["TOTAL_TIMESTEPS"],
+    #             train_state,
+    #             save_kwargs={"save_args": save_args},
+    #         )
 
-        if config["SAVE_POLICY"]:
-            _save_network(0, "policies")
+    #     if config["SAVE_POLICY"]:
+    #         _save_network(0, "policies")
 
 
 if __name__ == "__main__":
@@ -785,6 +785,19 @@ if __name__ == "__main__":
     # This must happen BEFORE the saver process is created.
     # =================================================================
     config = {k.upper(): v for k, v in args.__dict__.items()}
+
+
+    if config["USE_WANDB"]:
+    wandb.init(
+        project=config["WANDB_PROJECT"],
+        entity=config["WANDB_ENTITY"],
+        config=config,
+        name=config["ENV_NAME"]
+        + "-"
+        + str(int(config["TOTAL_TIMESTEPS"] // 1e6))
+        + "M",
+    )
+
 
     # =================================================================
     # SECTION 3: INITIALIZE AND START SAVER PROCESS (if needed)
