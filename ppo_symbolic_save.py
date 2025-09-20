@@ -33,9 +33,6 @@ from wrappers import (
     AutoResetEnvWrapper,
 )
 
-from multiprocessing import Process, Queue
-
-
 # Code adapted from the original implementation made by Chris Lu
 # Original code located at https://github.com/luchris429/purejaxrl
 
@@ -52,41 +49,34 @@ class Transition(NamedTuple):
     next_obs: jnp.ndarray
     info: jnp.ndarray
 
-def saver_worker(queue, save_path, config):
-    """A worker process that pulls data from a queue and saves it."""
-    
-    # This is the crucial line:
-    # Tell this specific process to only use the CPU for JAX operations.
-    os.environ["JAX_PLATFORMS"] = "cpu"
-    
+
+def save_batch_to_disk(traj_batch, update_step, config):
+    """
+    Saves a batch of trajectories to a compressed .npz file.
+    This function is designed to be called via jax.debug.callback.
+    """
+    # Create the save directory if it doesn't exist
+    save_path = config["BUFFER_SAVE_PATH"]
     os.makedirs(save_path, exist_ok=True)
+    
+    # Flatten the batch from (num_steps, num_envs, ...) to a single list of transitions
     batch_size = config["NUM_STEPS"] * config["NUM_ENVS"]
     
-    while True:
-        # Wait for the next item in the queue
-        data = queue.get()
-        if data is None:  # Sentinel value to signal exit
-            break
-            
-        traj_batch, update_step = data
+    # Use np.array() to pull the data from JAX's device memory to the host CPU
+    flat_batch_tuple = jax.tree_util.tree_map(
+        lambda x: np.array(x).reshape((batch_size,) + x.shape[2:]), 
+        traj_batch
+    )
+
+    flat_batch_dict = flat_batch_tuple._asdict()    
         
-        flat_batch_tuple = jax.tree_util.tree_map(
-            lambda x: np.array(x).reshape((batch_size,) + x.shape[2:]),
-            traj_batch
-        )
-        flat_batch_dict = flat_batch_tuple._asdict()
-        
-        file_name = os.path.join(save_path, f"batch_{update_step}.npz")
-        np.savez_compressed(file_name, **flat_batch_dict)
-        print(f"💾 Async saved batch {update_step} to {file_name}")
-
-def save_async(queue, traj_batch, update_step):
-    """Puts the data onto the queue for the worker to save."""
-    cpu_batch = jax.device_get(traj_batch)   # move off GPU
-    queue.put((cpu_batch, update_step))
+    # Save the flattened batch with a unique name for each update step
+    file_name = os.path.join(save_path, f"batch_{update_step}.npz")
+    np.savez_compressed(file_name, **flat_batch_dict)
+    print(f"✅ Saved batch {update_step} to {file_name}")
 
 
-def make_train(config, queue: Queue = None):
+def make_train(config):
     config["NUM_UPDATES"] = (
         config["TOTAL_TIMESTEPS"] // config["NUM_STEPS"] // config["NUM_ENVS"]
     )
@@ -341,16 +331,24 @@ def make_train(config, queue: Queue = None):
                 _env_step, runner_state, None, config["NUM_STEPS"]
             )
 
-            current_update_step = runner_state[-1]
 
+
+
+            # ============================================================
+            # 💾 NEW: SAVE THE TRAJECTORY BATCH
+            # ============================================================
+            # We extract the current update_step from the runner_state
+            current_update_step = runner_state[-1]
+            
             if config["SAVE_BUFFER"]:
+                # Use a callback to perform the file-saving side-effect
                 jax.debug.callback(
-                    save_async,
-                    queue,
+                    save_batch_to_disk,
                     traj_batch,
                     current_update_step,
+                    config, # Pass the config dict
                 )
-
+            # ============================================================
 
 
             # CALCULATE ADVANTAGE
@@ -666,14 +664,24 @@ def make_train(config, queue: Queue = None):
     return train
 
 
-def run_ppo(config, queue: Queue = None):
-    #config = {k.upper(): v for k, v in config.__dict__.items()}
+def run_ppo(config):
+    config = {k.upper(): v for k, v in config.__dict__.items()}
 
+    if config["USE_WANDB"]:
+        wandb.init(
+            project=config["WANDB_PROJECT"],
+            entity=config["WANDB_ENTITY"],
+            config=config,
+            name=config["ENV_NAME"]
+            + "-"
+            + str(int(config["TOTAL_TIMESTEPS"] // 1e6))
+            + "M",
+        )
 
     rng = jax.random.PRNGKey(config["SEED"])
     rngs = jax.random.split(rng, config["NUM_REPEATS"])
 
-    train_jit = jax.jit(make_train(config, queue=queue))
+    train_jit = jax.jit(make_train(config))
     train_vmap = jax.vmap(train_jit)
 
     t0 = time.time()
@@ -682,25 +690,25 @@ def run_ppo(config, queue: Queue = None):
     print("Time to run experiment", t1 - t0)
     print("SPS: ", config["TOTAL_TIMESTEPS"] / (t1 - t0))
 
-    # if config["USE_WANDB"]:
+    if config["USE_WANDB"]:
 
-    #     def _save_network(rs_index, dir_name):
-    #         train_states = out["runner_state"][rs_index]
-    #         train_state = jax.tree.map(lambda x: x[0], train_states)
-    #         orbax_checkpointer = PyTreeCheckpointer()
-    #         options = CheckpointManagerOptions(max_to_keep=1, create=True)
-    #         path = os.path.join(wandb.run.dir, dir_name)
-    #         checkpoint_manager = CheckpointManager(path, orbax_checkpointer, options)
-    #         print(f"saved runner state to {path}")
-    #         save_args = orbax_utils.save_args_from_target(train_state)
-    #         checkpoint_manager.save(
-    #             config["TOTAL_TIMESTEPS"],
-    #             train_state,
-    #             save_kwargs={"save_args": save_args},
-    #         )
+        def _save_network(rs_index, dir_name):
+            train_states = out["runner_state"][rs_index]
+            train_state = jax.tree.map(lambda x: x[0], train_states)
+            orbax_checkpointer = PyTreeCheckpointer()
+            options = CheckpointManagerOptions(max_to_keep=1, create=True)
+            path = os.path.join(wandb.run.dir, dir_name)
+            checkpoint_manager = CheckpointManager(path, orbax_checkpointer, options)
+            print(f"saved runner state to {path}")
+            save_args = orbax_utils.save_args_from_target(train_state)
+            checkpoint_manager.save(
+                config["TOTAL_TIMESTEPS"],
+                train_state,
+                save_kwargs={"save_args": save_args},
+            )
 
-    #     if config["SAVE_POLICY"]:
-    #         _save_network(0, "policies")
+        if config["SAVE_POLICY"]:
+            _save_network(0, "policies")
 
 
 if __name__ == "__main__":
@@ -774,7 +782,8 @@ if __name__ == "__main__":
         default="./trajectory_buffer",
         help="Directory to save the trajectory files."
     )
-    
+
+
     args, rest_args = parser.parse_known_args(sys.argv[1:])
     if rest_args:
         raise ValueError(f"Unknown args {rest_args}")
@@ -785,80 +794,8 @@ if __name__ == "__main__":
     if args.seed is None:
         args.seed = np.random.randint(2**31)
 
-    # =================================================================
-    # SECTION 2: CREATE THE MAIN CONFIG DICTIONARY
-    # This must happen BEFORE the saver process is created.
-    # =================================================================
-    config = {k.upper(): v for k, v in args.__dict__.items()}
-
-
-    if config["USE_WANDB"]:
-        wandb.init(
-            project=config["WANDB_PROJECT"],
-            entity=config["WANDB_ENTITY"],
-            config=config,
-            name=config["ENV_NAME"]
-            + "-"
-            + str(int(config["TOTAL_TIMESTEPS"] // 1e6))
-            + "M",
-        )
-
-
-    # =================================================================
-    # SECTION 3: INITIALIZE AND START SAVER PROCESS (if needed)
-    # =================================================================
-    save_queue = None
-    saver_process = None
-    
-    if args.save_buffer:
-        print("🚀 Starting asynchronous saver process...")
-        save_queue = Queue()
-        
-        # IMPORTANT: Pass the uppercase 'config' dictionary here
-        saver_process = Process(
-            target=saver_worker,
-            args=(save_queue, args.buffer_save_path, config),
-        )
-        saver_process.start()
-
-    # =================================================================
-    # SECTION 4: RUN THE MAIN TRAINING
-    # =================================================================
     if args.jit:
-        run_ppo(config, queue=save_queue)
+        run_ppo(args)
     else:
         with jax.disable_jit():
-            run_ppo(config, queue=save_queue)
-
-    # =================================================================
-    # SECTION 5: CLEANLY SHUT DOWN THE SAVER PROCESS
-    # =================================================================
-    if saver_process:
-        print("🛑 Shutting down saver process...")
-        save_queue.put(None)  # Send the "exit" signal
-        saver_process.join()  # Wait for the worker to finish
-        print("Saver process shut down cleanly.")
-
-
-
-
-
-
-
-
-
-    # args, rest_args = parser.parse_known_args(sys.argv[1:])
-    # if rest_args:
-    #     raise ValueError(f"Unknown args {rest_args}")
-
-    # if args.use_e3b:
-    #     assert args.train_icm
-    #     assert args.icm_reward_coeff == 0
-    # if args.seed is None:
-    #     args.seed = np.random.randint(2**31)
-
-    # if args.jit:
-    #     run_ppo(args)
-    # else:
-    #     with jax.disable_jit():
-    #         run_ppo(args)
+            run_ppo(args)
