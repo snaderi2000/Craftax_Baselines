@@ -54,6 +54,8 @@ class Transition(NamedTuple):
 
 
 def saver_worker(queue, save_path, config):
+    os.environ["JAX_PLATFORMS"] = "cpu"
+    
     """A worker process that pulls data from a queue and saves it."""
     os.makedirs(save_path, exist_ok=True)
     batch_size = config["NUM_STEPS"] * config["NUM_ENVS"]
