@@ -662,7 +662,7 @@ def make_train(config, queue: Queue = None):
 
 
 def run_ppo(config, queue: Queue = None):
-    config = {k.upper(): v for k, v in config.__dict__.items()}
+    #config = {k.upper(): v for k, v in config.__dict__.items()}
 
 
     rng = jax.random.PRNGKey(config["SEED"])
