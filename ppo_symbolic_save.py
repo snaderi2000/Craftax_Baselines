@@ -770,7 +770,7 @@ if __name__ == "__main__":
         help="Directory to save the trajectory files."
     )
     
-        args, rest_args = parser.parse_known_args(sys.argv[1:])
+    args, rest_args = parser.parse_known_args(sys.argv[1:])
     if rest_args:
         raise ValueError(f"Unknown args {rest_args}")
 
