@@ -82,7 +82,8 @@ def saver_worker(queue, save_path, config):
 
 def save_async(queue, traj_batch, update_step):
     """Puts the data onto the queue for the worker to save."""
-    queue.put((traj_batch, update_step))
+    cpu_batch = jax.device_get(traj_batch)   # move off GPU
+    queue.put((cpu_batch, update_step))
 
 
 def make_train(config, queue: Queue = None):
