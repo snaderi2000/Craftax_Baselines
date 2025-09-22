@@ -7,6 +7,8 @@ import os
 import numpy as np
 from offline.data.npz_dataset import NPZStreamDataset
 from offline.data.buffer_wrapper import NPZReplayBuffer
+from torch.utils.data import DataLoader
+
 
 
 def test_dataset_to_buffer():
@@ -29,7 +31,7 @@ def test_dataset_to_buffer():
     buffer = NPZReplayBuffer(buffer_size=buffer_size, obs_dim=obs_dim, action_dim=action_dim)
 
     # 3. Load the first batch from the dataset
-    loader = dataset.get_dataloader(batch_size=64)  # small batch for test
+    loader = DataLoader(dataset, batch_size=64, shuffle=True, num_workers=4)
     batch = next(iter(loader))
 
     print("Batch keys:", batch.keys())
