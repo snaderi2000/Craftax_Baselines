@@ -2,7 +2,6 @@
 import numpy as np
 from offline.data.buffer_wrapper import NPZReplayBuffer
 
-
 def test_buffer_wrapper():
     obs_dim = 1345
     action_dim = 17
@@ -22,21 +21,20 @@ def test_buffer_wrapper():
     # Push to buffer
     buffer.push_batch(obs, actions, rewards, dones, next_obs)
 
-    # Assertions
+    # Validate
     assert len(buffer) == batch_size, f"Buffer length mismatch: {len(buffer)} vs {batch_size}"
-    assert buffer.obs.shape == (buffer_size, obs_dim), "Observation shape mismatch"
-    assert buffer.act.shape == (buffer_size,), "Action shape mismatch"
+    assert buffer.obs.shape == (buffer_size, obs_dim)
+    assert buffer.act.shape == (buffer_size,)
 
-    # Sample a batch
+    # Sample from buffer
     sampled_batch, indices = buffer.sample(batch_size=4)
     print("Sampled obs shape:", sampled_batch.obs.shape)
     print("Sampled actions shape:", sampled_batch.act.shape)
 
-    assert sampled_batch.obs.shape[1] == obs_dim, "Sampled obs_dim mismatch"
-    assert sampled_batch.act.shape[0] == 4, "Sample size mismatch"
+    assert sampled_batch.obs.shape[1] == obs_dim
+    assert sampled_batch.act.shape[0] == 4
 
     print("buffer_wrapper.py test PASSED!")
-
 
 if __name__ == "__main__":
     test_buffer_wrapper()
