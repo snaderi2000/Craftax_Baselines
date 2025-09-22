@@ -1,23 +1,64 @@
-from torch.utils.data import DataLoader
+# offline/data/test_dataset_to_buffer.py
+"""
+Test pipeline for streaming data from .npz files into a Tianshou ReplayBuffer.
+"""
+
+import os
+import numpy as np
 from offline.data.npz_dataset import NPZStreamDataset
 from offline.data.buffer_wrapper import NPZReplayBuffer
 
+
 def test_dataset_to_buffer():
-    data_dir = "craftax_classic_200M_dataset"
-    dataset = NPZStreamDataset(data_dir, fields=("obs", "action", "reward", "done", "next_obs"))
-    dataloader = DataLoader(dataset, batch_size=16, num_workers=0)
+    # Paths
+    data_dir = "craftax_classic_200M_dataset"  # <-- Adjust if your data folder is elsewhere
+    assert os.path.exists(data_dir), f"Data directory not found: {data_dir}"
 
-    buffer = NPZReplayBuffer(buffer_size=100, obs_dim=1345, action_dim=1)
+    # Settings
+    obs_dim = 1345
+    action_dim = 17
+    buffer_size = 5000   # Small for testing
 
-    # Stream one batch and push into buffer
-    obs, actions, rewards, dones, next_obs = next(iter(dataloader))
-    buffer.push_batch(obs.numpy(), actions.numpy(), rewards.numpy(), dones.numpy(), next_obs.numpy())
+    print(f"Loading from directory: {data_dir}")
 
-    # Verify
-    print("Buffer size:", len(buffer))
-    sample = buffer.sample(4)
-    print("Sampled obs shape:", sample.obs.shape)
-    print("Sampled actions shape:", sample.act.shape)
+    # 1. Create streaming dataset
+    dataset = NPZStreamDataset(data_dir)
+    print(f"Found {len(dataset.files)} .npz files for streaming.")
+
+    # 2. Create replay buffer
+    buffer = NPZReplayBuffer(buffer_size=buffer_size, obs_dim=obs_dim, action_dim=action_dim)
+
+    # 3. Load the first batch from the dataset
+    loader = dataset.get_dataloader(batch_size=64)  # small batch for test
+    batch = next(iter(loader))
+
+    print("Batch keys:", batch.keys())
+    print("Obs shape:", batch["obs"].shape)
+    print("Actions shape:", batch["action"].shape)
+
+    # 4. Push the batch into buffer
+    buffer.push_batch(
+        obs=batch["obs"].numpy(),
+        actions=batch["action"].numpy(),
+        rewards=batch["reward"].numpy(),
+        dones=batch["done"].numpy(),
+        next_obs=batch["next_obs"].numpy()
+    )
+
+    # 5. Validate buffer state
+    assert len(buffer) == 64, f"Buffer size mismatch: expected 64, got {len(buffer)}"
+
+    # 6. Sample from buffer
+    sampled_batch, indices = buffer.sample(batch_size=8)
+    print("Sampled obs shape:", sampled_batch.obs.shape)
+    print("Sampled act shape:", sampled_batch.act.shape)
+
+    assert sampled_batch.obs.shape == (8, obs_dim)
+    assert sampled_batch.act.shape == (8,)
+
+    print("test_dataset_to_buffer.py PASSED!")
+
 
 if __name__ == "__main__":
     test_dataset_to_buffer()
+
