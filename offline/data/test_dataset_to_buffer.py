@@ -31,7 +31,7 @@ def test_dataset_to_buffer():
     buffer = NPZReplayBuffer(buffer_size=buffer_size, obs_dim=obs_dim, action_dim=action_dim)
 
     # 3. Load the first batch from the dataset
-    loader = DataLoader(dataset, batch_size=64, shuffle=True, num_workers=4)
+    loader = DataLoader(dataset, batch_size=64,  num_workers=4)
     batch = next(iter(loader))
 
     print("Batch keys:", batch.keys())
