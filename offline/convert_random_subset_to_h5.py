@@ -1,71 +1,69 @@
+# convert_random_subset_to_h5.py
 import os
 import random
 import numpy as np
-from tqdm import tqdm
 from d3rlpy.dataset import MDPDataset
+from tqdm import tqdm
 
-# ----------------------------
+# ------------------------
 # CONFIG
-# ----------------------------
-DATA_DIR = "craftax_classic_200M_dataset"  # folder with .npz files
+# ------------------------
+DATA_DIR = "/home/synaderi/Craftax_Baselines/craftax_classic_200M_dataset"
 OUTPUT_PATH = "craftax_dataset_10percent.h5"
-SAMPLE_FRACTION = 0.10        # 10% of all files
-SEED = 42                      # reproducibility
-# ----------------------------
+NUM_FILES_TO_SAMPLE = 305     # 10% of 3051 total files
+SEED = 42                     # For reproducibility
+# ------------------------
 
-def convert_random_subset_to_h5(data_dir, output_path, fraction=0.10, seed=42):
-    random.seed(seed)
-
-    # 1. Collect all .npz files
-    files = [os.path.join(data_dir, f) for f in os.listdir(data_dir) if f.endswith(".npz")]
-    total_files = len(files)
+def convert_random_subset_to_h5(data_dir, output_path, num_files=305, seed=42):
+    # Collect all .npz files
+    all_files = [f for f in os.listdir(data_dir) if f.endswith(".npz")]
+    total_files = len(all_files)
     if total_files == 0:
         raise RuntimeError(f"No .npz files found in {data_dir}")
-    print(f"Found {total_files} files in {data_dir}")
+    
+    print(f"Found {total_files} total files in {data_dir}")
 
-    # 2. Randomly sample fraction
-    sample_size = max(1, int(total_files * fraction))
-    sampled_files = random.sample(files, sample_size)
-    print(f"Randomly selected {sample_size} files ({fraction*100:.1f}% of total)")
+    # Fix random seed and randomly sample
+    random.seed(seed)
+    sampled_files = random.sample(all_files, min(num_files, total_files))
+    print(f"Randomly selected {len(sampled_files)} files using seed {seed}")
 
-    # 3. Load data from sampled files
-    observations, actions, rewards, dones, next_observations = [], [], [], [], []
+    # Initialize lists to collect arrays
+    obs_list, next_obs_list = [], []
+    actions, rewards, dones = [], [], []
 
-    for file_path in tqdm(sampled_files, desc="Converting"):
-        data = np.load(file_path)
+    # Process each sampled file
+    for file in tqdm(sampled_files, desc="Converting"):
+        path = os.path.join(data_dir, file)
+        data = np.load(path, allow_pickle=False)
 
-        # extract fields
-        obs = data["obs"]
-        next_obs = data["next_obs"]
-        act = data["action"]
-        rew = data["reward"]
-        done = data["done"]
+        obs_list.append(data["obs"])
+        next_obs_list.append(data["next_obs"])
+        actions.append(data["action"])
+        rewards.append(data["reward"])
+        dones.append(data["done"].astype(np.float32))  # Ensure float32
 
-        observations.append(obs)
-        next_observations.append(next_obs)
-        actions.append(act)
-        rewards.append(rew)
-        dones.append(done)
+    # Concatenate into final arrays
+    observations = np.concatenate(obs_list, axis=0)
+    next_observations = np.concatenate(next_obs_list, axis=0)
+    actions = np.concatenate(actions, axis=0)
+    rewards = np.concatenate(rewards, axis=0)
+    dones = np.concatenate(dones, axis=0)
 
-    # 4. Stack into arrays
-    observations = np.concatenate(observations, axis=0).astype(np.float32)
-    next_observations = np.concatenate(next_observations, axis=0).astype(np.float32)
-    actions = np.concatenate(actions, axis=0).astype(np.int32)
-    rewards = np.concatenate(rewards, axis=0).astype(np.float32)
-    dones = np.concatenate(dones, axis=0).astype(np.float32)
+    print(f"Final subset size: {observations.shape[0]} transitions")
 
-    print(f"Final dataset shape: {observations.shape[0]} transitions")
-
-    # 5. Create and save MDPDataset
+    # Create MDPDataset for d3rlpy
     dataset = MDPDataset(
         observations=observations,
         actions=actions,
         rewards=rewards,
-        terminals=dones
+        terminals=dones,
     )
+
+    # Save to disk
     dataset.dump(output_path)
-    print(f"Saved MDPDataset to {output_path}")
+    print(f"Saved random subset MDPDataset to {output_path}")
 
 
 if __name__ == "__main__":
-    convert_random_subset_to_h5(DATA_DIR, OUTPUT_PATH, SAMPLE_FRACTION, SEED)
+    convert_random_subset_to_h5(DATA_DIR, OUTPUT_PATH, NUM_FILES_TO_SAMPLE, SEED)
