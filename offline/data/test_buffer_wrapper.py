@@ -14,7 +14,8 @@ def test_buffer_wrapper():
     dones = np.random.randint(0, 2, size=(batch_size,), dtype=np.bool_)
 
     # Create buffer
-    buffer = NPZReplayBuffer(buffer_size=100, obs_dim=obs_dim, action_dim=action_dim)
+    buffer = NPZReplayBuffer(size=100, obs_dim=obs_dim, action_dim=action_dim)
+
 
     # Push batch
     buffer.push_batch(obs, actions, rewards, dones, next_obs)
