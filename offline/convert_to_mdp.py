@@ -7,29 +7,24 @@ from tqdm import tqdm
 DATA_DIR = "/home/synaderi/Craftax_Baselines/craftax_classic_200M_dataset"
 OUTPUT_PATH = "craftax_dataset_5percent.h5"
 
-def convert_npz_to_mdp(data_dir, output_path, subset_fraction=0.05):
+def convert_npz_to_mdp(data_dir, output_path, max_files=50):
     obs_list, next_obs_list = [], []
     actions, rewards, dones = [], [], []
 
-    npz_files = sorted([f for f in os.listdir(data_dir) if f.endswith(".npz")])
+    # Grab only the first `max_files` files
+    npz_files = sorted([f for f in os.listdir(data_dir) if f.endswith(".npz")])[:max_files]
 
-    print(f"Found {len(npz_files)} files. Using {subset_fraction*100:.1f}% of each file.")
+    print(f"Found {len(npz_files)} files to convert...")
 
     for file in tqdm(npz_files, desc="Converting"):
         path = os.path.join(data_dir, file)
         data = np.load(path, allow_pickle=False)
 
-        N = data["obs"].shape[0]
-
-        # Randomly sample 5% of the transitions from this file
-        keep_count = int(N * subset_fraction)
-        indices = np.random.choice(N, keep_count, replace=False)
-
-        obs_list.append(data["obs"][indices])
-        next_obs_list.append(data["next_obs"][indices])
-        actions.append(data["action"][indices])
-        rewards.append(data["reward"][indices])
-        dones.append(data["done"][indices].astype(np.float32))
+        obs_list.append(data["obs"])
+        next_obs_list.append(data["next_obs"])
+        actions.append(data["action"])
+        rewards.append(data["reward"])
+        dones.append(data["done"].astype(np.float32))
 
     # Concatenate into single arrays
     observations = np.concatenate(obs_list, axis=0)
@@ -53,4 +48,4 @@ def convert_npz_to_mdp(data_dir, output_path, subset_fraction=0.05):
 
 
 if __name__ == "__main__":
-    convert_npz_to_mdp(DATA_DIR, OUTPUT_PATH, subset_fraction=0.05)
+    convert_npz_to_mdp(DATA_DIR, OUTPUT_PATH, max_files=50)
