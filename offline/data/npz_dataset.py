@@ -4,18 +4,26 @@ import os
 import random
 
 class NPZStreamDataset(IterableDataset):
-    def __init__(self, data_dir, fields=("obs", "action"), shuffle=True):
+    def __init__(self, data_dir, shuffle=True):
         self.files = [os.path.join(data_dir, f) for f in os.listdir(data_dir) if f.endswith(".npz")]
+        if len(self.files) == 0:
+            raise ValueError(f"No .npz files found in {data_dir}")
         self.shuffle = shuffle
-        self.fields = fields  # allows us to only load obs/action for BC
 
     def __iter__(self):
         files = self.files.copy()
         if self.shuffle:
             random.shuffle(files)
+
         for f in files:
             data = np.load(f)
-            arrays = [data[k] for k in self.fields]
-            length = len(arrays[0])
+            length = len(data["obs"])
             for i in range(length):
-                yield tuple(arr[i] for arr in arrays)
+                # Return a dict for each transition
+                yield {
+                    "obs": data["obs"][i],
+                    "action": data["action"][i],
+                    "reward": data["reward"][i],
+                    "done": data["done"][i],
+                    "next_obs": data["next_obs"][i],
+                }
