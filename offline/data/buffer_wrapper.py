@@ -1,21 +1,17 @@
-import numpy as np
-from tianshou.data import ReplayBuffer
+from tianshou.data import ReplayBuffer, Batch
 
 class NPZReplayBuffer(ReplayBuffer):
-    def __init__(self, buffer_size, obs_dim, action_dim, **kwargs):
-        super().__init__(buffer_size, **kwargs)
-        self.obs_dim = obs_dim
-        self.action_dim = action_dim
+    def __init__(self, size, **kwargs):
+        super().__init__(size=size, **kwargs)
 
     def push_batch(self, obs, actions, rewards, dones, next_obs):
-        """Push a batch of transitions into the replay buffer."""       
+        """Push a batch of transitions into the replay buffer."""
         data = Batch(
-        obs=obs,
-        act=actions,
-        rew=rewards,
-        done=dones,
-        obs_next=next_obs,
-        info={}  # now correctly nested inside Batch
-    )
-    self.add(data)  # pass Batch instead of individual keyword args
-
+            obs=obs,
+            act=actions,
+            rew=rewards,
+            done=dones,
+            obs_next=next_obs,
+            info={}  # wrap info properly inside Batch
+        )
+        self.add(data)  # ✅ self is valid here because we are inside a method
