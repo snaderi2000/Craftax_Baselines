@@ -66,8 +66,6 @@ def main():
     # ---- Initialize W&B ----
     wandb_logger = WanDBAdapterFactory(project=WANDB_PROJECT)
 
-    print(f"Using W&B project: {WANDB_PROJECT})
-
     # ---- Load Dataset ----
     buffer = FIFOBuffer(limit=None)
     with open(DATASET_PATH, "rb") as f:
