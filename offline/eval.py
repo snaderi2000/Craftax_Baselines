@@ -4,7 +4,7 @@ from craftax.craftax_env import make_craftax_env_from_name
 from d3rlpy import load_learnable
 
 
-from models.actor_critic import ActorCritic
+from Craftax_Baselines.models.actor_critic import ActorCritic
 from orbax.checkpoint import PyTreeCheckpointer
 
 
