@@ -1,0 +1,67 @@
+random sample 
+
+
+===== FINAL EVALUATION =====
+Episodes: 100
+Average Reward: 8.57
+
+Achievement Success Rates:
+collect_coal: 29.0%
+collect_diamond: 0.0%
+collect_drink: 52.0%
+collect_iron: 11.0%
+collect_sapling: 100.0%
+collect_stone: 54.0%
+collect_wood: 100.0%
+defeat_skeleton: 33.0%
+defeat_zombie: 69.0%
+eat_cow: 62.0%
+eat_plant: 0.0%
+make_iron_pickaxe: 5.0%
+make_iron_sword: 2.0%
+make_stone_pickaxe: 26.0%
+make_stone_sword: 22.0%
+make_wood_pickaxe: 65.0%
+make_wood_sword: 36.0%
+place_furnace: 36.0%
+place_plant: 100.0%
+place_stone: 46.0%
+place_table: 90.0%
+wake_up: 11.0%
+
+===== Calculated Metrics =====
+Reward (Average Achievement): 43.14
+Score: 24.45
+
+PPO 
+
+Achievement Success Rates:
+collect_coal: 93.0%
+collect_diamond: 2.0%
+collect_drink: 94.0%
+collect_iron: 87.0%
+collect_sapling: 98.0%
+collect_stone: 98.0%
+collect_wood: 100.0%
+defeat_skeleton: 87.0%
+defeat_zombie: 98.0%
+eat_cow: 98.0%
+eat_plant: 0.0%
+make_iron_pickaxe: 72.0%
+make_iron_sword: 63.0%
+make_stone_pickaxe: 95.0%
+make_stone_sword: 92.0%
+make_wood_pickaxe: 100.0%
+make_wood_sword: 97.0%
+place_furnace: 98.0%
+place_plant: 98.0%
+place_stone: 93.0%
+place_table: 100.0%
+wake_up: 72.0%
+
+===== Calculated Metrics =====
+Reward (Average Achievement): 83.41
+Score: 63.11
+
+
+
