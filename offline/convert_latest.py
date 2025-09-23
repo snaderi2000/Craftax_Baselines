@@ -33,12 +33,39 @@ def split_into_episodes(obs, actions, rewards, dones):
     return episodes
 
 
-def convert_npz_to_replay_buffer(data_dir, output_path, num_files=None, seed=42):
+def convert_npz_to_replay_buffer(data_dir, output_path, num_files=None, seed=42, end_batch=None):
     # Collect all files
     all_files = [os.path.join(data_dir, f) for f in os.listdir(data_dir) if f.endswith(".npz")]
     if len(all_files) == 0:
         raise RuntimeError(f"No .npz files found in {data_dir}")
     print(f"Found {len(all_files)} total .npz files")
+
+    # Optionally filter by batch index if `end_batch` is provided.
+    # Filenames are expected like 'batch_<num>.npz'. If parsing fails for a file,
+    # it will be ignored when `end_batch` is used.
+    if end_batch is not None:
+        def parse_batch_index(path):
+            name = os.path.basename(path)
+            if name.startswith("batch_") and name.endswith(".npz"):
+                try:
+                    num = int(name[len("batch_"):-len(".npz")])
+                    return num
+                except ValueError:
+                    return None
+            return None
+
+        filtered = []
+        for p in all_files:
+            idx = parse_batch_index(p)
+            if idx is None:
+                continue
+            if idx <= end_batch:
+                filtered.append(p)
+
+        if len(filtered) == 0:
+            raise RuntimeError(f"No batch files found with index <= {end_batch}")
+        all_files = filtered
+        print(f"Filtered to {len(all_files)} files with batch index <= {end_batch}")
 
     # Select the last `num_files` by modification time (most recent files)
     if num_files:

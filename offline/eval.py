@@ -4,14 +4,14 @@ from craftax.craftax_env import make_craftax_env_from_name
 from d3rlpy import load_learnable
 
 
-from models.actor_critic import ActorCritic
-from orbax.checkpoint import PyTreeCheckpointer
+# from models.actor_critic import ActorCritic
+# from orbax.checkpoint import PyTreeCheckpointer
 
 
 # ===============================
 # CONFIG
 # ===============================
-MODEL_PATH = "/home/synaderi/Craftax_Baselines/wandb/run-20250920_004428-yx5czycf/files/policies/200000000/default" #"cql_craftax_final.d3"
+MODEL_PATH = #"/home/synaderi/Craftax_Baselines/wandb/run-20250920_004428-yx5czycf/files/policies/200000000/default" #"cql_craftax_final.d3"
 ENV_NAME = "Craftax-Classic-Symbolic-v1"
 EVAL_EPISODES = 100
 SEED = 42  # reproducibility
@@ -55,21 +55,21 @@ def evaluate_model():
 
     # Load trained model
     print(f"Loading model: {MODEL_PATH}")
-    #cql = load_learnable(MODEL_PATH)
+    cql = load_learnable(MODEL_PATH)
 
-    # 1. Initialize the network architecture to match the trained model.
-    #    This creates the "empty shell" of your model.
-    network = ActorCritic(action_dim=env.action_space(env_params).n, layer_width=512)
+    # # 1. Initialize the network architecture to match the trained model.
+    # #    This creates the "empty shell" of your model.
+    # network = ActorCritic(action_dim=env.action_space(env_params).n, layer_width=512)
 
 
-    # 2. Create an Orbax checkpointer to handle the loading.
-    orbax_checkpointer = PyTreeCheckpointer()
+    # # 2. Create an Orbax checkpointer to handle the loading.
+    # orbax_checkpointer = PyTreeCheckpointer()
 
-    # 3. Restore the entire saved training state from the directory.
-    restored_train_state = orbax_checkpointer.restore(MODEL_PATH)
+    # # 3. Restore the entire saved training state from the directory.
+    # restored_train_state = orbax_checkpointer.restore(MODEL_PATH)
 
-    # 4. Extract just the model weights ('params') for inference.
-    params = restored_train_state["params"]
+    # # 4. Extract just the model weights ('params') for inference.
+    # params = restored_train_state["params"]
 
     @jax.jit
     def predict_action(p, obs):
@@ -100,10 +100,10 @@ def evaluate_model():
 
         while not done:
             # Convert obs to numpy for the model
-            # obs_np = np.array(obs, dtype=np.float32).reshape(1, -1)  # shape (1, obs_dim)
-            # action = cql.predict(obs_np)[0]
+            obs_np = np.array(obs, dtype=np.float32).reshape(1, -1)  # shape (1, obs_dim)
+            action = cql.predict(obs_np)[0]
 
-            action = predict_action(params, obs)
+            #action = predict_action(params, obs)
 
             # Step environment
             rng, rng_step = jax.random.split(rng)
