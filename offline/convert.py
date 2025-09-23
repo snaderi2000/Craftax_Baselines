@@ -26,7 +26,7 @@ def split_into_episodes(obs, actions, rewards, dones):
                 observations=obs[start:i+1],
                 actions=actions[start:i+1],
                 rewards=rewards[start:i+1],
-                dones=dones[start:i+1],  # d3rlpy v2 uses 'dones', not 'terminals'
+                terminals=dones[start:i+1],  # <-- FIXED HERE
             )
             episodes.append(episode)
             start = i + 1
