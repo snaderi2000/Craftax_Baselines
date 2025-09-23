@@ -4,6 +4,7 @@ import wandb
 from d3rlpy.dataset import ReplayBuffer, FIFOBuffer, Transition
 from d3rlpy.algos import DiscreteCQLConfig
 from d3rlpy.dataset.transition_pickers import TransitionPickerProtocol
+from d3rlpy.logging import WanDBAdapterFactory
 
 # ===============================
 # CONFIGURATION
@@ -22,6 +23,7 @@ BATCH_SIZE = 32
 # FIX: Custom Transition Picker
 # ===============================
 class DiscreteTransitionPicker(TransitionPickerProtocol):
+    """Fix for d3rlpy requiring extra fields: next_action and rewards_to_go."""
     def __call__(self, episode, index: int) -> Transition:
         obs = episode.observations[index]
 
@@ -61,7 +63,7 @@ class DiscreteTransitionPicker(TransitionPickerProtocol):
 # MAIN SCRIPT
 # ===============================
 def main():
-    # ---- W&B Setup ----
+    # ---- Initialize W&B ----
     wandb.init(project=WANDB_PROJECT, name=WANDB_RUN_NAME)
     print(f"Using W&B project: {WANDB_PROJECT}, run name: {WANDB_RUN_NAME}")
 
@@ -71,7 +73,7 @@ def main():
         replay_buffer = ReplayBuffer.load(
             f,
             buffer,
-            transition_picker=DiscreteTransitionPicker()
+            transition_picker=DiscreteTransitionPicker()  # custom picker fix
         )
 
     # Dataset info
@@ -90,13 +92,18 @@ def main():
     print(f"  Rewards shape: {batch.rewards.shape} | dtype: {batch.rewards.dtype}")
     print(f"  First 5 actions: {batch.actions[:5].flatten()}")
     print(f"  First 5 rewards: {batch.rewards[:5].flatten()}")
-    print("Next actions shape:", batch.next_actions.shape)
-    print("Rewards-to-go shape:", batch.rewards_to_go.shape)
-
+    print("  Next actions shape:", batch.next_actions.shape)
+    print("  Rewards-to-go shape:", batch.rewards_to_go.shape)
 
     # ---- Initialize CQL ----
     cql = DiscreteCQLConfig().create(device="cuda:0")
     print("\nCQL agent initialized on GPU.")
+
+    # ---- Setup W&B Logger ----
+    wandb_logger = WanDBAdapterFactory(
+        project=WANDB_PROJECT,
+        entity=None  # Optional: set your W&B team/entity
+    )
 
     # ---- Train ----
     print("\nStarting training...")
@@ -105,6 +112,7 @@ def main():
         n_steps=TOTAL_STEPS,
         n_steps_per_epoch=EPOCH_STEPS,
         experiment_name=EXPERIMENT_NAME,
+        logger_adapter=wandb_logger,  # <- Integrates directly with W&B
         with_timestamp=True,
         show_progress=True
     )
