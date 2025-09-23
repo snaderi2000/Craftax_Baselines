@@ -64,8 +64,9 @@ class DiscreteTransitionPicker(TransitionPickerProtocol):
 # ===============================
 def main():
     # ---- Initialize W&B ----
-    wandb.init(project=WANDB_PROJECT, name=WANDB_RUN_NAME)
-    print(f"Using W&B project: {WANDB_PROJECT}, run name: {WANDB_RUN_NAME}")
+    wandb_logger = WanDBAdapterFactory(project=WANDB_PROJECT)
+
+    print(f"Using W&B project: {WANDB_PROJECT})
 
     # ---- Load Dataset ----
     buffer = FIFOBuffer(limit=None)
@@ -99,11 +100,7 @@ def main():
     cql = DiscreteCQLConfig().create(device="cuda:0")
     print("\nCQL agent initialized on GPU.")
 
-    # ---- Setup W&B Logger ----
-    wandb_logger = WanDBAdapterFactory(
-        project=WANDB_PROJECT,
-        entity=None  # Optional: set your W&B team/entity
-    )
+ 
 
     # ---- Train ----
     print("\nStarting training...")
@@ -116,6 +113,7 @@ def main():
         with_timestamp=True,
         show_progress=True
     )
+
 
     # ---- Save Final Model ----
     cql.save(MODEL_SAVE_PATH)
