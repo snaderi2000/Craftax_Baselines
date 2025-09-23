@@ -8,7 +8,7 @@ from d3rlpy import load_learnable
 # ===============================
 MODEL_PATH = "cql_craftax_final.d3"
 ENV_NAME = "Craftax-Classic-Symbolic-v1"
-EVAL_EPISODES = 20
+EVAL_EPISODES = 100
 SEED = 42  # reproducibility
 
 # Correct achievement keys
