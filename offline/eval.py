@@ -67,7 +67,9 @@ def evaluate_model():
 
         while not done:
             # Convert obs to numpy for the model
-            action = cql.predict([np.array(obs, dtype=np.float32)])[0]
+            obs_np = np.array(obs, dtype=np.float32).reshape(1, -1)  # shape (1, obs_dim)
+            action = cql.predict(obs_np)[0]
+
 
             # Step environment
             rng, rng_step = jax.random.split(rng)
