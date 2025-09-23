@@ -13,29 +13,30 @@ SEED = 42  # reproducibility
 
 # Correct achievement keys
 ACHIEVEMENT_KEYS = [
-    "collect_coal",
-    "collect_diamond",
-    "collect_drink",
-    "collect_iron",
-    "collect_sapling",
-    "collect_stone",
-    "collect_wood",
-    "defeat_skeleton",
-    "defeat_zombie",
-    "eat_cow",
-    "eat_plant",
-    "make_iron_pickaxe",
-    "make_iron_sword",
-    "make_stone_pickaxe",
-    "make_stone_sword",
-    "make_wood_pickaxe",
-    "make_wood_sword",
-    "place_furnace",
-    "place_plant",
-    "place_stone",
-    "place_table",
-    "wake_up",
+    "Achievements/collect_coal",
+    "Achievements/collect_diamond",
+    "Achievements/collect_drink",
+    "Achievements/collect_iron",
+    "Achievements/collect_sapling",
+    "Achievements/collect_stone",
+    "Achievements/collect_wood",
+    "Achievements/defeat_skeleton",
+    "Achievements/defeat_zombie",
+    "Achievements/eat_cow",
+    "Achievements/eat_plant",
+    "Achievements/make_iron_pickaxe",
+    "Achievements/make_iron_sword",
+    "Achievements/make_stone_pickaxe",
+    "Achievements/make_stone_sword",
+    "Achievements/make_wood_pickaxe",
+    "Achievements/make_wood_sword",
+    "Achievements/place_furnace",
+    "Achievements/place_plant",
+    "Achievements/place_stone",
+    "Achievements/place_table",
+    "Achievements/wake_up",
 ]
+
 
 # ===============================
 # EVALUATION
@@ -79,9 +80,11 @@ def evaluate_model():
             steps += 1
 
             # Update achievements
-            if "achievements" in info:
-                for key in ACHIEVEMENT_KEYS:
-                    achievement_counts[key] += info["achievements"].get(key, 0)
+            for key in ACHIEVEMENT_KEYS:
+                if float(info[key]) > 0:
+                    achievement_counts[key] += 1
+
+           
 
         episode_rewards.append(total_reward)
         print(f"Episode {ep + 1}/{EVAL_EPISODES}: reward={total_reward:.2f}, steps={steps}")
@@ -95,8 +98,10 @@ def evaluate_model():
 
     print("Achievement Success Rates:")
     for key in ACHIEVEMENT_KEYS:
-        rate = (achievement_counts[key] / EVAL_EPISODES) * 100
-        print(f"{key}: {rate:.1f}%")
+        clean_name = key.replace("Achievements/", "")
+        rate = 100.0 * achievement_counts[key] / num_episodes
+        print(f"{clean_name}: {rate:.1f}%")
+
 
 if __name__ == "__main__":
     evaluate_model()
