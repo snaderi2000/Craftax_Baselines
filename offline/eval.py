@@ -3,119 +3,98 @@ import numpy as np
 from craftax.craftax_env import make_craftax_env_from_name
 from d3rlpy import load_learnable
 
-# -------------------
-# Config
-# -------------------
+# ===============================
+# CONFIG
+# ===============================
 MODEL_PATH = "cql_craftax_final.d3"
-N_EVAL_EPISODES = 20
-MAX_STEPS = 5000
+ENV_NAME = "Craftax-Classic-Symbolic-v1"
+EVAL_EPISODES = 20
+SEED = 42  # reproducibility
 
-# Achievement names (your list, in order)
-ACHIEVEMENT_NAMES = [
-    "Collect Coal",
-    "Collect Diamond",
-    "Collect Drink",
-    "Collect Iron",
-    "Collect Sapling",
-    "Collect Stone",
-    "Collect Wood",
-    "Defeat Skeleton",
-    "Defeat Zombie",
-    "Eat Cow",
-    "Eat Plant",
-    "Make Iron Pickaxe",
-    "Make Iron Sword",
-    "Make Stone Pickaxe",
-    "Make Stone Sword",
-    "Make Wood Pickaxe",
-    "Make Wood Sword",
-    "Place Furnace",
-    "Place Plant",
-    "Place Stone",
-    "Place Table",
-    "Wake Up",
+# Correct achievement keys
+ACHIEVEMENT_KEYS = [
+    "collect_coal",
+    "collect_diamond",
+    "collect_drink",
+    "collect_iron",
+    "collect_sapling",
+    "collect_stone",
+    "collect_wood",
+    "defeat_skeleton",
+    "defeat_zombie",
+    "eat_cow",
+    "eat_plant",
+    "make_iron_pickaxe",
+    "make_iron_sword",
+    "make_stone_pickaxe",
+    "make_stone_sword",
+    "make_wood_pickaxe",
+    "make_wood_sword",
+    "place_furnace",
+    "place_plant",
+    "place_stone",
+    "place_table",
+    "wake_up",
 ]
-N_ACH = len(ACHIEVEMENT_NAMES)
 
-def get_ach_vector(info):
-    """
-    Return a 1D float array of length N_ACH for achievements this step.
-    Tries common keys; pads/truncates to N_ACH if shape differs.
-    """
-    vec = None
-    for k in ["achievements", "achievement", "achievement_counts"]:
-        if k in info:
-            vec = np.array(info[k], dtype=np.float32).ravel()
-            break
-    if vec is None:
-        vec = np.zeros(N_ACH, dtype=np.float32)
-
-    # pad or trim to match our list length
-    if vec.size < N_ACH:
-        vec = np.pad(vec, (0, N_ACH - vec.size))
-    elif vec.size > N_ACH:
-        vec = vec[:N_ACH]
-    return vec
-
-def main():
-    # ---- Env ----
-    print("Initializing Craftax-Classic-Symbolic-v1 ...")
-    rng = jax.random.PRNGKey(0)
-    env = make_craftax_env_from_name("Craftax-Classic-Symbolic-v1", True)
+# ===============================
+# EVALUATION
+# ===============================
+def evaluate_model():
+    print(f"Initializing {ENV_NAME} ...")
+    env = make_craftax_env_from_name(ENV_NAME, auto_reset=True)
     env_params = env.default_params
-    obs_shape = env.observation_space(env_params).shape
-    action_n = env.action_space(env_params).n
-    print(f"Obs shape: {obs_shape} | Action space size: {action_n}")
 
-    # ---- Model ----
+    rng = jax.random.PRNGKey(SEED)
+
+    # Load trained model
     print(f"Loading model: {MODEL_PATH}")
-    agent = load_learnable(MODEL_PATH)
-    print("Model loaded.\n")
+    cql = load_learnable(MODEL_PATH)
+    print("Model loaded.")
 
-    total_rewards = []
-    # success counter: how many episodes each achievement was achieved at least once
-    ach_episode_success = np.zeros(N_ACH, dtype=np.float32)
+    # Track achievements
+    achievement_counts = {key: 0 for key in ACHIEVEMENT_KEYS}
 
-    for ep in range(N_EVAL_EPISODES):
-        rng, r0 = jax.random.split(rng)
-        obs, state = env.reset(r0, env_params)
-        ep_reward = 0.0
+    episode_rewards = []
+
+    for ep in range(EVAL_EPISODES):
+        rng, rng_reset = jax.random.split(rng)
+        obs, state = env.reset(rng_reset, env_params)
+
         done = False
+        total_reward = 0.0
+        steps = 0
 
-        # track whether each achievement was hit at least once in this episode
-        ep_hit = np.zeros(N_ACH, dtype=np.float32)
+        while not done:
+            # Convert obs to numpy for the model
+            action = cql.predict([np.array(obs, dtype=np.float32)])[0]
 
-        for t in range(MAX_STEPS):
-            obs_np = np.asarray(obs, dtype=np.float32).reshape(1, -1)
-            action = int(agent.predict(obs_np)[0])
+            # Step environment
+            rng, rng_step = jax.random.split(rng)
+            obs, state, reward, done, info = env.step(rng_step, state, action, env_params)
 
-            rng, r1 = jax.random.split(rng)
-            obs, state, reward, done, info = env.step(r1, state, action, env_params)
-            ep_reward += float(reward)
+            total_reward += float(reward)
+            steps += 1
 
-            ach_vec = get_ach_vector(info)
-            ep_hit = np.maximum(ep_hit, (ach_vec > 0).astype(np.float32))
+            # Update achievements
+            if "achievements" in info:
+                for key in ACHIEVEMENT_KEYS:
+                    achievement_counts[key] += info["achievements"].get(key, 0)
 
-            if done:
-                break
+        episode_rewards.append(total_reward)
+        print(f"Episode {ep + 1}/{EVAL_EPISODES}: reward={total_reward:.2f}, steps={steps}")
 
-        total_rewards.append(ep_reward)
-        ach_episode_success += ep_hit
-
-        print(f"Episode {ep+1}/{N_EVAL_EPISODES}: reward={ep_reward:.2f}, steps={t+1}")
-
-    # ---- Summary ----
+    # ===============================
+    # FINAL SUCCESS RATES
+    # ===============================
     print("\n===== FINAL EVALUATION =====")
-    print(f"Episodes: {N_EVAL_EPISODES}")
-    print(f"Average Reward: {np.mean(total_rewards):.2f}")
+    print(f"Episodes: {EVAL_EPISODES}")
+    print(f"Average Reward: {np.mean(episode_rewards):.2f}\n")
 
-    print("\nAchievement Success Rates:")
-    for i, name in enumerate(ACHIEVEMENT_NAMES):
-        rate = (ach_episode_success[i] / N_EVAL_EPISODES) * 100.0
-        print(f"{name} {rate:.1f}%")
-
-    mean_rate = np.mean(ach_episode_success / N_EVAL_EPISODES) * 100.0
-    print(f"\nOverall Mean Success Rate: {mean_rate:.1f}%")
+    print("Achievement Success Rates:")
+    for key in ACHIEVEMENT_KEYS:
+        rate = (achievement_counts[key] / EVAL_EPISODES) * 100
+        print(f"{key}: {rate:.1f}%")
 
 if __name__ == "__main__":
-    main()
+    evaluate_model()
