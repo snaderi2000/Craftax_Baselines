@@ -101,6 +101,22 @@ def evaluate_model():
         clean_name = key.replace("Achievements/", "")
         rate = 100.0 * achievement_counts[key] / EVAL_EPISODES
         print(f"{clean_name}: {rate:.1f}%")
+    
+        # Calculate Reward and Score
+    # Extract the total counts for each achievement and convert them to percentage rates
+    achievement_rates = np.array(list(achievement_counts.values())) / EVAL_EPISODES * 100
+    
+    # Calculate the Reward (Arithmetic Mean of percentages)
+    average_reward = np.mean(achievement_rates)
+
+    # Calculate the Score using the geometric mean formula
+    score = np.exp(np.mean(np.log1p(achievement_rates))) - 1
+
+    # Print the calculated metrics
+    print("\n===== Calculated Metrics =====")
+    print(f"Reward (Average Achievement): {average_reward:.2f}")
+    print(f"Score: {score:.2f}")
+
 
 
 if __name__ == "__main__":
