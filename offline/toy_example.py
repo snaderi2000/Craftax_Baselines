@@ -9,20 +9,21 @@ class DiscreteTransitionPicker(BasicTransitionPicker):
         # Use default BasicTransitionPicker logic
         t = super().__call__(episode, index)
 
-        # Wrap action as a vector to avoid shape errors
-        wrapped_action = np.array([t.action], dtype=np.int32)
+        # Wrap action and reward to ensure correct shape
+        wrapped_action = np.array([t.action], dtype=np.int32)      # shape (1,)
+        wrapped_reward = np.array([t.reward], dtype=np.float32)    # shape (1,)
 
-        # Return a Transition object with required extra fields
         return Transition(
             observation=t.observation,
-            action=wrapped_action,                       # FIXED shape -> (1,)
-            reward=t.reward,
+            action=wrapped_action,                       # FIXED
+            reward=wrapped_reward,                       # FIXED
             next_observation=t.next_observation,
             terminal=t.terminal,
             interval=t.interval,
             next_action=np.array([0], dtype=np.int32),   # placeholder
             rewards_to_go=np.array([0.0], dtype=np.float32)  # placeholder
         )
+
 
 # =========================================================
 # Create Toy Dataset
