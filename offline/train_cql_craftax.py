@@ -38,6 +38,13 @@ def main():
     cql = DiscreteCQLConfig().create(device="cuda:0")
     print("CQL agent initialized on GPU.")
 
+    batch = replay_buffer.sample_transition_batch(batch_size=32)
+
+    print("Sampled batch actions shape:", batch.actions.shape)
+    print("Sampled batch actions dtype:", batch.actions.dtype)
+    print("First few actions:", batch.actions[:10])
+
+
     # ---- Train ----
     cql.fit(
         replay_buffer,
