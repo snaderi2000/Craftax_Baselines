@@ -22,24 +22,29 @@ BATCH_SIZE = 32
 # FIX: Custom Transition Picker
 # ===============================
 class DiscreteTransitionPicker(TransitionPickerProtocol):
-    """
-    Ensures actions and rewards are always returned as 2D arrays
-    with shapes compatible for batching in d3rlpy.
-    """
-
     def __call__(self, episode, index: int) -> Transition:
         obs = episode.observations[index]
 
-        # Determine terminal
+        # Check if this is the final step
         is_terminal = episode.terminated and index == episode.size() - 1
-        if is_terminal:
-            next_obs = np.zeros_like(obs)
-        else:
-            next_obs = episode.observations[index + 1]
 
-        # Wrap scalar values as 2D
-        action = np.array([episode.actions[index]], dtype=np.int32)    # (1,)
-        reward = np.array([episode.rewards[index]], dtype=np.float32)  # (1,)
+        # Next observation
+        next_obs = np.zeros_like(obs) if is_terminal else episode.observations[index + 1]
+
+        # ---- FIX 1: Wrap action and reward in arrays ----
+        action = np.array([episode.actions[index]], dtype=np.int32)       # shape (1,)
+        reward = np.array([episode.rewards[index]], dtype=np.float32)     # shape (1,)
+
+        # ---- FIX 2: Add next_action ----
+        if is_terminal:
+            next_action = np.zeros_like(action)
+        else:
+            next_action = np.array([episode.actions[index + 1]], dtype=np.int32)
+
+        # ---- FIX 3: Compute rewards_to_go ----
+        rewards_to_go = np.array(
+            [np.sum(episode.rewards[index:])], dtype=np.float32
+        )  # shape (1,)
 
         return Transition(
             observation=obs,
@@ -47,7 +52,9 @@ class DiscreteTransitionPicker(TransitionPickerProtocol):
             reward=reward,
             next_observation=next_obs,
             terminal=float(is_terminal),
-            interval=1
+            interval=1,
+            next_action=next_action,
+            rewards_to_go=rewards_to_go,
         )
 
 # ===============================
@@ -83,6 +90,9 @@ def main():
     print(f"  Rewards shape: {batch.rewards.shape} | dtype: {batch.rewards.dtype}")
     print(f"  First 5 actions: {batch.actions[:5].flatten()}")
     print(f"  First 5 rewards: {batch.rewards[:5].flatten()}")
+    print("Next actions shape:", batch.next_actions.shape)
+    print("Rewards-to-go shape:", batch.rewards_to_go.shape)
+
 
     # ---- Initialize CQL ----
     cql = DiscreteCQLConfig().create(device="cuda:0")
