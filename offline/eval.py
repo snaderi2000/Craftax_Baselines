@@ -59,7 +59,8 @@ def evaluate_model():
 
     # 1. Initialize the network architecture to match the trained model.
     #    This creates the "empty shell" of your model.
-    network = ActorCritic(action_space=env.action_space(env_params).n, layer_size=512)
+    network = ActorCritic(action_dim=env.action_space(env_params).n, layer_width=512)
+
 
     # 2. Create an Orbax checkpointer to handle the loading.
     orbax_checkpointer = PyTreeCheckpointer()
