@@ -92,7 +92,6 @@ def main():
     print(f"  First 5 actions: {batch.actions[:5].flatten()}")
     print(f"  First 5 rewards: {batch.rewards[:5].flatten()}")
     print("  Next actions shape:", batch.next_actions.shape)
-    print("  Rewards-to-go shape:", batch.rewards_to_go.shape)
 
     # ---- Initialize CQL ----
     cql = DiscreteCQLConfig().create(device="cuda:0")
