@@ -174,3 +174,4 @@ texture_cache*.pbz2
 trained_models_orbax/
 .DS_Store
 craftax_classic_200M_dataset/
+*.h5

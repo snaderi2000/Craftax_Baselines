@@ -9,7 +9,7 @@ from d3rlpy.dataset import ReplayBuffer, FIFOBuffer, Episode
 # -----------------------
 DATA_DIR = "/home/synaderi/Craftax_Baselines/craftax_classic_200M_dataset"  # folder with .npz files
 OUTPUT_PATH = "craftax_dataset_cleaned.h5"  # output file
-NUM_FILES_TO_SAMPLE = None  # or set to 64 to sample a subset
+NUM_FILES_TO_SAMPLE = 64  # or set to 64 to sample a subset
 SEED = 42
 # -----------------------
 
@@ -71,7 +71,7 @@ def convert_npz_to_replay_buffer(data_dir, output_path, num_files=None, seed=42)
     replay_buffer = ReplayBuffer(buffer, episodes=all_episodes)
 
     # Save to file
-    with open(output_path, "wb") as f:
+    with open(output_path, "w+b") as f:
         replay_buffer.dump(f)
 
     print(f"Saved ReplayBuffer to {output_path}")
