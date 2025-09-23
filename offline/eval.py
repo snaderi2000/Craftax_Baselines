@@ -7,8 +7,8 @@ from d3rlpy import load_learnable
 # Config
 # -------------------
 MODEL_PATH = "cql_craftax_final.d3"
-N_EVAL_EPISODES = 10
-MAX_STEPS = 500
+N_EVAL_EPISODES = 20
+MAX_STEPS = 5000
 
 # Achievement names (your list, in order)
 ACHIEVEMENT_NAMES = [
