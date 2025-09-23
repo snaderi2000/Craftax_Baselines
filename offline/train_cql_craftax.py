@@ -104,6 +104,11 @@ def main():
 
     wandb_logger = WanDBAdapterFactory(project=WANDB_PROJECT)
 
+    print("Checking W&B Logger Factory...")
+    wandb_logger_instance = wandb_logger.create(cql, "craftax_cql", EPOCH_STEPS)
+    print("Logger created:", wandb_logger_instance)
+
+
 
     # ---- Train ----
     print("\nStarting training...")
