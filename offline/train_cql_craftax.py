@@ -27,10 +27,12 @@ def main():
     with open(DATASET_PATH, "rb") as f:
         replay_buffer = ReplayBuffer.load(f, buffer)
 
-    print(f"Dataset loaded: {len(replay_buffer.episodes)} episodes, "
-          f"{replay_buffer.transition_count} transitions")
-    print(f"Action space: {replay_buffer.action_space}, "
-          f"Action size: {replay_buffer.action_size}")
+    # Access dataset info
+    info = replay_buffer.dataset_info
+    print(f"Dataset loaded: {len(replay_buffer.episodes)} episodes, {replay_buffer.transition_count} transitions")
+    print(f"Action space: {info.action_space}, Action size: {info.action_size}")
+    print(f"Observation signature: {info.observation_signature}")
+
 
     # ---- Initialize CQL ----
     cql = DiscreteCQLConfig().create(device="cuda:0")
