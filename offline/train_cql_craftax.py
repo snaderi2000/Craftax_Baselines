@@ -1,6 +1,6 @@
 import wandb
 from d3rlpy.dataset import ReplayBuffer, FIFOBuffer
-from d3rlpy.algos import CQLConfig
+from d3rlpy.algos import DiscreteCQLConfig
 from d3rlpy import load_learnable
 
 # ---- W&B ----
@@ -14,7 +14,7 @@ with open("craftax_dataset_cleaned.h5", "rb") as f:
 print(f"Dataset loaded: {len(replay_buffer.episodes)} episodes, {replay_buffer.transition_count} transitions")
 
 # ---- Initialize CQL ----
-cql = CQLConfig().create(device="cuda:0")
+cql = DiscreteCQLConfig().create(device="cuda:0")
 
 # ---- Train ----
 cql.fit(
