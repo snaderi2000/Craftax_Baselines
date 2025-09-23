@@ -100,7 +100,10 @@ def main():
     cql = DiscreteCQLConfig().create(device="cuda:0")
     print("\nCQL agent initialized on GPU.")
 
- 
+    cql.build_with_dataset(replay_buffer)
+
+    wandb_logger = WanDBAdapterFactory(project=WANDB_PROJECT)
+
 
     # ---- Train ----
     print("\nStarting training...")
