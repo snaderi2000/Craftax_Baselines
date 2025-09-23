@@ -99,7 +99,7 @@ def evaluate_model():
     print("Achievement Success Rates:")
     for key in ACHIEVEMENT_KEYS:
         clean_name = key.replace("Achievements/", "")
-        rate = 100.0 * achievement_counts[key] / num_episodes
+        rate = 100.0 * achievement_counts[key] / EVAL_EPISODES
         print(f"{clean_name}: {rate:.1f}%")
 
 
