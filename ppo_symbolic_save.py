@@ -48,6 +48,8 @@ class Transition(NamedTuple):
     obs: jnp.ndarray
     next_obs: jnp.ndarray
     info: jnp.ndarray
+    episode_id: jnp.ndarray
+    step_in_episode: jnp.ndarray
 
 
 def save_batch_to_disk(traj_batch, update_step, config):
@@ -239,6 +241,8 @@ def make_train(config):
                     ex_state,
                     rng,
                     update_step,
+                    episode_ids,
+                    step_in_episodes
                 ) = runner_state
 
                 # SELECT ACTION
@@ -252,6 +256,10 @@ def make_train(config):
                 obsv, env_state, reward_e, done, info = env.step(
                     _rng, env_state, action, env_params
                 )
+
+                new_step_in_episode = jnp.where(done, 0, step_in_episodes + 1)
+                new_episode_ids = jnp.where(done, episode_ids + 1, episode_ids)
+
 
                 reward_i = jnp.zeros(config["NUM_ENVS"])
 
@@ -316,6 +324,8 @@ def make_train(config):
                     obs=last_obs,
                     next_obs=obsv,
                     info=info,
+                    episode_id=episode_ids,        # record the current episode id
+                    step_in_episode=step_in_episodes
                 )
                 runner_state = (
                     train_state,
@@ -324,6 +334,8 @@ def make_train(config):
                     ex_state,
                     rng,
                     update_step,
+                    new_episode_ids,
+                    new_step_in_episode
                 )
                 return runner_state, transition
 
@@ -359,6 +371,8 @@ def make_train(config):
                 ex_state,
                 rng,
                 update_step,
+                episode_ids,
+                step_in_episodes
             ) = runner_state
             _, last_val = network.apply(train_state.params, last_obs)
 
@@ -644,8 +658,12 @@ def make_train(config):
                 ex_state,
                 rng,
                 update_step + 1,
+                episode_ids,
+                step_in_episodes
             )
             return runner_state, metric
+
+        env_offsets = jnp.arange(config["NUM_ENVS"], dtype=jnp.int32) * 1_000_000
 
         rng, _rng = jax.random.split(rng)
         runner_state = (
@@ -655,6 +673,8 @@ def make_train(config):
             ex_state,
             _rng,
             0,
+            env_offsets,  # episode_ids
+            jnp.zeros(config["NUM_ENVS"], dtype=jnp.int32),  # step_in_episodes
         )
         runner_state, metric = jax.lax.scan(
             _update_step, runner_state, None, config["NUM_UPDATES"]
@@ -748,8 +768,7 @@ if __name__ == "__main__":
     parser.add_argument("--wandb_project", type=str)
     parser.add_argument("--wandb_entity", type=str)
     parser.add_argument(
-        "--use_optimistic_resets", action=argparse.BooleanOptionalAction, default=True
-    )
+        "--use_optimistic_resets", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--optimistic_reset_ratio", type=int, default=16)
 
     # EXPLORATION
