@@ -55,7 +55,16 @@ with h5py.File(OUTPUT_H5, "w") as h5f:
     datasets = {}
     for k in keys:
         shape = (total_steps,) + (first_file[k].shape[1:] if first_file[k].ndim > 1 else ())
-        datasets[k] = h5f.create_dataset(k, shape=shape, dtype=first_file[k].dtype)
+        datasets[k] = h5f.create_dataset(
+            k,
+            shape=shape,
+            maxshape=(None,) + shape[1:],  # allow resizing along the first dimension
+            dtype=first_file[k].dtype,
+            chunks=True,                    # <-- required for resizing
+            compression="gzip",             # optional: reduces file size
+            compression_opts=4              # 1-9, tradeoff between speed and compression
+        )
+ 
     datasets["game_phase"] = h5f.create_dataset("game_phase", shape=(total_steps,), dtype=np.int8)
 
     idx = 0
