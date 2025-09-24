@@ -52,23 +52,17 @@ class Transition(NamedTuple):
     step_in_episode: jnp.ndarray
 
 
-def save_batch_to_disk(traj_batch, update_step, config):
+ddef save_batch_to_disk(traj_batch, update_step, config):
     """
     Saves a batch of trajectories to a compressed .npz file.
-    This function is designed to be called via jax.debug.callback.
     """
-    # Ensure update_step is a scalar int (avoid array filenames)
-    if isinstance(update_step, (np.ndarray, jax.Array)):
-        update_step = int(np.array(update_step).flatten()[0])  # pick first element
-
     # Create the save directory if it doesn't exist
     save_path = config["BUFFER_SAVE_PATH"]
     os.makedirs(save_path, exist_ok=True)
-    
+
     # Flatten the batch from (num_steps, num_envs, ...) to a single list of transitions
     batch_size = config["NUM_STEPS"] * config["NUM_ENVS"]
-    
-    # Pull the data off the JAX device into host memory
+
     flat_batch_tuple = jax.tree_util.tree_map(
         lambda x: np.array(x).reshape((batch_size,) + x.shape[2:]),
         traj_batch
@@ -76,10 +70,16 @@ def save_batch_to_disk(traj_batch, update_step, config):
 
     flat_batch_dict = flat_batch_tuple._asdict()
 
-    # Save the flattened batch
-    file_name = os.path.join(save_path, f"batch_{update_step:06d}.npz")
+    # Extract scalar update step
+    scalar_step = int(np.array(update_step).flatten()[0])
+
+    # Zero-pad to 6 digits for consistent sorting
+    file_name = os.path.join(save_path, f"batch_{scalar_step:06d}.npz")
+
+    # Save
     np.savez_compressed(file_name, **flat_batch_dict)
-    print(f"✅ Saved batch {update_step} to {file_name}")
+    print(f"✅ Saved batch {scalar_step} to {file_name}")
+
 
 
 def make_train(config):
