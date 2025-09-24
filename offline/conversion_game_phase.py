@@ -61,7 +61,11 @@ with h5py.File(OUTPUT_H5, "w") as h5f:
     idx = 0
     for i, fname in enumerate(tqdm(files, desc="Processing last 50 files")):
         path = os.path.join(SOURCE_DIR, fname)
-        data = np.load(path)
+        data = np.load(path, allow_pickle=True)
+
+        if "info" in data.files:
+            data = {k: data[k] for k in data.files if k != "info"}
+
 
         # Trim starts
         data = trim_start(data)
