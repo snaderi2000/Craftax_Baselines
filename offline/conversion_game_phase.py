@@ -40,6 +40,39 @@ def compute_game_phase(done):
         labels[m_cut:e] = 2
     return labels
 
+def rebuild_next_obs(data):
+    """Rebuild next_obs so that next_obs[t] = obs[t+1], except at episode ends."""
+    obs = data["obs"]
+    done = data["done"]
+
+    fixed_next_obs = np.zeros_like(obs)
+    fixed_next_obs[:-1] = obs[1:]
+    fixed_next_obs[-1] = obs[-1]  # last transition stays the same
+
+    # Reset at episode boundaries
+    done_indices = np.where(done)[0]
+    for idx in done_indices:
+        fixed_next_obs[idx] = obs[idx]
+
+    data["next_obs"] = fixed_next_obs
+    return data
+
+def filter_short_episodes(data, min_length=5):
+    done = data["done"]
+    done_indices = np.where(done)[0]
+    episode_lengths = np.diff(done_indices, prepend=-1)
+
+    valid_mask = np.ones_like(done, dtype=bool)
+    start = 0
+    for length, end_idx in zip(episode_lengths, done_indices):
+        if length < min_length:
+            valid_mask[start:end_idx+1] = False
+        start = end_idx + 1
+
+    return {k: v[valid_mask] for k, v in data.items()}
+
+
+
 # Get subset of files
 files = sorted([f for f in os.listdir(SOURCE_DIR) if f.endswith(".npz")],
                key=lambda x: int(x.split('_')[-1].split('.')[0]))[-5:]
@@ -87,6 +120,14 @@ with h5py.File(OUTPUT_H5, "w") as h5f:
 
         # Trim starts
         data = trim_start(data)
+
+        if i == len(files) - 1:
+            data = trim_end(data)
+
+        data = rebuild_next_obs(data)  # <- fix next_obs here
+
+        data = filter_short_episodes(data)
+
 
         # Trim end if final file
         if i == len(files) - 1:
