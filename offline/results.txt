@@ -63,5 +63,38 @@ wake_up: 72.0%
 Reward (Average Achievement): 83.41
 Score: 63.11
 
+latest 
+
+===== FINAL EVALUATION =====
+Episodes: 100
+Average Reward: 12.70
+
+Achievement Success Rates:
+collect_coal: 57.0%
+collect_diamond: 0.0%
+collect_drink: 73.0%
+collect_iron: 43.0%
+collect_sapling: 100.0%
+collect_stone: 77.0%
+collect_wood: 100.0%
+defeat_skeleton: 56.0%
+defeat_zombie: 93.0%
+eat_cow: 84.0%
+eat_plant: 1.0%
+make_iron_pickaxe: 23.0%
+make_iron_sword: 24.0%
+make_stone_pickaxe: 52.0%
+make_stone_sword: 50.0%
+make_wood_pickaxe: 79.0%
+make_wood_sword: 83.0%
+place_furnace: 67.0%
+place_plant: 100.0%
+place_stone: 71.0%
+place_table: 96.0%
+wake_up: 32.0%
+
+===== Calculated Metrics =====
+Reward (Average Achievement): 61.86
+Score: 44.01
 
 

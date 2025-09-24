@@ -11,7 +11,7 @@ from d3rlpy import load_learnable
 # ===============================
 # CONFIG
 # ===============================
-MODEL_PATH = #"/home/synaderi/Craftax_Baselines/wandb/run-20250920_004428-yx5czycf/files/policies/200000000/default" #"cql_craftax_final.d3"
+MODEL_PATH = "cql_craftax_latest.d3"
 ENV_NAME = "Craftax-Classic-Symbolic-v1"
 EVAL_EPISODES = 100
 SEED = 42  # reproducibility

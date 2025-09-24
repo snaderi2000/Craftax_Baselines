@@ -14,7 +14,7 @@ WANDB_RUN_NAME = "cql_run_1"
 EXPERIMENT_NAME = "craftax_cql"
 
 DATASET_PATH = "craftax_dataset_cleaned.h5"   # Preprocessed dataset
-MODEL_SAVE_PATH = "cql_craftax_final.d3"      # Final saved model
+MODEL_SAVE_PATH = "cql_craftax_latest.d3"      # Final saved model
 TOTAL_STEPS = 500_000
 EPOCH_STEPS = 10_000                          # How often logs/checkpoints are written
 BATCH_SIZE = 32
