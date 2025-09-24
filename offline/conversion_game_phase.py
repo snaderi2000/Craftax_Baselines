@@ -42,7 +42,7 @@ def compute_game_phase(done):
 
 # Get subset of files
 files = sorted([f for f in os.listdir(SOURCE_DIR) if f.endswith(".npz")],
-               key=lambda x: int(x.split('_')[-1].split('.')[0]))[-50:]
+               key=lambda x: int(x.split('_')[-1].split('.')[0]))[-5:]
 
 # Pre-compute total steps
 total_steps = sum(np.load(os.path.join(SOURCE_DIR, f))["obs"].shape[0] for f in files)
