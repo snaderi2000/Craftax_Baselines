@@ -65,7 +65,16 @@ with h5py.File(OUTPUT_H5, "w") as h5f:
             compression_opts=4              # 1-9, tradeoff between speed and compression
         )
  
-    datasets["game_phase"] = h5f.create_dataset("game_phase", shape=(total_steps,), dtype=np.int8)
+    datasets["game_phase"] = h5f.create_dataset(
+        "game_phase",
+        shape=(total_steps,),
+        maxshape=(None,),      # allow resizing
+        dtype=np.int8,
+        chunks=True,           # must be chunked to resize
+        compression="gzip",    # optional: saves disk space
+        compression_opts=4
+    )
+
 
     idx = 0
     for i, fname in enumerate(tqdm(files, desc="Processing last 50 files")):
