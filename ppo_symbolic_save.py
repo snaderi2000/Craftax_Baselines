@@ -52,7 +52,7 @@ class Transition(NamedTuple):
     step_in_episode: jnp.ndarray
 
 
-ddef save_batch_to_disk(traj_batch, update_step, config):
+def save_batch_to_disk(traj_batch, update_step, config):
     """
     Saves a batch of trajectories to a compressed .npz file.
     """
