@@ -7,7 +7,7 @@ from tqdm import tqdm
 # -----------------------
 # CONFIGURATION
 # -----------------------
-DATA_DIR = "/home/synaderi/Craftax_Baselines/craftax_classic_5m_dataset"  # folder with .npz files
+DATA_DIR = "/home/synaderi/Craftax_Baselines/craftax_classic_200M_dataset"  # folder with .npz files
 OUTPUT_PATH = "craftax_dataset_5files_phases.h5"  # output HDF5 file
 NUM_FILES_TO_SAMPLE = 5  # number of .npz files to sample
 FINAL_TRANSITIONS_LIMIT = 4_000_000  # cap total transitions to avoid memory issues
@@ -44,6 +44,7 @@ def convert_to_h5(files, output_path, final_limit=None):
     """
     obs_list, actions_list, rewards_list = [], [], []
     next_obs_list, terminals_list, phases_list = [], [], []
+    episode_ids_list, steps_list = [], []
 
     total_transitions = 0
 
@@ -56,6 +57,7 @@ def convert_to_h5(files, output_path, final_limit=None):
         rewards = data["reward"]
         dones = data["done"]
         steps = data["step_in_episode"]
+        episode_ids = data["episode_id"]
 
         # --- Step 1: compute per-file threshold ---
         threshold = compute_threshold_per_file(steps)
@@ -73,6 +75,9 @@ def convert_to_h5(files, output_path, final_limit=None):
         rewards_list.append(rewards)
         terminals_list.append(terminals)
         phases_list.append(phases)
+        episode_ids_list.append(episode_ids)
+        steps_list.append(steps)
+
 
         total_transitions += len(obs)
         if final_limit and total_transitions >= final_limit:
@@ -86,6 +91,8 @@ def convert_to_h5(files, output_path, final_limit=None):
     rewards_array = np.concatenate(rewards_list)[:final_limit]
     terminals_array = np.concatenate(terminals_list)[:final_limit]
     phases_array = np.concatenate(phases_list)[:final_limit]
+    episode_ids_array = np.concatenate(episode_ids_list)[:final_limit]
+    steps_array = np.concatenate(steps_list)[:final_limit]
 
     print("\nFinal dataset shapes:")
     print("Observations:", obs_array.shape)
@@ -103,6 +110,8 @@ def convert_to_h5(files, output_path, final_limit=None):
         hf.create_dataset("rewards", data=rewards_array, compression="gzip")
         hf.create_dataset("terminals", data=terminals_array, compression="gzip")
         hf.create_dataset("phases", data=phases_array, compression="gzip")
+        hf.create_dataset("episode_ids", data=episode_ids_array, compression="gzip")
+        hf.create_dataset("steps_in_episode", data=steps_array, compression="gzip")
 
     print(f"\n✅ Saved merged dataset with per-file phases to: {output_path}")
 
