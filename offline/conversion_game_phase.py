@@ -101,6 +101,8 @@ def convert_to_h5(files, output_path, final_limit=None):
     print("Rewards:", rewards_array.shape)
     print("Terminals:", terminals_array.shape)
     print("Phases:", phases_array.shape)
+    print("Episode IDs:", episode_ids_array.shape)
+    print("Steps in Episode:", steps_array.shape)
 
     # Save to HDF5
     with h5py.File(output_path, "w") as hf:
