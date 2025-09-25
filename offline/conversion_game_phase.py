@@ -1,149 +1,120 @@
+import os
+import random
 import numpy as np
 import h5py
 from tqdm import tqdm
-import os
 
-OUTPUT_H5 = "craftax_last50_cleaned.h5"
+# -----------------------
+# CONFIGURATION
+# -----------------------
+DATA_DIR = "/home/synaderi/Craftax_Baselines/craftax_classic_5m_dataset"  # folder with .npz files
+OUTPUT_PATH = "craftax_dataset_5files_phases.h5"  # output HDF5 file
+NUM_FILES_TO_SAMPLE = 5  # number of .npz files to sample
+FINAL_TRANSITIONS_LIMIT = 4_000_000  # cap total transitions to avoid memory issues
+SEED = 42
+# -----------------------
 
-EARLY_FRAC = 0.3
-MID_FRAC = 0.4
-LATE_FRAC = 0.3  # auto remainder
-SOURCE_DIR = "/home/synaderi/Craftax_Baselines/craftax_classic_200M_dataset"  # folder with .npz files
-
-def trim_start(data):
-    """Trim partial episode at start."""
-    first_done_idx = np.where(data["done"])[0][0]
-    if first_done_idx > 0:
-        return {k: v[first_done_idx+1:] for k, v in data.items()}
-    return data
-
-def trim_end(data):
-    """Trim partial episode at end."""
-    last_done_idx = np.where(data["done"])[0][-1]
-    if last_done_idx < len(data["done"]) - 1:
-        return {k: v[:last_done_idx+1] for k, v in data.items()}
-    return data
-
-def compute_game_phase(done):
-    """0 = early, 1 = mid, 2 = late"""
-    done_indices = np.where(done)[0]
-    starts = np.concatenate(([0], done_indices + 1))
-    labels = np.zeros_like(done, dtype=np.int8)
-
-    for s, e in zip(starts, done_indices + 1):
-        length = e - s
-        if length <= 0: continue
-        e_cut = s + int(EARLY_FRAC * length)
-        m_cut = e_cut + int(MID_FRAC * length)
-        labels[s:e_cut] = 0
-        labels[e_cut:m_cut] = 1
-        labels[m_cut:e] = 2
-    return labels
-
-def rebuild_next_obs(data):
-    """Rebuild next_obs so that next_obs[t] = obs[t+1], except at episode ends."""
-    obs = data["obs"]
-    done = data["done"]
-
-    fixed_next_obs = np.zeros_like(obs)
-    fixed_next_obs[:-1] = obs[1:]
-    fixed_next_obs[-1] = obs[-1]  # last transition stays the same
-
-    # Reset at episode boundaries
-    done_indices = np.where(done)[0]
-    for idx in done_indices:
-        fixed_next_obs[idx] = obs[idx]
-
-    data["next_obs"] = fixed_next_obs
-    return data
-
-def filter_short_episodes(data, min_length=5):
-    done = data["done"]
-    done_indices = np.where(done)[0]
-    episode_lengths = np.diff(done_indices, prepend=-1)
-
-    valid_mask = np.ones_like(done, dtype=bool)
-    start = 0
-    for length, end_idx in zip(episode_lengths, done_indices):
-        if length < min_length:
-            valid_mask[start:end_idx+1] = False
-        start = end_idx + 1
-
-    return {k: v[valid_mask] for k, v in data.items()}
+random.seed(SEED)
+np.random.seed(SEED)
 
 
-
-# Get subset of files
-files = sorted([f for f in os.listdir(SOURCE_DIR) if f.endswith(".npz")],
-               key=lambda x: int(x.split('_')[-1].split('.')[0]))[-5:]
-
-# Pre-compute total steps
-total_steps = sum(np.load(os.path.join(SOURCE_DIR, f))["obs"].shape[0] for f in files)
-
-# Setup HDF5
-first_file = np.load(os.path.join(SOURCE_DIR, files[0]))
-keys = [k for k in first_file.keys() if k != "info"]
-
-with h5py.File(OUTPUT_H5, "w") as h5f:
-    datasets = {}
-    for k in keys:
-        shape = (total_steps,) + (first_file[k].shape[1:] if first_file[k].ndim > 1 else ())
-        datasets[k] = h5f.create_dataset(
-            k,
-            shape=shape,
-            maxshape=(None,) + shape[1:],  # allow resizing along the first dimension
-            dtype=first_file[k].dtype,
-            chunks=True,                    # <-- required for resizing
-            compression="gzip",             # optional: reduces file size
-            compression_opts=4              # 1-9, tradeoff between speed and compression
-        )
- 
-    datasets["game_phase"] = h5f.create_dataset(
-        "game_phase",
-        shape=(total_steps,),
-        maxshape=(None,),      # allow resizing
-        dtype=np.int8,
-        chunks=True,           # must be chunked to resize
-        compression="gzip",    # optional: saves disk space
-        compression_opts=4
-    )
+def compute_threshold_per_file(steps):
+    """
+    Compute the 95th percentile threshold for one file.
+    """
+    return np.percentile(steps, 95)
 
 
-    idx = 0
-    for i, fname in enumerate(tqdm(files, desc="Processing last 50 files")):
-        path = os.path.join(SOURCE_DIR, fname)
+def assign_phase(step, threshold):
+    """
+    Assign a phase based on normalized step count.
+    Early = 0, Mid = 1, Late = 2
+    """
+    if step < 0.3 * threshold:
+        return 0
+    elif step < 0.7 * threshold:
+        return 1
+    else:
+        return 2
+
+
+def convert_to_h5(files, output_path, final_limit=None):
+    """
+    Convert selected .npz files into a single .h5 file with per-file phase labeling.
+    """
+    obs_list, actions_list, rewards_list = [], [], []
+    next_obs_list, terminals_list, phases_list = [], [], []
+
+    total_transitions = 0
+
+    for path in tqdm(files, desc="Processing files"):
         data = np.load(path, allow_pickle=True)
 
-        if "info" in data.files:
-            data = {k: data[k] for k in data.files if k != "info"}
+        obs = data["obs"]
+        next_obs = data["next_obs"]
+        actions = data["action"]
+        rewards = data["reward"]
+        dones = data["done"]
+        steps = data["step_in_episode"]
+
+        # --- Step 1: compute per-file threshold ---
+        threshold = compute_threshold_per_file(steps)
+
+        # --- Step 2: assign phases relative to this file ---
+        phases = np.array([assign_phase(s, threshold) for s in steps], dtype=np.int32)
+
+        # --- Step 3: prepare terminal flags ---
+        terminals = dones.astype(np.bool_)
+
+        # Append data
+        obs_list.append(obs)
+        next_obs_list.append(next_obs)
+        actions_list.append(actions)
+        rewards_list.append(rewards)
+        terminals_list.append(terminals)
+        phases_list.append(phases)
+
+        total_transitions += len(obs)
+        if final_limit and total_transitions >= final_limit:
+            print(f"Reached limit of {final_limit} transitions. Stopping early.")
+            break
+
+    # Concatenate everything
+    obs_array = np.concatenate(obs_list)[:final_limit]
+    next_obs_array = np.concatenate(next_obs_list)[:final_limit]
+    actions_array = np.concatenate(actions_list)[:final_limit]
+    rewards_array = np.concatenate(rewards_list)[:final_limit]
+    terminals_array = np.concatenate(terminals_list)[:final_limit]
+    phases_array = np.concatenate(phases_list)[:final_limit]
+
+    print("\nFinal dataset shapes:")
+    print("Observations:", obs_array.shape)
+    print("Next Observations:", next_obs_array.shape)
+    print("Actions:", actions_array.shape)
+    print("Rewards:", rewards_array.shape)
+    print("Terminals:", terminals_array.shape)
+    print("Phases:", phases_array.shape)
+
+    # Save to HDF5
+    with h5py.File(output_path, "w") as hf:
+        hf.create_dataset("observations", data=obs_array, compression="gzip")
+        hf.create_dataset("next_observations", data=next_obs_array, compression="gzip")
+        hf.create_dataset("actions", data=actions_array, compression="gzip")
+        hf.create_dataset("rewards", data=rewards_array, compression="gzip")
+        hf.create_dataset("terminals", data=terminals_array, compression="gzip")
+        hf.create_dataset("phases", data=phases_array, compression="gzip")
+
+    print(f"\n✅ Saved merged dataset with per-file phases to: {output_path}")
 
 
-        # Trim starts
-        data = trim_start(data)
+if __name__ == "__main__":
+    # Step 1: Select random subset of .npz files
+    all_files = [os.path.join(DATA_DIR, f) for f in os.listdir(DATA_DIR) if f.endswith(".npz")]
+    if len(all_files) == 0:
+        raise RuntimeError(f"No .npz files found in {DATA_DIR}")
 
-        if i == len(files) - 1:
-            data = trim_end(data)
+    sampled_files = random.sample(all_files, NUM_FILES_TO_SAMPLE)
+    print(f"Randomly selected {len(sampled_files)} files for processing: {sampled_files}")
 
-        data = rebuild_next_obs(data)  # <- fix next_obs here
-
-        data = filter_short_episodes(data)
-
-
-        # Trim end if final file
-        if i == len(files) - 1:
-            data = trim_end(data)
-
-        # Compute game phase
-        phase_labels = compute_game_phase(data["done"])
-
-        steps = data["obs"].shape[0]
-        for k in keys:
-            datasets[k][idx:idx+steps] = data[k]
-        datasets["game_phase"][idx:idx+steps] = phase_labels
-        idx += steps
-
-    # Resize to exact size after trimming
-    for k in datasets.keys():
-        datasets[k].resize((idx,) + datasets[k].shape[1:])
-
-print(f"✅ Finished dataset: {OUTPUT_H5}, total transitions: {idx}")
+    # Step 2: Convert to HDF5
+    convert_to_h5(sampled_files, OUTPUT_PATH, final_limit=FINAL_TRANSITIONS_LIMIT)
