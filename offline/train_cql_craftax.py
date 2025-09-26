@@ -3,6 +3,24 @@ from d3rlpy.dataset import ReplayBuffer, FIFOBuffer
 from d3rlpy.algos import DiscreteCQLConfig
 from d3rlpy import load_learnable
 import os
+from d3rlpy.dataset import Transition
+
+
+class CustomNextObsTransitionPicker(d3rlpy.dataset.TransitionPickerProtocol):
+    """A TransitionPicker that directly uses stored next_observations."""
+
+    def __call__(self, episode: d3rlpy.dataset.EpisodeBase, index: int) -> Transition:
+        # Directly grab the next observation that was stored earlier
+        next_observation = episode.next_observations[index]
+
+        return Transition(
+            observation=episode.observations[index],
+            action=episode.actions[index],
+            reward=episode.rewards[index],
+            next_observation=next_observation,
+            terminal=float(episode.terminals[index]),
+            interval=1
+        )
 
 # ===============================
 # CONFIGURATION
@@ -22,10 +40,32 @@ def main():
     # ---- W&B Setup ----
     wandb.init(project=WANDB_PROJECT, name=WANDB_RUN_NAME)
     
-    # ---- Load Dataset ----
+    with h5py.File(DATASET_PATH, "r") as f:
+        observations = f["observations"][:]        # shape (N, obs_dim)
+        next_observations = f["next_observations"][:]  # shape (N, obs_dim)
+        actions = f["actions"][:]                  # shape (N,)
+        rewards = f["rewards"][:]                  # shape (N,)
+        terminals = f["terminals"][:].astype(np.float32)  # bool -> float32
+
+    print("Transitions loaded:", len(observations))
+
+    # ---- Create ReplayBuffer ----
     buffer = FIFOBuffer(limit=None)
-    with open(DATASET_PATH, "rb") as f:
-        replay_buffer = ReplayBuffer.load(f, buffer)
+    replay_buffer = ReplayBuffer(buffer)
+
+    for i in range(len(observations)):
+        transition = Transition(
+            observation=observations[i],
+            action=actions[i],
+            reward=rewards[i],
+            next_observation=next_observations[i],
+            terminal=terminals[i],
+            interval=1
+        )
+        replay_buffer.append(transition)
+
+    print(f"ReplayBuffer ready: {replay_buffer.transition_count} transitions")
+ 
 
     print(f"Dataset loaded: {len(replay_buffer.episodes)} episodes, "
           f"{replay_buffer.transition_count} transitions")
