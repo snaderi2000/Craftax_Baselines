@@ -309,7 +309,7 @@ def make_offline_discrete_replay_buffer(rb_cfg):
     rb = TensorDictReplayBuffer(
         storage=storage,
         batch_size=rb_cfg.batch_size,
-        sampler=PhaseWeightedSampler(alpha_early=0.5, alpha_mid=1.0, alpha_late=2.0)
+        sampler=SamplerWithoutReplacement(alpha_early=0.5, alpha_mid=1.0, alpha_late=2.0)
     )
 
     # --- Step 4: Add data to buffer ---
