@@ -132,28 +132,35 @@ def apply_env_transforms(
 #     return train_env, eval_env
 
 def make_environment(cfg, train_num_envs=1, eval_num_envs=1, logger=None):
-    """Create dummy env for offline training."""
-    # If library is set to 'craftax' or if eval_envs=0, use dummy env
-    if cfg.env.library == "craftax":
-        print("⚙️ Using DummyCraftaxEnv for offline training")
+    """Create envs. In offline 'craftax' mode, return a dummy env and no eval env."""
+    # Offline Craftax path
+    if getattr(cfg.env, "library", None) == "craftax":
+        print("⚙️ Using DummyCraftaxEnv for offline training", flush=True)
         train_env = DummyCraftaxEnv(obs_dim=1345, n_actions=17)
         eval_env = None
-        train_env = apply_env_transforms(parallel_env)
-        print("CHILLA")
-        print(f"train enviroment: {train_env}")
-        print("after")
+        # Don't apply transforms to the dummy env (it's not a full TorchRL EnvBase)
+        print("CHILLA", flush=True)
+        print(f"train environment: {train_env}", flush=True)
+        print(f"eval environment:  {eval_env}", flush=True)
+        print("after", flush=True)
         return train_env, eval_env
-    
-    # Otherwise, fallback to the default gym-based env
+
+    # Default (gym/dm_control) path
     maker = functools.partial(env_maker, cfg)
     parallel_env = ParallelEnv(
         train_num_envs,
         EnvCreator(maker),
         serial_for_single=True,
     )
-   
+    train_env = apply_env_transforms(parallel_env)
+    eval_env = None  # your config has eval_envs: 0; keep None
 
-    return train_env, None
+    print("⚙️ Using GymEnv for offline training", flush=True)
+    print(f"train environment: {train_env}", flush=True)
+    print(f"eval environment:  {eval_env}", flush=True)
+
+    return train_env, eval_env
+
 
 # ====================================================================
 # Collector and replay buffer
