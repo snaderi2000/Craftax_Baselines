@@ -455,9 +455,14 @@ class CQL(object):
             # new_actions, log_pi = policy_fn(
             #     train_params["policy"], observations, new_actions_rng
             # )
-            new_actions, log_pi = train_state.policy.apply_fn.sample_and_log_prob(
-                train_state.policy.params, observations, rng
+            # ✅ Correct
+            policy_model = CategoricalPolicy(
+                observation_dim=observations.shape[-1],
+                num_actions=config.action_dim,
+                hidden_dims=config.hidden_dims,
             )
+            new_actions, log_pi = policy_model.sample_and_log_prob(train_state.policy.params, observations, rng)
+
 
            
 
