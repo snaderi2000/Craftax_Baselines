@@ -29,21 +29,24 @@ class CustomNextObsTransitionPicker(TransitionPickerProtocol):
             observation=episode.observations[index],
             action=episode.actions[index],
             reward=episode.rewards[index],
-            next_observation=self.next_obs_array[index],  # use true next state
+            next_observation=self.next_obs_array[index],  # ✅ use correct s'
             terminal=float(self.terminals_array[index]),
             interval=1
         )
 
 # ========================================
-# 3. Initialize ReplayBuffer
+# 3. Initialize ReplayBuffer WITH Picker
 # ========================================
 buffer = FIFOBuffer(limit=None)
 obs_sig = Signature(shape=(1345,), dtype="float32")
 act_sig = Signature(shape=(1,), dtype="int32")
 rew_sig = Signature(shape=(1,), dtype="float32")
 
+transition_picker = CustomNextObsTransitionPicker(next_observations, terminals)
+
 replay_buffer = ReplayBuffer(
     buffer=buffer,
+    transition_picker=transition_picker,  # ✅ pass here directly
     observation_signature=obs_sig,
     action_signature=act_sig,
     reward_signature=rew_sig,
@@ -51,12 +54,10 @@ replay_buffer = ReplayBuffer(
     action_space=ActionSpace.DISCRETE
 )
 
-# Attach the custom transition picker
-replay_buffer.transition_picker = CustomNextObsTransitionPicker(next_observations, terminals)
-print("ReplayBuffer initialized and ready for training!")
+print("ReplayBuffer initialized with custom transition picker!")
 
 # ========================================
-# 4. Quick Sanity Check
+# 4. Sanity Check
 # ========================================
 batch = replay_buffer.sample_transition_batch(batch_size=4)
 print("Observation batch shape:", batch.observations.shape)
