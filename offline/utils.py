@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import functools
+import h5py
 
 import torch.nn
 import torch.optim
