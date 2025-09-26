@@ -138,6 +138,10 @@ def make_environment(cfg, train_num_envs=1, eval_num_envs=1, logger=None):
         print("⚙️ Using DummyCraftaxEnv for offline training")
         train_env = DummyCraftaxEnv(obs_dim=1345, n_actions=17)
         eval_env = None
+        train_env = apply_env_transforms(parallel_env)
+        print("CHILLA")
+        print(f"train enviroment: {train_env}")
+        print("after")
         return train_env, eval_env
     
     # Otherwise, fallback to the default gym-based env
@@ -147,10 +151,7 @@ def make_environment(cfg, train_num_envs=1, eval_num_envs=1, logger=None):
         EnvCreator(maker),
         serial_for_single=True,
     )
-    train_env = apply_env_transforms(parallel_env)
-    print("⚙️ Using GymEnv for offline training")
-    print(f"train enviroment: {train_env}")
-    print("after")
+   
 
     return train_env, None
 
