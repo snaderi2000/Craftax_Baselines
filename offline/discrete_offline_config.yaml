@@ -1,4 +1,13 @@
 # offline Craftax config
+
+env:
+  name: Craftax-Classic-Symbolic-v1   # Not used
+  task: ""                             # Not used
+  library: offline                     # Just a placeholder
+  n_samples_stats: 0
+  seed: 0                              
+  backend: none    
+
 logger:
   backend: wandb
   project_name: torchrl_example_cql
