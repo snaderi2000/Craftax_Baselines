@@ -68,7 +68,7 @@ def main(cfg: DictConfig):  # noqa: F821
     replay_buffer = make_offline_discrete_replay_buffer(cfg.replay_buffer) #make_offline_replay_buffer(cfg.replay_buffer)
 
     # Create env
-    train_env, eval_env = None, None make_environment(
+    train_env, eval_env = None, None #make_environment(
     #     cfg, train_num_envs=1, eval_num_envs=cfg.logger.eval_envs, logger=logger
     # )
 
