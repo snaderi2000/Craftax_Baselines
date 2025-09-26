@@ -72,8 +72,7 @@ def main(cfg):  # noqa: F821
     # Create env
     train_env, eval_env = make_environment(cfg)
 
-    print(f"train enviroment: {train_env}")
-    print(f"eval enviroment: {eval_env}")
+
 
     # Create agent
     model, explore_policy = make_discretecql_model(cfg, train_env, eval_env, device)

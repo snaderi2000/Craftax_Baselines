@@ -148,6 +148,10 @@ def make_environment(cfg, train_num_envs=1, eval_num_envs=1, logger=None):
         serial_for_single=True,
     )
     train_env = apply_env_transforms(parallel_env)
+
+    print(f"train enviroment: {train_env}")
+    print(f"eval enviroment: {eval_env}")
+
     return train_env, None
 
 # ====================================================================
