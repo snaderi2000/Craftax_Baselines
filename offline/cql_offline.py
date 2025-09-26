@@ -176,7 +176,7 @@ def main(cfg: DictConfig):  # noqa: F821
 
         # evaluation
         with timeit("log/eval"):
-            if i % evaluation_interval == 0:
+            if cfg.logger.eval_envs > 0 and i % evaluation_interval == 0:
                 with set_exploration_type(
                     ExplorationType.DETERMINISTIC
                 ), torch.no_grad():

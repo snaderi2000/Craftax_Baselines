@@ -195,47 +195,118 @@ def make_offline_replay_buffer(rb_cfg):
     return data
 
 
+# def make_offline_discrete_replay_buffer(rb_cfg):
+#     import gymnasium as gym
+#     import minari
+#     from minari import DataCollector
+
+#     # Create custom minari dataset from environment
+
+#     env = gym.make(rb_cfg.env)
+#     env = DataCollector(env)
+
+#     for _ in range(rb_cfg.episodes):
+#         env.reset(seed=123)
+#         while True:
+#             action = env.action_space.sample()
+#             obs, rew, terminated, truncated, info = env.step(action)
+#             if terminated or truncated:
+#                 break
+
+#     env.create_dataset(
+#         dataset_id=rb_cfg.dataset,
+#         algorithm_name="Random-Policy",
+#         code_permalink="https://github.com/Farama-Foundation/Minari",
+#         author="Farama",
+#         author_email="contact@farama.org",
+#     )
+
+#     data = MinariExperienceReplay(
+#         dataset_id=rb_cfg.dataset,
+#         split_trajs=False,
+#         batch_size=rb_cfg.batch_size,
+#         load_from_local_minari=True,
+#         sampler=SamplerWithoutReplacement(drop_last=True),
+#         prefetch=4,
+#     )
+
+#     data.append_transform(DoubleToFloat())
+
+#     # Clean up
+#     minari.delete_dataset(rb_cfg.dataset)
+
+#     return data
+
+
+class PhaseWeightedSampler(Sampler):
+    """
+    Custom sampler to weight transitions based on game phase.
+    Phase mapping: 0 = early, 1 = mid, 2 = late
+    """
+    def __init__(self, alpha_early=0.5, alpha_mid=1.0, alpha_late=2.0):
+        super().__init__()
+        self.weights = {0: alpha_early, 1: alpha_mid, 2: alpha_late}
+
+    def sample(self, replay_buffer, batch_size):
+        phases = replay_buffer._storage["phase"]  # Direct access to stored phases
+        phase_weights = torch.tensor([self.weights[int(p)] for p in phases], dtype=torch.float32)
+        probs = phase_weights / phase_weights.sum()
+        indices = torch.multinomial(probs, batch_size, replacement=True)
+        return indices
+
+# ---- Main loader ----
 def make_offline_discrete_replay_buffer(rb_cfg):
-    import gymnasium as gym
-    import minari
-    from minari import DataCollector
+    """
+    Load offline Craftax dataset from .h5 and create a TorchRL replay buffer
+    with optional phase-weighted sampling.
+    """
+    print(f"Loading Craftax offline dataset from: {rb_cfg.dataset_path}")
 
-    # Create custom minari dataset from environment
+    # --- Step 1: Load HDF5 dataset ---
+    with h5py.File(rb_cfg.dataset_path, "r") as f:
+        observations = torch.tensor(f["observations"][:], dtype=torch.float32)
+        next_observations = torch.tensor(f["next_observations"][:], dtype=torch.float32)
+        actions = torch.tensor(f["actions"][:], dtype=torch.int64)
+        rewards = torch.tensor(f["rewards"][:], dtype=torch.float32)
+        terminals = torch.tensor(f["terminals"][:], dtype=torch.bool)
+        phases = torch.tensor(f["phases"][:], dtype=torch.int64)  # phase: 0=early,1=mid,2=late
 
-    env = gym.make(rb_cfg.env)
-    env = DataCollector(env)
-
-    for _ in range(rb_cfg.episodes):
-        env.reset(seed=123)
-        while True:
-            action = env.action_space.sample()
-            obs, rew, terminated, truncated, info = env.step(action)
-            if terminated or truncated:
-                break
-
-    env.create_dataset(
-        dataset_id=rb_cfg.dataset,
-        algorithm_name="Random-Policy",
-        code_permalink="https://github.com/Farama-Foundation/Minari",
-        author="Farama",
-        author_email="contact@farama.org",
+    # --- Step 2: Build transition TensorDict ---
+    transitions = TensorDict(
+        {
+            "observation": observations,
+            "next_observation": next_observations,
+            "action": actions,
+            "reward": rewards,
+            "done": terminals,
+            "phase": phases,  # included for weighted sampling
+        },
+        batch_size=[observations.shape[0]],
     )
 
-    data = MinariExperienceReplay(
-        dataset_id=rb_cfg.dataset,
-        split_trajs=False,
+    print(f"Dataset loaded: {observations.shape[0]} transitions total")
+
+    # Print phase distribution
+    unique_phases, counts = torch.unique(phases, return_counts=True)
+    print("Phase distribution:")
+    for p, c in zip(unique_phases.tolist(), counts.tolist()):
+        label = {0: "Early", 1: "Mid", 2: "Late"}[p]
+        print(f"  {label} ({p}): {c} transitions")
+
+    # --- Step 3: Create replay buffer with optional weighted sampler ---
+    storage = LazyTensorStorage(max_size=observations.shape[0])
+    rb = TensorDictReplayBuffer(
+        storage=storage,
         batch_size=rb_cfg.batch_size,
-        load_from_local_minari=True,
-        sampler=SamplerWithoutReplacement(drop_last=True),
-        prefetch=4,
+        sampler=PhaseWeightedSampler(alpha_early=0.5, alpha_mid=1.0, alpha_late=2.0)
     )
 
-    data.append_transform(DoubleToFloat())
+    # --- Step 4: Add data to buffer ---
+    rb.extend(transitions)
+    print("Replay buffer initialized and filled!")
 
-    # Clean up
-    minari.delete_dataset(rb_cfg.dataset)
+    return rb
 
-    return data
 
 
 # ====================================================================
