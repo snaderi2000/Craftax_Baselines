@@ -21,6 +21,10 @@ from flax.training.train_state import TrainState
 from omegaconf import OmegaConf
 from pydantic import BaseModel
 
+import h5py
+import jax.numpy as jnp
+
+
 os.environ["XLA_FLAGS"] = "--xla_gpu_triton_gemm_any=True"
 
 
@@ -205,6 +209,23 @@ class FullyConnectedQFunction(nn.Module):
         )(x)
         return jnp.squeeze(x, -1)
 
+class FullyConnectedQFunctionDiscrete(nn.Module):
+    observation_dim: int
+    num_actions: int
+
+    @nn.compact
+    def __call__(self, observations, actions):
+        # One-hot encode the discrete action
+        actions_one_hot = jax.nn.one_hot(actions, num_classes=self.num_actions)
+        # Concatenate with state
+        x = jnp.concatenate([observations, actions_one_hot], axis=-1)
+        
+        # Pass through standard MLP
+        for h in (256, 256):
+            x = nn.relu(nn.Dense(h)(x))
+        q_value = nn.Dense(1)(x)  # single scalar value
+        return q_value
+
 
 class TanhGaussianPolicy(nn.Module):
     observation_dim: int
@@ -266,40 +287,63 @@ class TanhGaussianPolicy(nn.Module):
         return samples, log_prob
 
 
+
+class CategoricalPolicy(nn.Module):
+    observation_dim: int
+    num_actions: int
+    hidden_dims: Tuple[int] = (256, 256)
+
+    @nn.compact
+    def __call__(self, observations):
+        x = observations
+        for h in self.hidden_dims:
+            x = nn.relu(nn.Dense(h)(x))
+        logits = nn.Dense(self.num_actions)(x)
+        return logits
+
+    def sample_and_log_prob(self, params, observations, rng):
+        logits = self.apply(params, observations)
+        dist = distrax.Categorical(logits=logits)
+        actions = dist.sample(seed=rng)
+        log_prob = dist.log_prob(actions)
+        return actions, log_prob
+
+
 class Transition(NamedTuple):
     observations: np.ndarray
     actions: np.ndarray
     rewards: np.ndarray
     next_observations: np.ndarray
     dones: np.ndarray
+    phases: np.ndarray  
 
 
-def get_dataset(
-    env: gym.Env, config: CQLConfig, clip_to_eps: bool = True, eps: float = 1e-5
-) -> Transition:
-    dataset = d4rl.qlearning_dataset(env)
+def get_dataset(config: CQLConfig, clip_to_eps: bool = False, eps: float = 1e-5) -> Transition:
+    with h5py.File("craftax_dataset_5files_phases.h5", "r") as f:
+        dataset = Transition(
+            observations=jnp.array(f["observations"], dtype=jnp.float32),
+            actions=jnp.array(f["actions"], dtype=jnp.int32),  # Discrete integer
+            rewards=jnp.array(f["rewards"], dtype=jnp.float32),
+            next_observations=jnp.array(f["next_observations"], dtype=jnp.float32),
+            dones=jnp.array(f["terminals"], dtype=jnp.float32),
+            phases=jnp.array(f["phases"], dtype=jnp.int32),
+        )
 
-    if clip_to_eps:
-        lim = 1 - eps
-        dataset["actions"] = np.clip(dataset["actions"], -lim, lim)
+    print("✅ Craftax dataset loaded!")
+    print("Observations:", dataset.observations.shape)
+    print("Actions:", dataset.actions.shape)
+    print("Phases:", dataset.phases.shape)
 
-    dataset = Transition(
-        observations=jnp.array(dataset["observations"], dtype=jnp.float32),
-        actions=jnp.array(dataset["actions"], dtype=jnp.float32),
-        rewards=jnp.array(dataset["rewards"], dtype=jnp.float32),
-        next_observations=jnp.array(dataset["next_observations"], dtype=jnp.float32),
-        dones=jnp.array(dataset["terminals"], dtype=jnp.float32),
-    )
-    # shuffle data and select the first data_size samples
+    # ⚠️ No clipping needed for discrete actions
+    # Shuffle and subsample
     data_size = min(config.data_size, len(dataset.observations))
     rng = jax.random.PRNGKey(config.seed)
-    rng, rng_permute, rng_select = jax.random.split(rng, 3)
-    perm = jax.random.permutation(rng_permute, len(dataset.observations))
+    perm = jax.random.permutation(rng, len(dataset.observations))
     dataset = jax.tree_util.tree_map(lambda x: x[perm], dataset)
-    assert len(dataset.observations) >= data_size
     dataset = jax.tree_util.tree_map(lambda x: x[:data_size], dataset)
-    # normalize states
-    obs_mean, obs_std = 0, 1
+
+    # Normalize states if required
+    obs_mean, obs_std = 0.0, 1.0
     if config.normalize_state:
         obs_mean = dataset.observations.mean(0)
         obs_std = dataset.observations.std(0)
@@ -307,7 +351,9 @@ def get_dataset(
             observations=(dataset.observations - obs_mean) / (obs_std + 1e-5),
             next_observations=(dataset.next_observations - obs_mean) / (obs_std + 1e-5),
         )
+
     return dataset, obs_mean, obs_std
+
 
 
 def collect_metrics(metrics, names, prefix=None):
@@ -406,9 +452,14 @@ class CQL(object):
             loss_collection = {}
 
             rng, new_actions_rng = jax.random.split(_rng)
-            new_actions, log_pi = policy_fn(
-                train_params["policy"], observations, new_actions_rng
+            # new_actions, log_pi = policy_fn(
+            #     train_params["policy"], observations, new_actions_rng
+            # )
+            new_actions, log_pi = train_state.policy.apply_fn.sample_and_log_prob(
+                train_state.policy.params, observations, rng
             )
+
+           
 
             if config.use_automatic_entropy_tuning:
                 alpha_loss = (
@@ -492,11 +543,11 @@ class CQL(object):
             if config.use_cql:
                 batch_size = actions.shape[0]
                 rng, random_rng = jax.random.split(rng)
-                cql_random_actions = jax.random.uniform(
+                cql_random_actions = jax.random.int(
                     random_rng,
-                    shape=(batch_size, config.cql_n_actions, config.action_dim),
-                    minval=-1.0,
-                    maxval=1.0,
+                    shape=(batch_size, config.cql_n_actions),
+                    minval=0,
+                    maxval=17.0,
                 )
                 rng, current_rng = jax.random.split(rng)
                 cql_current_actions, cql_current_log_pis = policy_fn(
@@ -701,19 +752,22 @@ def create_cql_train_state(
     actions: jnp.ndarray,
     config: CQLConfig,
 ) -> CQLTrainState:
-    policy_model = TanhGaussianPolicy(
-        observation_dim=observations.shape[-1],
-        action_dim=actions.shape[-1],
-        hidden_dims=config.hidden_dims,
-        orthogonal_init=config.orthogonal_init,
-        log_std_multiplier=config.policy_log_std_multiplier,
-        log_std_offset=config.policy_log_std_offset,
+    # policy_model = TanhGaussianPolicy(
+    #     observation_dim=observations.shape[-1],
+    #     action_dim=actions.shape[-1],
+    #     hidden_dims=config.hidden_dims,
+    #     orthogonal_init=config.orthogonal_init,
+    #     log_std_multiplier=config.policy_log_std_multiplier,
+    #     log_std_offset=config.policy_log_std_offset,
+    # )
+    policy_model = CategoricalPolicy(
+    observation_dim=observations.shape[-1],
+    num_actions=17,  # Craftax has 17 discrete actions
+    hidden_dims=config.hidden_dims,
     )
-    qf_model = FullyConnectedQFunction(
+    qf_model = FullyConnectedQFunctionDiscrete(
         observation_dim=observations.shape[-1],
-        action_dim=actions.shape[-1],
-        hidden_dims=config.hidden_dims,
-        orthogonal_init=config.orthogonal_init,
+        num_actions=17#ctions.shape[-1],
     )
     optimizer_class = {
         "adam": optax.adam,
@@ -803,14 +857,12 @@ def evaluate(
 if __name__ == "__main__":
     wandb.init(project=config.project, config=config)
     rng = jax.random.PRNGKey(config.seed)
-    env = gym.make(config.env_name)
-    dataset, obs_mean, obs_std = get_dataset(env, config)
-    config.action_dim = env.action_space.shape[0]
+    dataset, obs_mean, obs_std = get_dataset(config)
+    config.action_dim = 17 #nv.action_space.shape[0]
     # rescale reward
     dataset = dataset._replace(rewards=dataset.rewards * config.reward_scale + config.reward_bias)
 
-    if config.target_entropy >= 0.0:
-        config.target_entropy = -np.prod(env.action_space.shape).item()
+    config.target_entropy = -np.log(17) 
     # create train_state
     rng, subkey = jax.random.split(rng)
     example_batch: Transition = jax.tree_util.tree_map(lambda x: x[0], dataset)
