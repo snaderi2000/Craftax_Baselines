@@ -10,6 +10,7 @@ import h5py
 import torch
 from tensordict import TensorDict
 from torchrl.data.replay_buffers import TensorDictReplayBuffer, LazyTensorStorage
+from torchrl.data.tensor_specs import DiscreteTensorSpec, UnboundedContinuousTensorSpec
 
 
 
