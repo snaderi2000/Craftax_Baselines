@@ -70,9 +70,7 @@ def main(cfg):  # noqa: F821
     replay_buffer = make_offline_discrete_replay_buffer(cfg.replay_buffer)
 
     # Create env
-    train_env, eval_env = make_environment(
-        cfg, train_num_envs=1, eval_num_envs=cfg.logger.eval_envs, logger=logger
-    )
+    train_env, eval_env = make_environment(cfg)
 
     # Create agent
     model, explore_policy = make_discretecql_model(cfg, train_env, eval_env, device)

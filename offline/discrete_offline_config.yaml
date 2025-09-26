@@ -3,7 +3,7 @@
 env:
   name: Craftax-Classic-Symbolic-v1   # Not used
   task: ""                             # Not used
-  library: offline                     # Just a placeholder
+  library: craftax                     # Just a placeholder
   n_samples_stats: 0
   seed: 0                              
   backend: none    

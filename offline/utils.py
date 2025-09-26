@@ -59,6 +59,16 @@ from torch.utils.data import Sampler
 # ====================================================================
 # Environment utils
 # -----------------
+class DummyCraftaxEnv:
+    """A minimal environment to provide observation and action specs for offline training."""
+    def __init__(self, obs_dim=1345, n_actions=17):
+        self.observation_spec = UnboundedContinuousTensorSpec(shape=(obs_dim,))
+        self.action_spec = DiscreteTensorSpec(n_actions)
+
+    def reset(self):
+        # Returns a dummy observation for initialization
+        obs = torch.zeros((1, 1345))
+        return TensorDict({"observation": obs}, batch_size=[1])
 
 
 def env_maker(cfg, device="cpu", from_pixels=False):
@@ -92,34 +102,52 @@ def apply_env_transforms(
     return transformed_env
 
 
+# def make_environment(cfg, train_num_envs=1, eval_num_envs=1, logger=None):
+#     """Make environments for training and evaluation."""
+#     maker = functools.partial(env_maker, cfg)
+#     parallel_env = ParallelEnv(
+#         train_num_envs,
+#         EnvCreator(maker),
+#         serial_for_single=True,
+#     )
+#     parallel_env.set_seed(cfg.env.seed)
+
+#     train_env = apply_env_transforms(parallel_env)
+
+#     maker = functools.partial(env_maker, cfg, from_pixels=cfg.logger.video)
+#     eval_env = TransformedEnv(
+#         ParallelEnv(
+#             eval_num_envs,
+#             EnvCreator(maker),
+#             serial_for_single=True,
+#         ),
+#         train_env.transform.clone(),
+#     )
+#     eval_env.set_seed(0)
+#     if cfg.logger.video:
+#         eval_env = eval_env.insert_transform(
+#             0, VideoRecorder(logger=logger, tag="rendered", in_keys=["pixels"])
+#         )
+#     return train_env, eval_env
+
 def make_environment(cfg, train_num_envs=1, eval_num_envs=1, logger=None):
-    """Make environments for training and evaluation."""
+    """Create dummy env for offline training."""
+    # If library is set to 'craftax' or if eval_envs=0, use dummy env
+    if cfg.env.library == "craftax":
+        print("⚙️ Using DummyCraftaxEnv for offline training")
+        train_env = DummyCraftaxEnv(obs_dim=1345, n_actions=17)
+        eval_env = None
+        return train_env, eval_env
+    
+    # Otherwise, fallback to the default gym-based env
     maker = functools.partial(env_maker, cfg)
     parallel_env = ParallelEnv(
         train_num_envs,
         EnvCreator(maker),
         serial_for_single=True,
     )
-    parallel_env.set_seed(cfg.env.seed)
-
     train_env = apply_env_transforms(parallel_env)
-
-    maker = functools.partial(env_maker, cfg, from_pixels=cfg.logger.video)
-    eval_env = TransformedEnv(
-        ParallelEnv(
-            eval_num_envs,
-            EnvCreator(maker),
-            serial_for_single=True,
-        ),
-        train_env.transform.clone(),
-    )
-    eval_env.set_seed(0)
-    if cfg.logger.video:
-        eval_env = eval_env.insert_transform(
-            0, VideoRecorder(logger=logger, tag="rendered", in_keys=["pixels"])
-        )
-    return train_env, eval_env
-
+    return train_env, None
 
 # ====================================================================
 # Collector and replay buffer
