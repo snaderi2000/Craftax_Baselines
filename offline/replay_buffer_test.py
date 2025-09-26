@@ -58,28 +58,23 @@ print("ReplayBuffer initialized successfully!")
 print("Building ReplayBuffer...")
 
 for i in range(N):
-    # Default next_action: just zeros (safe placeholder)
-    next_action = np.zeros((1,), dtype=np.int32)
+    # Wrap action and reward in shape (1,) arrays
+    action = np.array([actions[i]], dtype=np.int32)
+    reward = np.array([rewards[i]], dtype=np.float32)
 
-    # Default rewards_to_go: initialize with immediate reward
-    rewards_to_go = np.array([rewards[i]], dtype=np.float32)
-
-    transition = Transition(
+    # Call append directly
+    replay_buffer.append(
         observation=observations[i],
-        action=np.array([actions[i]], dtype=np.int32),   # shape (1,)
-        reward=np.array([rewards[i]], dtype=np.float32), # shape (1,)
+        action=action,
+        reward=reward,
         next_observation=next_observations[i],
         terminal=terminals[i],
-        interval=1,
-        next_action=next_action,
-        rewards_to_go=rewards_to_go
     )
 
-    replay_buffer.append(transition)
-
-    # Progress logging every 50k steps
+    # Progress logging every 50k
     if (i + 1) % 50000 == 0:
         print(f"  Processed {i + 1:,} / {N:,} transitions")
+
 
 print(f"✅ ReplayBuffer built successfully with {replay_buffer.transition_count:,} transitions.")
 
