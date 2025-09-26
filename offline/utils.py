@@ -267,57 +267,46 @@ class PhaseWeightedSampler(Sampler):
 
 # ---- Main loader ----
 def make_offline_discrete_replay_buffer(rb_cfg):
-    """
-    Load offline Craftax dataset from .h5 and create a TorchRL replay buffer
-    with optional phase-weighted sampling.
-    """
     print(f"Loading Craftax offline dataset from: {rb_cfg.dataset_path}")
 
-    # --- Step 1: Load HDF5 dataset ---
+    # Load from HDF5
     with h5py.File(rb_cfg.dataset_path, "r") as f:
         observations = torch.tensor(f["observations"][:], dtype=torch.float32)
         next_observations = torch.tensor(f["next_observations"][:], dtype=torch.float32)
         actions = torch.tensor(f["actions"][:], dtype=torch.int64)
         rewards = torch.tensor(f["rewards"][:], dtype=torch.float32)
         terminals = torch.tensor(f["terminals"][:], dtype=torch.bool)
-        phases = torch.tensor(f["phases"][:], dtype=torch.int64)  # phase: 0=early,1=mid,2=late
+        phases = torch.tensor(f["phases"][:], dtype=torch.int64)
 
-    # --- Step 2: Build transition TensorDict ---
+    print(f"Dataset loaded: {observations.shape[0]} transitions total")
+    print("Phase distribution:")
+    for phase_id in [0, 1, 2]:
+        print(f"  Phase {phase_id}: {(phases == phase_id).sum().item()} transitions")
+
+    # Build TensorDict
     transitions = TensorDict(
         {
             "observation": observations,
-            "next_observation": next_observations,
             "action": actions,
             "reward": rewards,
             "done": terminals,
-            "phase": phases,  # included for weighted sampling
+            "next_observation": next_observations,
+            "phase": phases,
         },
         batch_size=[observations.shape[0]],
     )
 
-    print(f"Dataset loaded: {observations.shape[0]} transitions total")
-
-    # Print phase distribution
-    unique_phases, counts = torch.unique(phases, return_counts=True)
-    print("Phase distribution:")
-    for p, c in zip(unique_phases.tolist(), counts.tolist()):
-        label = {0: "Early", 1: "Mid", 2: "Late"}[p]
-        print(f"  {label} ({p}): {c} transitions")
-
-    # --- Step 3: Create replay buffer with optional weighted sampler ---
+    # Initialize buffer
     storage = LazyTensorStorage(max_size=observations.shape[0])
     rb = TensorDictReplayBuffer(
         storage=storage,
+        sampler=SamplerWithoutReplacement(),  # for now, simple sampler
         batch_size=rb_cfg.batch_size,
-        sampler=SamplerWithoutReplacement(drop_last=True)
     )
-
-    # --- Step 4: Add data to buffer ---
     rb.extend(transitions)
+
     print("Replay buffer initialized and filled!")
-
     return rb
-
 
 
 # ====================================================================

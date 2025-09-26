@@ -1,85 +1,41 @@
-# env and task
-# env:
-#   name: CartPole-v1 # CartPole environment for discrete action space
-#   task: ""
-#   library: minari
-#   n_samples_stats: 1000
-#   seed: 0
-#   backend: gymnasium  
-
-env:
-  name: Craftax-Classic-Symbolic-v1   # optional, for evaluation only
-  task: ""                             # not used
-  library: torchrl                      # no minari
-  n_samples_stats: 0                    # offline, so 0
-  seed: 0
-  backend: gymnasium
-
-
-# Collector
-collector:
-  frames_per_batch: 200
-  total_frames: 1_000_000
-  multi_step: 0
-  init_random_frames: 1000
-  env_per_collector: 1
-  device:
-  max_frames_per_traj: 200
-  annealing_frames: 10000
-  eps_start: 1.0
-  eps_end: 0.01
-
-
-# logger
+# offline Craftax config
 logger:
   backend: wandb
   project_name: torchrl_example_cql
   group_name: null
-  exp_name: cql_${replay_buffer.dataset_path}
-  eval_iter: 0         # eval interval in gradient steps
-  eval_steps: 0        # evaluation steps per eval
+  exp_name: cql_${replay_buffer.dataset_path}   # only path now
+  eval_iter: 0
+  eval_steps: 0
   mode: online
-  eval_envs: 0 # number of evaluation environments
-  video: False
-
-# replay buffer
-# replay_buffer:
-#   env: CartPole-v1
-#   dataset: CartPole-v2-random-v1
-#   batch_size: 128
-#   episodes: 10000
-
+  eval_envs: 0
+  video: false
 
 replay_buffer:
-  dataset_path: "/home/synaderi/Craftax_Baselines/offline/craftax_dataset_5files_phases.h5"  # path to your merged .h5 file
-  batch_size: 128                # mini-batch size for training
-  weighted_sampling: true        # enable phase-weighted sampling
-  early_weight: 0.5               # sampling weight for phase 0 (early game)
-  mid_weight: 1.0                 # sampling weight for phase 1 (mid game)
-  late_weight: 2.0                # sampling weight for phase 2 (late game)
+  dataset_path: "/home/synaderi/Craftax_Baselines/offline/craftax_dataset_5files_phases.h5"
+  batch_size: 128
+  weighted_sampling: false   # set to true later when debugging
+  early_weight: 0.5
+  mid_weight: 1.0
+  late_weight: 2.0
 
-
-# optimization
 optim:
-  device: null
-  lr: 3e-4               # learning rate
+  device: cuda:0
+  lr: 3e-4
   weight_decay: 0.0
   gradient_steps: 100_000
   policy_eval_start: 40_000
 
-# model
 model:
   hidden_sizes: [256, 256]
   activation: relu
 
-# loss
-loss: 
+loss:
   loss_function: l2
   gamma: 0.99
   tau: 0.005
   action_space: categorical
 
 compile:
-  compile: False
+  compile: false
   compile_mode:
-  cudagraphs: False
+  cudagraphs: false
