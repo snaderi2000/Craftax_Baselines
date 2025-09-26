@@ -7,6 +7,12 @@ from __future__ import annotations
 import functools
 import h5py
 
+import torch
+from tensordict import TensorDict
+from torchrl.data.replay_buffers import TensorDictReplayBuffer, LazyTensorStorage
+
+
+
 import torch.nn
 import torch.optim
 from tensordict.nn import TensorDictModule, TensorDictSequential
