@@ -33,6 +33,7 @@ from utils import (
 )
 
 torch.set_float32_matmul_precision("high")
+from utils import make_offline_discrete_replay_buffer
 
 
 @hydra.main(config_path="", config_name="offline_config", version_base="1.1")
@@ -64,7 +65,7 @@ def main(cfg: DictConfig):  # noqa: F821
     device = torch.device(device)
 
     # Create replay buffer
-    replay_buffer = make_offline_replay_buffer(cfg.replay_buffer)
+    replay_buffer = make_offline_discrete_replay_buffer(cfg.replay_buffer) #make_offline_replay_buffer(cfg.replay_buffer)
 
     # Create env
     train_env, eval_env = make_environment(
