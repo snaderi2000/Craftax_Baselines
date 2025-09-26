@@ -150,7 +150,7 @@ def make_environment(cfg, train_num_envs=1, eval_num_envs=1, logger=None):
     train_env = apply_env_transforms(parallel_env)
     print("⚙️ Using GymEnv for offline training")
     print(f"train enviroment: {train_env}")
-    print(f"eval enviroment: {eval_env}")
+    print("after")
 
     return train_env, None
 
