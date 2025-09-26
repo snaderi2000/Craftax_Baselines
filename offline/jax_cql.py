@@ -88,6 +88,85 @@ def mse_loss(val: jnp.ndarray, target: jnp.ndarray) -> jnp.ndarray:
     return jnp.mean(jnp.square(val - target))
 
 
+def sample_actions_and_log_prob(apply_fn, params, observations, rng, repeat: Optional[int] = None):
+    """
+    Generic sampler that tries several apply_fn signatures and supports repeating samples per observation.
+
+    Returns:
+      actions, log_prob
+
+    If repeat is provided (>1), returns actions shaped (batch, repeat, ...) and log_prob shaped (batch, repeat).
+    """
+    # If repeat is set, expand observations accordingly for deterministic apply_fns that support repeat
+    if repeat is not None and repeat > 1:
+        # Try to call apply_fn with a repeat argument (some policies support it)
+        try:
+            samples, logp = apply_fn(params, observations, rng, repeat=repeat)
+            # Expect samples shaped (batch*repeat, ...) or (batch, repeat, ...)
+            # If flattened, try to reshape
+            if samples.ndim >= 2 and samples.shape[0] == observations.shape[0] * repeat:
+                # reshape to (batch, repeat, ...)
+                new_shape = (observations.shape[0], repeat) + samples.shape[1:]
+                samples = samples.reshape(new_shape)
+                logp = logp.reshape((observations.shape[0], repeat))
+            return samples, logp
+        except Exception:
+            # Fall through to other strategies
+            pass
+
+        # Try to repeat observations and call apply_fn expecting it to sample without repeat arg
+        rep_obs = extend_and_repeat(observations, 1, repeat).reshape(-1, observations.shape[-1])
+        # Try several call signatures
+        try:
+            out = apply_fn(params, rep_obs, rng)
+            # If apply_fn returns (samples, logp)
+            if isinstance(out, tuple) and len(out) == 2:
+                samples, logp = out
+            else:
+                # assume logits for categorical
+                logits = out
+                dist = distrax.Categorical(logits=logits)
+                samples = dist.sample(seed=rng)
+                logp = dist.log_prob(samples)
+        except TypeError:
+            # try without rng
+            out = apply_fn(params, rep_obs)
+            if isinstance(out, tuple) and len(out) == 2:
+                samples, logp = out
+            else:
+                logits = out
+                dist = distrax.Categorical(logits=logits)
+                samples = dist.sample(seed=rng)
+                logp = dist.log_prob(samples)
+
+        # reshape back to (batch, repeat, ...)
+        new_shape = (observations.shape[0], repeat) + samples.shape[1:]
+        samples = samples.reshape(new_shape)
+        logp = logp.reshape((observations.shape[0], repeat))
+        return samples, logp
+
+    # No repeat: try common apply_fn signatures
+    try:
+        # Some policies (e.g., TanhGaussianPolicy.__call__) accept rng and return (samples, logp)
+        out = apply_fn(params, observations, rng)
+        if isinstance(out, tuple) and len(out) == 2:
+            return out
+        # else assume logits
+        logits = out
+    except TypeError:
+        # try without rng
+        out = apply_fn(params, observations)
+        if isinstance(out, tuple) and len(out) == 2:
+            return out
+        logits = out
+
+    # Build categorical distribution from logits
+    dist = distrax.Categorical(logits=logits)
+    actions = dist.sample(seed=rng)
+    log_prob = dist.log_prob(actions)
+    return actions, log_prob
+
+
 def value_and_multi_grad(
     fun: Callable, n_outputs: int, argnums=0, has_aux=False
 ) -> Callable:
@@ -461,7 +540,10 @@ class CQL(object):
                 num_actions=config.action_dim,
                 hidden_dims=config.hidden_dims,
             )
-            new_actions, log_pi = policy_model.sample_and_log_prob(train_state.policy.params, observations, rng)
+            # Use unified sampler to keep behavior consistent across policy types
+            new_actions, log_pi = sample_actions_and_log_prob(
+                policy_fn, train_state.policy.params, observations, rng
+            )
 
 
            
@@ -506,11 +588,8 @@ class CQL(object):
 
             if config.cql_max_target_backup:
                 rng, cql_rng = jax.random.split(rng)
-                new_next_actions, next_log_pi = policy_fn(
-                    train_params["policy"],
-                    next_observations,
-                    cql_rng,
-                    repeat=config.cql_n_actions,
+                new_next_actions, next_log_pi = sample_actions_and_log_prob(
+                    policy_fn, train_params["policy"], next_observations, cql_rng, repeat=config.cql_n_actions
                 )
                 target_q_values = jnp.minimum(
                     qf_fn(target_qf_params["qf1"], next_observations, new_next_actions),
@@ -527,8 +606,8 @@ class CQL(object):
                 ).squeeze(-1)
             else:
                 rng, cql_rng = jax.random.split(rng)
-                new_next_actions, next_log_pi = policy_fn(
-                    train_params["policy"], next_observations, cql_rng
+                new_next_actions, next_log_pi = sample_actions_and_log_prob(
+                    policy_fn, train_params["policy"], next_observations, cql_rng
                 )
                 target_q_values = jnp.minimum(
                     qf_fn(target_qf_params["qf1"], next_observations, new_next_actions),
@@ -555,18 +634,12 @@ class CQL(object):
                     maxval=17.0,
                 )
                 rng, current_rng = jax.random.split(rng)
-                cql_current_actions, cql_current_log_pis = policy_fn(
-                    train_params["policy"],
-                    observations,
-                    current_rng,
-                    repeat=config.cql_n_actions,
+                cql_current_actions, cql_current_log_pis = sample_actions_and_log_prob(
+                    policy_fn, train_params["policy"], observations, current_rng, repeat=config.cql_n_actions
                 )
                 rng, next_rng = jax.random.split(rng)
-                cql_next_actions, cql_next_log_pis = policy_fn(
-                    train_params["policy"],
-                    next_observations,
-                    next_rng,
-                    repeat=config.cql_n_actions,
+                cql_next_actions, cql_next_log_pis = sample_actions_and_log_prob(
+                    policy_fn, train_params["policy"], next_observations, next_rng, repeat=config.cql_n_actions
                 )
 
                 cql_q1_rand = qf_fn(
