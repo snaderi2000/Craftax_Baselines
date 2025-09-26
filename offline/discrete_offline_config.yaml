@@ -1,11 +1,20 @@
 # env and task
+# env:
+#   name: CartPole-v1 # CartPole environment for discrete action space
+#   task: ""
+#   library: minari
+#   n_samples_stats: 1000
+#   seed: 0
+#   backend: gymnasium  
+
 env:
-  name: CartPole-v1 # CartPole environment for discrete action space
-  task: ""
-  library: minari
-  n_samples_stats: 1000
+  name: Craftax-Classic-Symbolic-v1   # optional, for evaluation only
+  task: ""                             # not used
+  library: torchrl                      # no minari
+  n_samples_stats: 0                    # offline, so 0
   seed: 0
-  backend: gymnasium  
+  backend: gymnasium
+
 
 # Collector
 collector:
@@ -27,18 +36,28 @@ logger:
   project_name: torchrl_example_cql
   group_name: null
   exp_name: cql_${replay_buffer.dataset}
-  eval_iter: 5000         # eval interval in gradient steps
-  eval_steps: 1000        # evaluation steps per eval
+  eval_iter: 0         # eval interval in gradient steps
+  eval_steps: 0        # evaluation steps per eval
   mode: online
-  eval_envs: 5 # number of evaluation environments
-  video: True
+  eval_envs: 0 # number of evaluation environments
+  video: False
 
 # replay buffer
+# replay_buffer:
+#   env: CartPole-v1
+#   dataset: CartPole-v2-random-v1
+#   batch_size: 128
+#   episodes: 10000
+
+
 replay_buffer:
-  env: CartPole-v1
-  dataset: CartPole-v2-random-v1
-  batch_size: 128
-  episodes: 10000
+  dataset_path: "/home/synaderi/Craftax_Baselines/craftax_dataset_5files_phases.h5"  # path to your merged .h5 file
+  batch_size: 128                # mini-batch size for training
+  weighted_sampling: true        # enable phase-weighted sampling
+  early_weight: 0.5               # sampling weight for phase 0 (early game)
+  mid_weight: 1.0                 # sampling weight for phase 1 (mid game)
+  late_weight: 2.0                # sampling weight for phase 2 (late game)
+
 
 # optimization
 optim:
