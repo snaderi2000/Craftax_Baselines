@@ -51,7 +51,7 @@ logger:
 
 
 replay_buffer:
-  dataset_path: "/home/synaderi/Craftax_Baselines/craftax_dataset_5files_phases.h5"  # path to your merged .h5 file
+  dataset_path: "/home/synaderi/Craftax_Baselines/offline/craftax_dataset_5files_phases.h5"  # path to your merged .h5 file
   batch_size: 128                # mini-batch size for training
   weighted_sampling: true        # enable phase-weighted sampling
   early_weight: 0.5               # sampling weight for phase 0 (early game)
