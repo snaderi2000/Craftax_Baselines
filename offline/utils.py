@@ -439,12 +439,12 @@ def make_discretecql_model(cfg, train_env, eval_env, device="cpu"):
     )
     qvalue_module = qvalue_module.to(device)
     # init nets
-    with torch.no_grad(), set_exploration_type(ExplorationType.RANDOM):
-        td = eval_env.reset()
-        td = td.to(device)
-        qvalue_module(td)
+    # with torch.no_grad(), set_exploration_type(ExplorationType.RANDOM):
+    #     td = eval_env.reset()
+    #     td = td.to(device)
+    #     qvalue_module(td)
 
-    del td
+    # del td
     greedy_module = EGreedyModule(
         annealing_num_steps=cfg.collector.annealing_frames,
         eps_init=cfg.collector.eps_start,
