@@ -45,6 +45,10 @@ from torchrl.record import VideoRecorder
 
 from torchrl.trainers.helpers.models import ACTIVATIONS
 
+
+from torch.utils.data import Sampler
+
+
 # ====================================================================
 # Environment utils
 # -----------------
