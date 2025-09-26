@@ -140,7 +140,7 @@ def make_environment(cfg, train_num_envs=1, eval_num_envs=1, logger=None):
         eval_env = None
         # Don't apply transforms to the dummy env (it's not a full TorchRL EnvBase)
         print("CHILLA", flush=True)
-        print(f"train environment: {train_env}", flush=True)
+        print(f"train environment action spec: {train_env.action_spec}", flush=True)
         print(f"eval environment:  {eval_env}", flush=True)
         print("after", flush=True)
         return train_env, eval_env
@@ -428,7 +428,7 @@ def make_discretecql_model(cfg, train_env, eval_env, device="cpu"):
 
     actor_net_kwargs = {
         "num_cells": model_cfg.hidden_sizes,
-        "out_features": action_spec.shape[-1],
+        "out_features": action_spec.n,
         "activation_class": ACTIVATIONS[model_cfg.activation],
     }
     actor_net = MLP(**actor_net_kwargs)
