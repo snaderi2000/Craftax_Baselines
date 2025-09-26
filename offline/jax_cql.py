@@ -776,7 +776,7 @@ def create_cql_train_state(
 
     rng, policy_rng, q1_rng, q2_rng = jax.random.split(rng, 4)
 
-    policy_params = policy_model.init(policy_rng, observations, policy_rng)
+    policy_params = policy_model.init(policy_rng, observations)
     policy = TrainState.create(
         params=policy_params,
         tx=optimizer_class(config.policy_lr),
