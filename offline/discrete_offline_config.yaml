@@ -35,7 +35,7 @@ logger:
   backend: wandb
   project_name: torchrl_example_cql
   group_name: null
-  exp_name: cql_${replay_buffer.dataset}
+  exp_name: cql_${replay_buffer.dataset_path}
   eval_iter: 0         # eval interval in gradient steps
   eval_steps: 0        # evaluation steps per eval
   mode: online
