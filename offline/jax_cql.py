@@ -6,7 +6,7 @@ from copy import deepcopy
 from functools import partial
 from typing import Any, Callable, Dict, NamedTuple, Optional, Sequence, Tuple
 
-import d4rl
+#import d4rl
 import distrax
 import flax
 import flax.linen as nn
