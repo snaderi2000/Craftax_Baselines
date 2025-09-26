@@ -64,7 +64,7 @@ class DummyCraftaxEnv:
     """A minimal environment to provide observation and action specs for offline training."""
     def __init__(self, obs_dim=1345, n_actions=17):
         self.observation_spec = UnboundedContinuousTensorSpec(shape=(obs_dim,))
-        self.action_spec = DiscreteTensorSpec(n_actions)
+        self.action_spec = Categorical(n=n_actions) 
 
     def reset(self):
         # Returns a dummy observation for initialization
