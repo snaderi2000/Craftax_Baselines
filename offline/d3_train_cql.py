@@ -102,8 +102,7 @@ cql = cql_config.create(device='cuda:0' if torch.cuda.is_available() else 'cpu')
 # Since we can't run a live environment, we use offline evaluation metrics
 # TD Error: Measures how well the Q-function is fitting the Bellman equation
 wandb_logger = d3rlpy.logging.WanDBAdapterFactory(
-    project=WANDB_PROJECT, 
-    name=WANDB_RUN_NAME,
+    project=WANDB_PROJECT,  
     config=dataclasses.asdict(cql_config) # Pass the config object here
 )
 
@@ -123,7 +122,7 @@ cql.fit(
         "td_error": td_error_evaluator,
         "initial_state_value": initial_state_value_evaluator,
     },
-    experiment_name=EXPERIMENT_NAME,
+    experiment_name=WANDB_RUN_NAME,
     with_timestamp=True,
     show_progress=True,
     logger_adapter=wandb_logger
