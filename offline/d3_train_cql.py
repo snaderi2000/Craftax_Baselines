@@ -4,6 +4,7 @@ import numpy as np
 from tqdm import tqdm
 import wandb
 import torch
+import dataclasses
 
 # ===================================================================
 # 1. EXPERIMENT CONFIGURATION
@@ -19,8 +20,8 @@ DATASET_PATH = "episodes_compressed.h5"
 MODEL_SAVE_PATH = "cql_craftax_final.d3"
 
 # Training hyperparameters
-TOTAL_STEPS = 500_000
-EPOCH_STEPS = 10_000  # How often to log, evaluate, and save checkpoints
+TOTAL_STEPS = 20_000
+EPOCH_STEPS = 5_000  # How often to log, evaluate, and save checkpoints
 BATCH_SIZE = 256     # Increased from the Atari example for better stability
 
 # ===================================================================
@@ -95,7 +96,7 @@ td_error_evaluator = d3rlpy.metrics.TDErrorEvaluator()
 initial_state_value_evaluator = d3rlpy.metrics.InitialStateValueEstimationEvaluator()
 
 # --- W&B Setup ---
-wandb.init(project=WANDB_PROJECT, name=WANDB_RUN_NAME, config=cql.get_params())
+wandb.init(project=WANDB_PROJECT, name=WANDB_RUN_NAME, config=dataclasses.asdict(cql._config))
 
 print("🚀 Starting training...")
 
