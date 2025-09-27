@@ -3,6 +3,7 @@ import h5py
 import numpy as np
 from tqdm import tqdm
 import wandb
+import torch
 
 # ===================================================================
 # 1. EXPERIMENT CONFIGURATION
@@ -79,7 +80,7 @@ cql = d3rlpy.algos.DiscreteCQLConfig(
     
     target_update_interval=2000,
 
-).create(device='cuda:0' if d3rlpy.torch_utility.is_gpu_enabled() else 'cpu')
+).create(device='cuda:0' if torch.cuda.is_available() else 'cpu')
 
 
 # ===================================================================
