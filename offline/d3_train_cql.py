@@ -38,7 +38,6 @@ with h5py.File(DATASET_PATH, "r") as hf:
         is_terminated = episode_group['done'][-1]
 
         episode = d3rlpy.dataset.Episode( 
-            action_size=actions.shape[1],
             observations=episode_group['obs'][:],
             actions=actions,
             rewards=rewards,
