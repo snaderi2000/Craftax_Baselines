@@ -5,7 +5,6 @@ from tqdm import tqdm
 import wandb
 import torch
 import dataclasses
-
 # ===================================================================
 # 1. EXPERIMENT CONFIGURATION
 # ===================================================================
@@ -62,27 +61,39 @@ print(f"\n✅ Replay Buffer is ready with {replay_buffer.transition_count} trans
 print("Configuring Discrete CQL agent...")
 
 # Configure the Discrete CQL algorithm, borrowing good hyperparameters from the Atari example
-cql = d3rlpy.algos.DiscreteCQLConfig(
+# cql = d3rlpy.algos.DiscreteCQLConfig(
+#     batch_size=BATCH_SIZE,
+#     learning_rate=5e-5,
+#     optim_factory=d3rlpy.optimizers.AdamFactory(eps=1e-2 / BATCH_SIZE),
+    
+#     # The conservative penalty weight. This is the most important CQL hyperparameter.
+#     alpha=4.0,
+    
+#     # Quantile Regression is a powerful Q-function often used in discrete offline RL
+#     q_func_factory=d3rlpy.models.q_functions.QRQFunctionFactory(n_quantiles=200),
+    
+#     # We don't use a PixelScaler because our observations are vectors, not images
+#     observation_scaler=None,
+    
+#     # Standard practice to clip rewards for stability
+#     reward_scaler=d3rlpy.preprocessing.ClipRewardScaler(-1.0, 1.0),
+    
+#     target_update_interval=2000,
+
+# ).create(device='cuda:0' if torch.cuda.is_available() else 'cpu')
+
+# Configure the Discrete CQL algorithm, borrowing good hyperparameters from the Atari example
+cql_config = d3rlpy.algos.DiscreteCQLConfig(
     batch_size=BATCH_SIZE,
     learning_rate=5e-5,
     optim_factory=d3rlpy.optimizers.AdamFactory(eps=1e-2 / BATCH_SIZE),
-    
-    # The conservative penalty weight. This is the most important CQL hyperparameter.
     alpha=4.0,
-    
-    # Quantile Regression is a powerful Q-function often used in discrete offline RL
     q_func_factory=d3rlpy.models.q_functions.QRQFunctionFactory(n_quantiles=200),
-    
-    # We don't use a PixelScaler because our observations are vectors, not images
     observation_scaler=None,
-    
-    # Standard practice to clip rewards for stability
     reward_scaler=d3rlpy.preprocessing.ClipRewardScaler(-1.0, 1.0),
-    
     target_update_interval=2000,
-
-).create(device='cuda:0' if torch.cuda.is_available() else 'cpu')
-
+)
+cql = cql_config.create(device='cuda:0' if torch.cuda.is_available() else 'cpu')
 
 # ===================================================================
 # 4. SETTING UP EVALUATION AND TRAINING
@@ -90,13 +101,17 @@ cql = d3rlpy.algos.DiscreteCQLConfig(
 
 # Since we can't run a live environment, we use offline evaluation metrics
 # TD Error: Measures how well the Q-function is fitting the Bellman equation
+wandb_logger = d3rlpy.logging.WanDBAdapterFactory(
+    project=WANDB_PROJECT, 
+    name=WANDB_RUN_NAME,
+    config=dataclasses.asdict(cql_config) # Pass the config object here
+)
+
 td_error_evaluator = d3rlpy.metrics.TDErrorEvaluator()
 
 # Initial State Value: Estimates the policy's performance on the dataset's starting states
 initial_state_value_evaluator = d3rlpy.metrics.InitialStateValueEstimationEvaluator()
 
-# --- W&B Setup ---
-wandb.init(project=WANDB_PROJECT, name=WANDB_RUN_NAME, config=dataclasses.asdict(cql._config))
 
 print("🚀 Starting training...")
 
@@ -111,7 +126,7 @@ cql.fit(
     experiment_name=EXPERIMENT_NAME,
     with_timestamp=True,
     show_progress=True,
-    # d3rlpy automatically handles logging to a wandb run if it's active
+    logger_adapter=wandb_logger
 )
 
 
@@ -120,4 +135,4 @@ cql.fit(
 # ===================================================================
 cql.save(MODEL_SAVE_PATH)
 print(f"\n🎉 Training complete! Final model saved to {MODEL_SAVE_PATH}")
-wandb.finish()
+
