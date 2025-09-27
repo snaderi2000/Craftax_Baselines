@@ -40,32 +40,12 @@ def main():
     # ---- W&B Setup ----
     wandb.init(project=WANDB_PROJECT, name=WANDB_RUN_NAME)
     
-    with h5py.File(DATASET_PATH, "r") as f:
-        observations = f["observations"][:]        # shape (N, obs_dim)
-        next_observations = f["next_observations"][:]  # shape (N, obs_dim)
-        actions = f["actions"][:]                  # shape (N,)
-        rewards = f["rewards"][:]                  # shape (N,)
-        terminals = f["terminals"][:].astype(np.float32)  # bool -> float32
-
-    print("Transitions loaded:", len(observations))
-
-    # ---- Create ReplayBuffer ----
+    # ---- Load Dataset ----
     buffer = FIFOBuffer(limit=None)
-    replay_buffer = ReplayBuffer(buffer)
+    with open(DATASET_PATH, "rb") as f:
+        replay_buffer = ReplayBuffer.load(f, buffer)
 
-    for i in range(len(observations)):
-        transition = Transition(
-            observation=observations[i],
-            action=actions[i],
-            reward=rewards[i],
-            next_observation=next_observations[i],
-            terminal=terminals[i],
-            interval=1
-        )
-        replay_buffer.append(transition)
-
-    print(f"ReplayBuffer ready: {replay_buffer.transition_count} transitions")
- 
+    replay_buffer.transition_picker = CustomNextObsTransitionPicker()
 
     print(f"Dataset loaded: {len(replay_buffer.episodes)} episodes, "
           f"{replay_buffer.transition_count} transitions")

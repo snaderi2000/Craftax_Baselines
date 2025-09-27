@@ -37,8 +37,7 @@ with h5py.File(DATASET_PATH, "r") as hf:
         rewards = episode_group['reward'][:].reshape(-1, 1)
         is_terminated = episode_group['done'][-1]
 
-        episode = d3rlpy.dataset.Episode(
-            observation_shape=episode_group['obs'].shape[1:],
+        episode = d3rlpy.dataset.Episode( 
             action_size=actions.shape[1],
             observations=episode_group['obs'][:],
             actions=actions,
