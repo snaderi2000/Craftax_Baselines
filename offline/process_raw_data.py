@@ -78,7 +78,7 @@ def save_episodes_to_compressed_hdf5(episodes_dict, output_path):
 if __name__ == "__main__":
     # --- Configuration ---
     # The directory containing your raw .npz files
-    DATA_DIR = "./craftax_classic_200M_dataset" 
+    DATA_DIR = "../craftax_classic_1M_dataset" 
     # The name of your final, processed dataset file
     H5_OUTPUT_PATH = "episodes_compressed.h5"
 
