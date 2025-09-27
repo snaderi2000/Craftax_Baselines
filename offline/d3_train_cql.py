@@ -92,7 +92,7 @@ cql = d3rlpy.algos.DiscreteCQLConfig(
 td_error_evaluator = d3rlpy.metrics.TDErrorEvaluator()
 
 # Initial State Value: Estimates the policy's performance on the dataset's starting states
-initial_state_value_evaluator = d3rlpy.metrics.InitialStateValueEvaluator()
+initial_state_value_evaluator = d3rlpy.metrics.InitialStateValueEstimationEvaluator()
 
 # --- W&B Setup ---
 wandb.init(project=WANDB_PROJECT, name=WANDB_RUN_NAME, config=cql.get_params())
