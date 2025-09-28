@@ -74,7 +74,7 @@ def save_batch_to_disk(traj_batch, update_step, config):
     scalar_step = int(np.array(update_step).flatten()[0])
 
     # Zero-pad to 6 digits for consistent sorting
-    file_name = os.path.join(save_path, f"batch_{scalar_step:06d}.npz")
+    file_name = os.path.join(save_path, f"batch_{scalar_step:06d}__proc{jax.process_index()}.npz")
 
     # Save
     np.savez_compressed(file_name, **flat_batch_dict)
@@ -354,7 +354,7 @@ def make_train(config):
             # 💾 NEW: SAVE THE TRAJECTORY BATCH
             # ============================================================
             # We extract the current update_step from the runner_state
-            current_update_step = runner_state[-1]
+            current_update_step = runner_state[5]
             
             if config["SAVE_BUFFER"]:
                 # Use a callback to perform the file-saving side-effect
