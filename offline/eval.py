@@ -11,7 +11,7 @@ from d3rlpy import load_learnable
 # ===============================
 # CONFIG
 # ===============================
-MODEL_PATH = "cql_craftax_latest.d3"
+MODEL_PATH = "cql_craftax_last_50_weighted.d3"
 ENV_NAME = "Craftax-Classic-Symbolic-v1"
 EVAL_EPISODES = 100
 SEED = 42  # reproducibility

@@ -97,4 +97,73 @@ wake_up: 32.0%
 Reward (Average Achievement): 61.86
 Score: 44.01
 
+NEW Approach 
 
+Latest episodes 
+
+===== FINAL EVALUATION =====
+Episodes: 100
+Average Reward: 10.82
+
+Achievement Success Rates:
+collect_coal: 41.0%
+collect_diamond: 1.0%
+collect_drink: 68.0%
+collect_iron: 27.0%
+collect_sapling: 100.0%
+collect_stone: 54.0%
+collect_wood: 100.0%
+defeat_skeleton: 50.0%
+defeat_zombie: 95.0%
+eat_cow: 71.0%
+eat_plant: 0.0%
+make_iron_pickaxe: 19.0%
+make_iron_sword: 10.0%
+make_stone_pickaxe: 36.0%
+make_stone_sword: 42.0%
+make_wood_pickaxe: 54.0%
+make_wood_sword: 82.0%
+place_furnace: 49.0%
+place_plant: 100.0%
+place_stone: 50.0%
+place_table: 95.0%
+wake_up: 31.0%
+
+===== Calculated Metrics =====
+Reward (Average Achievement): 53.41
+Score: 36.42
+
+
+weighted so about 600k transitions 
+
+===== FINAL EVALUATION =====
+Episodes: 100
+Average Reward: 9.02
+
+Achievement Success Rates:
+collect_coal: 27.0%
+collect_diamond: 0.0%
+collect_drink: 55.0%
+collect_iron: 16.0%
+collect_sapling: 99.0%
+collect_stone: 46.0%
+collect_wood: 100.0%
+defeat_skeleton: 38.0%
+defeat_zombie: 91.0%
+eat_cow: 69.0%
+eat_plant: 0.0%
+make_iron_pickaxe: 9.0%
+make_iron_sword: 6.0%
+make_stone_pickaxe: 19.0%
+make_stone_sword: 21.0%
+make_wood_pickaxe: 49.0%
+make_wood_sword: 67.0%
+place_furnace: 30.0%
+place_plant: 99.0%
+place_stone: 38.0%
+place_table: 89.0%
+wake_up: 25.0%
+
+===== Calculated Metrics =====
+Reward (Average Achievement): 45.14
+Score: 27.40

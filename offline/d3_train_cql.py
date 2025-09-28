@@ -5,6 +5,7 @@ from tqdm import tqdm
 import wandb
 import torch
 import dataclasses
+from d3rlpy.algos import DiscreteCQLConfig
 # ===================================================================
 # 1. EXPERIMENT CONFIGURATION
 # ===================================================================
@@ -13,14 +14,14 @@ WANDB_RUN_NAME = "cql-run-1M-dataset"
 EXPERIMENT_NAME = "DiscreteCQL_Craftax"
 
 # Path to the master dataset you created
-DATASET_PATH = "episodes_compressed.h5"
+DATASET_PATH = "combined_dataset_compressed.h5"
 
 # Where to save the final trained model
-MODEL_SAVE_PATH = "cql_craftax_final.d3"
+MODEL_SAVE_PATH = "huge.d3"
 
 # Training hyperparameters
-TOTAL_STEPS = 20_000
-EPOCH_STEPS = 5_000  # How often to log, evaluate, and save checkpoints
+TOTAL_STEPS = 500_000
+EPOCH_STEPS = 10_000  # How often to log, evaluate, and save checkpoints
 BATCH_SIZE = 256     # Increased from the Atari example for better stability
 
 # ===================================================================
@@ -83,17 +84,20 @@ print("Configuring Discrete CQL agent...")
 # ).create(device='cuda:0' if torch.cuda.is_available() else 'cpu')
 
 # Configure the Discrete CQL algorithm, borrowing good hyperparameters from the Atari example
-cql_config = d3rlpy.algos.DiscreteCQLConfig(
-    batch_size=BATCH_SIZE,
-    learning_rate=5e-5,
-    optim_factory=d3rlpy.optimizers.AdamFactory(eps=1e-2 / BATCH_SIZE),
-    alpha=4.0,
-    q_func_factory=d3rlpy.models.q_functions.QRQFunctionFactory(n_quantiles=200),
-    observation_scaler=None,
-    reward_scaler=d3rlpy.preprocessing.ClipRewardScaler(-1.0, 1.0),
-    target_update_interval=2000,
-)
-cql = cql_config.create(device='cuda:0' if torch.cuda.is_available() else 'cpu')
+#cql_config = d3rlpy.algos.DiscreteCQLConfig(
+#    batch_size=BATCH_SIZE,
+#    learning_rate=5e-5,
+#    optim_factory=d3rlpy.optimizers.AdamFactory(eps=1e-2 / BATCH_SIZE),
+#    alpha=4.0,
+#    q_func_factory=d3rlpy.models.q_functions.QRQFunctionFactory(n_quantiles=200),
+#    observation_scaler=None,
+#    reward_scaler=d3rlpy.preprocessing.ClipRewardScaler(-1.0, 1.0),
+#    target_update_interval=2000,
+#)
+#cql = cql_config.create(device='cuda:0' if torch.cuda.is_available() else 'cpu')
+
+cql = DiscreteCQLConfig().create(device="cuda:0")
+
 
 # ===================================================================
 # 4. SETTING UP EVALUATION AND TRAINING
