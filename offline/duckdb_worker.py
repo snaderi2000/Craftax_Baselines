@@ -42,8 +42,7 @@ def process_worker(input_dir, output_db, shard_index, total_shards, chunk_size=2
         CREATE TABLE IF NOT EXISTS transitions (
             episode_id BIGINT,
             step_in_episode INT,
-            obs BLOB,
-            next_obs BLOB,
+            obs BLOB, 
             action INT,
             reward FLOAT
         )
@@ -85,7 +84,6 @@ def process_worker(input_dir, output_db, shard_index, total_shards, chunk_size=2
                             int(episode_ids[i]),
                             int(steps[i]),
                             compress_array(obs[i]),          # compress to BLOB
-                            compress_array(next_obs[i]),
                             int(actions[i]),
                             float(rewards[i]),
                         )
@@ -93,7 +91,7 @@ def process_worker(input_dir, output_db, shard_index, total_shards, chunk_size=2
                     ]
 
                     con.executemany("""
-                        INSERT INTO transitions VALUES (?, ?, ?, ?, ?, ?)
+                        INSERT INTO transitions VALUES (?, ?, ?, ?, ?)
                     """, batch_data)
 
                     if start % (chunk_size * 10) == 0:
