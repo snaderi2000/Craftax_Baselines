@@ -89,7 +89,7 @@ def process_worker(input_dir, output_db, shard_index, total_shards, chunk_size=2
                         )
                         for i in range(start, end)
                     ]
-
+                    #test
                     con.executemany("""
                         INSERT INTO transitions VALUES (?, ?, ?, ?, ?)
                     """, batch_data)
