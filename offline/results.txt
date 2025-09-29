@@ -167,3 +167,39 @@ wake_up: 25.0%
 ===== Calculated Metrics =====
 Reward (Average Achievement): 45.14
 Score: 27.40
+
+
+top 1000 episodes by reward (approx 1 million transitions total)
+
+===== FINAL EVALUATION =====
+Episodes: 100
+Average Reward: 9.43
+
+Achievement Success Rates:
+collect_coal: 37.0%
+collect_diamond: 0.0%
+collect_drink: 57.0%
+collect_iron: 18.0%
+collect_sapling: 98.0%
+collect_stone: 55.0%
+collect_wood: 100.0%
+defeat_skeleton: 38.0%
+defeat_zombie: 88.0%
+eat_cow: 71.0%
+eat_plant: 1.0%
+make_iron_pickaxe: 6.0%
+make_iron_sword: 6.0%
+make_stone_pickaxe: 22.0%
+make_stone_sword: 26.0%
+make_wood_pickaxe: 62.0%
+make_wood_sword: 47.0%
+place_furnace: 36.0%
+place_plant: 98.0%
+place_stone: 46.0%
+place_table: 84.0%
+wake_up: 39.0%
+
+===== Calculated Metrics =====
+Reward (Average Achievement): 47.05
+Score: 29.97
+

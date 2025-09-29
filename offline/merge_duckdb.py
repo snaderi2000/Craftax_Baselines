@@ -23,7 +23,6 @@ def merge_worker_dbs():
             episode_id BIGINT,
             step_in_episode INT,
             obs BLOB,
-            next_obs BLOB,
             action INT,
             reward FLOAT
         );

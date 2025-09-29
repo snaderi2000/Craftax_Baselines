@@ -14,10 +14,10 @@ WANDB_RUN_NAME = "cql-run-1M-dataset"
 EXPERIMENT_NAME = "DiscreteCQL_Craftax"
 
 # Path to the master dataset you created
-DATASET_PATH = "combined_dataset_compressed.h5"
+file_path = "top_2000_episodes.h5"
 
 # Where to save the final trained model
-MODEL_SAVE_PATH = "huge.d3"
+MODEL_SAVE_PATH = "top_2000.d3"
 
 # Training hyperparameters
 TOTAL_STEPS = 500_000
@@ -27,33 +27,16 @@ BATCH_SIZE = 256     # Increased from the Atari example for better stability
 # ===================================================================
 # 2. DATA LOADING & PREPARATION
 # ===================================================================
-print(f"Loading episodes from '{DATASET_PATH}'...")
+#print(f"Loading episodes from '{DATASET_PATH}'...")
 
-# Create a list of d3rlpy.dataset.Episode objects from our custom HDF5 file
-episodes = []
-with h5py.File(DATASET_PATH, "r") as hf:
-    for episode_key in tqdm(hf.keys(), desc="Loading episodes"):
-        episode_group = hf[episode_key]
-        
-        actions = episode_group['action'][:].reshape(-1, 1)
-        rewards = episode_group['reward'][:].reshape(-1, 1)
-        is_terminated = episode_group['done'][-1]
+with open("top_1000_episodes.h5", "rb") as f:
+    replay_buffer = d3rlpy.dataset.ReplayBuffer.load(
+        f,
+        d3rlpy.dataset.InfiniteBuffer()  # or FIFOBuffer if you want a limit
+    )
 
-        episode = d3rlpy.dataset.Episode( 
-            observations=episode_group['obs'][:],
-            actions=actions,
-            rewards=rewards,
-            terminated=is_terminated
-        )
-        episodes.append(episode)
+print(f"Replay buffer loaded with {replay_buffer.transition_count} transitions.")
 
-# The ReplayBuffer holds all data and handles sampling
-replay_buffer = d3rlpy.dataset.ReplayBuffer(
-    buffer=d3rlpy.dataset.FIFOBuffer(limit=len(episodes) * 1024), # Set a large limit
-    episodes=episodes
-)
-
-print(f"\n✅ Replay Buffer is ready with {replay_buffer.transition_count} transitions.")
 
 
 # ===================================================================
