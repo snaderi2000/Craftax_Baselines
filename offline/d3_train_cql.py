@@ -43,40 +43,6 @@ print(f"Replay buffer loaded with {replay_buffer.transition_count} transitions."
 # ===================================================================
 print("Configuring Discrete CQL agent...")
 
-# Configure the Discrete CQL algorithm, borrowing good hyperparameters from the Atari example
-# cql = d3rlpy.algos.DiscreteCQLConfig(
-#     batch_size=BATCH_SIZE,
-#     learning_rate=5e-5,
-#     optim_factory=d3rlpy.optimizers.AdamFactory(eps=1e-2 / BATCH_SIZE),
-    
-#     # The conservative penalty weight. This is the most important CQL hyperparameter.
-#     alpha=4.0,
-    
-#     # Quantile Regression is a powerful Q-function often used in discrete offline RL
-#     q_func_factory=d3rlpy.models.q_functions.QRQFunctionFactory(n_quantiles=200),
-    
-#     # We don't use a PixelScaler because our observations are vectors, not images
-#     observation_scaler=None,
-    
-#     # Standard practice to clip rewards for stability
-#     reward_scaler=d3rlpy.preprocessing.ClipRewardScaler(-1.0, 1.0),
-    
-#     target_update_interval=2000,
-
-# ).create(device='cuda:0' if torch.cuda.is_available() else 'cpu')
-
-# Configure the Discrete CQL algorithm, borrowing good hyperparameters from the Atari example
-#cql_config = d3rlpy.algos.DiscreteCQLConfig(
-#    batch_size=BATCH_SIZE,
-#    learning_rate=5e-5,
-#    optim_factory=d3rlpy.optimizers.AdamFactory(eps=1e-2 / BATCH_SIZE),
-#    alpha=4.0,
-#    q_func_factory=d3rlpy.models.q_functions.QRQFunctionFactory(n_quantiles=200),
-#    observation_scaler=None,
-#    reward_scaler=d3rlpy.preprocessing.ClipRewardScaler(-1.0, 1.0),
-#    target_update_interval=2000,
-#)
-#cql = cql_config.create(device='cuda:0' if torch.cuda.is_available() else 'cpu')
 
 cql = DiscreteCQLConfig().create(device="cuda:0")
 

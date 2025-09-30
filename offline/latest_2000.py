@@ -54,6 +54,11 @@ latest_episodes_df = con.execute("""
 # -----------------------------
 final_episode_ids = latest_episodes_df['episode_id'].tolist()
 
+keep_ratio = 0.25
+num_to_keep = int(len(final_episode_ids) * keep_ratio)
+
+final_episode_ids = random.sample(final_episode_ids, num_to_keep)
+
 print(f"Selected {len(final_episode_ids)} episodes to fetch.")
 
 # -----------------------------
