@@ -4,14 +4,14 @@ from craftax.craftax_env import make_craftax_env_from_name
 from d3rlpy import load_learnable
 
 
-# from models.actor_critic import ActorCritic
-# from orbax.checkpoint import PyTreeCheckpointer
+#from models.actor_critic import ActorCritic
+#from orbax.checkpoint import PyTreeCheckpointer
 
 
 # ===============================
 # CONFIG
 # ===============================
-MODEL_PATH = "latest_20480_episodes.h5"
+MODEL_PATH = "latest_20480_episodes_long.h5" #"/home/synaderi/Craftax_Baselines/wandb/run-20250928_000002-t9euxo7k/files/policies/200000000/default" #"latest_20480_episodes.h5"
 ENV_NAME = "Craftax-Classic-Symbolic-v1"
 EVAL_EPISODES = 100
 SEED = 42  # reproducibility
@@ -59,17 +59,17 @@ def evaluate_model():
 
     # # 1. Initialize the network architecture to match the trained model.
     # #    This creates the "empty shell" of your model.
-    # network = ActorCritic(action_dim=env.action_space(env_params).n, layer_width=512)
+    #network = ActorCritic(action_dim=env.action_space(env_params).n, layer_width=512)
 
 
     # # 2. Create an Orbax checkpointer to handle the loading.
-    # orbax_checkpointer = PyTreeCheckpointer()
+    #orbax_checkpointer = PyTreeCheckpointer()
 
     # # 3. Restore the entire saved training state from the directory.
-    # restored_train_state = orbax_checkpointer.restore(MODEL_PATH)
+    #restored_train_state = orbax_checkpointer.restore(MODEL_PATH)
 
     # # 4. Extract just the model weights ('params') for inference.
-    # params = restored_train_state["params"]
+    #params = restored_train_state["params"]
 
     @jax.jit
     def predict_action(p, obs):

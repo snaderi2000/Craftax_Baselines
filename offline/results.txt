@@ -1,173 +1,36 @@
-random sample 
-
+ppo 
 
 ===== FINAL EVALUATION =====
 Episodes: 100
-Average Reward: 8.57
-
-Achievement Success Rates:
-collect_coal: 29.0%
-collect_diamond: 0.0%
-collect_drink: 52.0%
-collect_iron: 11.0%
-collect_sapling: 100.0%
-collect_stone: 54.0%
-collect_wood: 100.0%
-defeat_skeleton: 33.0%
-defeat_zombie: 69.0%
-eat_cow: 62.0%
-eat_plant: 0.0%
-make_iron_pickaxe: 5.0%
-make_iron_sword: 2.0%
-make_stone_pickaxe: 26.0%
-make_stone_sword: 22.0%
-make_wood_pickaxe: 65.0%
-make_wood_sword: 36.0%
-place_furnace: 36.0%
-place_plant: 100.0%
-place_stone: 46.0%
-place_table: 90.0%
-wake_up: 11.0%
-
-===== Calculated Metrics =====
-Reward (Average Achievement): 43.14
-Score: 24.45
-
-PPO 
+Average Reward: 16.95
 
 Achievement Success Rates:
 collect_coal: 93.0%
-collect_diamond: 2.0%
-collect_drink: 94.0%
-collect_iron: 87.0%
-collect_sapling: 98.0%
-collect_stone: 98.0%
-collect_wood: 100.0%
-defeat_skeleton: 87.0%
-defeat_zombie: 98.0%
-eat_cow: 98.0%
-eat_plant: 0.0%
-make_iron_pickaxe: 72.0%
-make_iron_sword: 63.0%
-make_stone_pickaxe: 95.0%
-make_stone_sword: 92.0%
-make_wood_pickaxe: 100.0%
-make_wood_sword: 97.0%
-place_furnace: 98.0%
-place_plant: 98.0%
-place_stone: 93.0%
-place_table: 100.0%
-wake_up: 72.0%
-
-===== Calculated Metrics =====
-Reward (Average Achievement): 83.41
-Score: 63.11
-
-latest 
-
-===== FINAL EVALUATION =====
-Episodes: 100
-Average Reward: 12.70
-
-Achievement Success Rates:
-collect_coal: 57.0%
-collect_diamond: 0.0%
-collect_drink: 73.0%
-collect_iron: 43.0%
-collect_sapling: 100.0%
-collect_stone: 77.0%
-collect_wood: 100.0%
-defeat_skeleton: 56.0%
-defeat_zombie: 93.0%
-eat_cow: 84.0%
-eat_plant: 1.0%
-make_iron_pickaxe: 23.0%
-make_iron_sword: 24.0%
-make_stone_pickaxe: 52.0%
-make_stone_sword: 50.0%
-make_wood_pickaxe: 79.0%
-make_wood_sword: 83.0%
-place_furnace: 67.0%
-place_plant: 100.0%
-place_stone: 71.0%
-place_table: 96.0%
-wake_up: 32.0%
-
-===== Calculated Metrics =====
-Reward (Average Achievement): 61.86
-Score: 44.01
-
-NEW Approach 
-
-Latest episodes 
-
-===== FINAL EVALUATION =====
-Episodes: 100
-Average Reward: 10.82
-
-Achievement Success Rates:
-collect_coal: 41.0%
 collect_diamond: 1.0%
-collect_drink: 68.0%
-collect_iron: 27.0%
-collect_sapling: 100.0%
-collect_stone: 54.0%
+collect_drink: 89.0%
+collect_iron: 85.0%
+collect_sapling: 98.0%
+collect_stone: 97.0%
 collect_wood: 100.0%
-defeat_skeleton: 50.0%
-defeat_zombie: 95.0%
-eat_cow: 71.0%
-eat_plant: 0.0%
-make_iron_pickaxe: 19.0%
-make_iron_sword: 10.0%
-make_stone_pickaxe: 36.0%
-make_stone_sword: 42.0%
-make_wood_pickaxe: 54.0%
-make_wood_sword: 82.0%
-place_furnace: 49.0%
-place_plant: 100.0%
-place_stone: 50.0%
-place_table: 95.0%
-wake_up: 31.0%
+defeat_skeleton: 85.0%
+defeat_zombie: 94.0%
+eat_cow: 94.0%
+eat_plant: 2.0%
+make_iron_pickaxe: 42.0%
+make_iron_sword: 70.0%
+make_stone_pickaxe: 94.0%
+make_stone_sword: 88.0%
+make_wood_pickaxe: 97.0%
+make_wood_sword: 97.0%
+place_furnace: 94.0%
+place_plant: 98.0%
+place_stone: 95.0%
+place_table: 98.0%
+wake_up: 74.0%
 
 ===== Calculated Metrics =====
-Reward (Average Achievement): 53.41
-Score: 36.42
-
-
-weighted so about 600k transitions 
-
-===== FINAL EVALUATION =====
-Episodes: 100
-Average Reward: 9.02
-
-Achievement Success Rates:
-collect_coal: 27.0%
-collect_diamond: 0.0%
-collect_drink: 55.0%
-collect_iron: 16.0%
-collect_sapling: 99.0%
-collect_stone: 46.0%
-collect_wood: 100.0%
-defeat_skeleton: 38.0%
-defeat_zombie: 91.0%
-eat_cow: 69.0%
-eat_plant: 0.0%
-make_iron_pickaxe: 9.0%
-make_iron_sword: 6.0%
-make_stone_pickaxe: 19.0%
-make_stone_sword: 21.0%
-make_wood_pickaxe: 49.0%
-make_wood_sword: 67.0%
-place_furnace: 30.0%
-place_plant: 99.0%
-place_stone: 38.0%
-place_table: 89.0%
-wake_up: 25.0%
-
-===== Calculated Metrics =====
-Reward (Average Achievement): 45.14
-Score: 27.40
-
+Reward (Average Achievement): 81.14
+Score: 63.04
 
 top 1000 episodes by reward (approx 1 million transitions total)
 
@@ -237,7 +100,6 @@ wake_up: 14.0%
 ===== Calculated Metrics =====
 Reward (Average Achievement): 38.82
 Score: 21.01
-
 
 
 latest 2000 episodes (approx 900k transitions)
@@ -310,41 +172,7 @@ Score: 35.80
 
 
 
-uniform policy 
-
-===== FINAL EVALUATION =====
-Episodes: 100
-Average Reward: 11.70
-
-Achievement Success Rates:
-collect_coal: 54.0%
-collect_diamond: 0.0%
-collect_drink: 63.0%
-collect_iron: 40.0%
-collect_sapling: 99.0%
-collect_stone: 68.0%
-collect_wood: 100.0%
-defeat_skeleton: 51.0%
-defeat_zombie: 93.0%
-eat_cow: 73.0%
-eat_plant: 0.0%
-make_iron_pickaxe: 19.0%
-make_iron_sword: 33.0%
-make_stone_pickaxe: 48.0%
-make_stone_sword: 44.0%
-make_wood_pickaxe: 68.0%
-make_wood_sword: 60.0%
-place_furnace: 62.0%
-place_plant: 99.0%
-place_stone: 64.0%
-place_table: 90.0%
-wake_up: 36.0%
-
-===== Calculated Metrics =====
-Reward (Average Achievement): 57.45
-Score: 40.08
-
-weighted sample (--ratio 0.7     --threshold 0.6)
+weighted sample on latest 2000 episodes (--ratio 0.7     --threshold 0.6)
 
 
 ===== FINAL EVALUATION =====
@@ -448,9 +276,7 @@ wake_up: 26.0%
 Reward (Average Achievement): 37.09
 Score: 19.56
 
-
 latest 20480 episodes (about 10 million transisitions)
-
 
 ===== FINAL EVALUATION =====
 Episodes: 100
@@ -482,4 +308,39 @@ wake_up: 40.0%
 
 ===== Calculated Metrics =====
 Reward (Average Achievement): 61.23
-Score: 46.52 
+Score: 46.52
+
+ 
+latest 20480 episodes (about 10 million transisitions) but trained for 750k iterations and not 500k
+
+===== FINAL EVALUATION =====
+Episodes: 100
+Average Reward: 12.83
+
+Achievement Success Rates:
+collect_coal: 56.0%
+collect_diamond: 2.0%
+collect_drink: 77.0%
+collect_iron: 49.0%
+collect_sapling: 98.0%
+collect_stone: 82.0%
+collect_wood: 100.0%
+defeat_skeleton: 55.0%
+defeat_zombie: 87.0%
+eat_cow: 81.0%
+eat_plant: 1.0%
+make_iron_pickaxe: 16.0%
+make_iron_sword: 34.0%
+make_stone_pickaxe: 63.0%
+make_stone_sword: 55.0%
+make_wood_pickaxe: 82.0%
+make_wood_sword: 59.0%
+place_furnace: 68.0%
+place_plant: 98.0%
+place_stone: 75.0%
+place_table: 98.0%
+wake_up: 40.0%
+
+===== Calculated Metrics =====
+Reward (Average Achievement): 62.55
+Score: 47.07 

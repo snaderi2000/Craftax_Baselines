@@ -8,7 +8,7 @@ from tqdm import tqdm
 # Config
 # -----------------------------
 DB_PATH = "merged.duckdb"
-OUTPUT_H5 = "top_5000_episodes.h5"
+OUTPUT_H5 = "top_12000_episodes.h5"
 OBS_SHAPE = (1345,)  # Shape of a single observation
 
 # -----------------------------
@@ -31,7 +31,7 @@ top_episodes_df = con.execute("""
     FROM transitions
     GROUP BY episode_id
     ORDER BY total_reward DESC
-    LIMIT 2000
+    LIMIT 12000
 """).fetchdf()
 
 top_episode_ids = top_episodes_df['episode_id'].tolist()

@@ -16,10 +16,10 @@ EXPERIMENT_NAME = "DiscreteCQL_Craftax"
 
 
 # Where to save the final trained model
-MODEL_SAVE_PATH = "latest_1024_episodes.h5"
+MODEL_SAVE_PATH = "latest_20480_episodes_long.h5"
 
 # Training hyperparameters
-TOTAL_STEPS = 1_000_000
+TOTAL_STEPS = 750_000
 EPOCH_STEPS = 10_000  # How often to log, evaluate, and save checkpoints
 BATCH_SIZE = 256     # Increased from the Atari example for better stability
 
@@ -28,7 +28,7 @@ BATCH_SIZE = 256     # Increased from the Atari example for better stability
 # ===================================================================
 #print(f"Loading episodes from '{DATASET_PATH}'...")
 
-with open("latest_1024_episodes.h5", "rb") as f:
+with open("latest_2048_episodes.h5", "rb") as f:
     replay_buffer = d3rlpy.dataset.ReplayBuffer.load(
         f,
         d3rlpy.dataset.InfiniteBuffer()  # or FIFOBuffer if you want a limit
