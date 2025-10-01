@@ -19,7 +19,7 @@ EXPERIMENT_NAME = "DiscreteCQL_Craftax"
 MODEL_SAVE_PATH = "latest_1024_episodes.h5"
 
 # Training hyperparameters
-TOTAL_STEPS = 500_000
+TOTAL_STEPS = 1_000_000
 EPOCH_STEPS = 10_000  # How often to log, evaluate, and save checkpoints
 BATCH_SIZE = 256     # Increased from the Atari example for better stability
 

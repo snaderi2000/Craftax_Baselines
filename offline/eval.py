@@ -11,7 +11,7 @@ from d3rlpy import load_learnable
 # ===============================
 # CONFIG
 # ===============================
-MODEL_PATH = "test.d3"
+MODEL_PATH = "latest_20480_episodes.h5"
 ENV_NAME = "Craftax-Classic-Symbolic-v1"
 EVAL_EPISODES = 100
 SEED = 42  # reproducibility
