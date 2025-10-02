@@ -1,9 +1,5 @@
 ppo 
 
-===== FINAL EVALUATION =====
-Episodes: 100
-Average Reward: 16.95
-
 Achievement Success Rates:
 collect_coal: 93.0%
 collect_diamond: 1.0%
@@ -33,10 +29,6 @@ Reward (Average Achievement): 81.14
 Score: 63.04
 
 top 1000 episodes by reward (approx 1 million transitions total)
-
-===== FINAL EVALUATION =====
-Episodes: 100
-Average Reward: 9.43
 
 Achievement Success Rates:
 collect_coal: 37.0%
@@ -69,10 +61,6 @@ Score: 29.97
 
 Top 2000 episodes by total reward (approx 2.2 million transitions)
 
-===== FINAL EVALUATION =====
-Episodes: 100
-Average Reward: 7.61
-
 Achievement Success Rates:
 collect_coal: 25.0%
 collect_diamond: 0.0%
@@ -104,9 +92,6 @@ Score: 21.01
 
 latest 2000 episodes (approx 900k transitions)
 
-===== FINAL EVALUATION =====
-Episodes: 100
-Average Reward: 10.61
 
 Achievement Success Rates:
 collect_coal: 41.0%
@@ -138,9 +123,6 @@ Score: 36.62
 
 latest 10240 episodes (about 5 million transitions) 
 
-===== FINAL EVALUATION =====
-Episodes: 100
-Average Reward: 10.89
 
 Achievement Success Rates:
 collect_coal: 44.0%
@@ -174,10 +156,6 @@ Score: 35.80
 
 weighted sample on latest 2000 episodes (--ratio 0.7     --threshold 0.6)
 
-
-===== FINAL EVALUATION =====
-Episodes: 100
-Average Reward: 8.86
 
 Achievement Success Rates:
 collect_coal: 34.0%
@@ -244,9 +222,6 @@ Score: 34.85
 
 latest 256 (approx 100k transitions)
 
-===== FINAL EVALUATION =====
-Episodes: 100
-Average Reward: 7.24
 
 Achievement Success Rates:
 collect_coal: 29.0%
@@ -277,10 +252,6 @@ Reward (Average Achievement): 37.09
 Score: 19.56
 
 latest 20480 episodes (about 10 million transisitions)
-
-===== FINAL EVALUATION =====
-Episodes: 100
-Average Reward: 12.54
 
 Achievement Success Rates:
 collect_coal: 55.0%
@@ -313,9 +284,6 @@ Score: 46.52
  
 latest 20480 episodes (about 10 million transisitions) but trained for 750k iterations and not 500k
 
-===== FINAL EVALUATION =====
-Episodes: 100
-Average Reward: 12.83
 
 Achievement Success Rates:
 collect_coal: 56.0%
@@ -348,10 +316,6 @@ Score: 47.07
 
 top 40k episodes by reward  27789621 transitions
 
-===== FINAL EVALUATION =====
-Episodes: 100
-Average Reward: 15.30
-
 Achievement Success Rates:
 collect_coal: 74.0%
 collect_diamond: 0.0%
@@ -380,47 +344,10 @@ wake_up: 57.0%
 Reward (Average Achievement): 73.73
 Score: 51.66
 
-most recent 12k episodes 
-
-L EVALUATION =====
-Episodes: 100
-Average Reward: 11.80
-
-Achievement Success Rates:
-collect_coal: 47.0%
-collect_diamond: 1.0%
-collect_drink: 71.0%
-collect_iron: 40.0%
-collect_sapling: 99.0%
-collect_stone: 80.0%
-collect_wood: 100.0%
-defeat_skeleton: 48.0%
-defeat_zombie: 88.0%
-eat_cow: 76.0%
-eat_plant: 0.0%
-make_iron_pickaxe: 8.0%
-make_iron_sword: 18.0%
-make_stone_pickaxe: 48.0%
-make_stone_sword: 45.0%
-make_wood_pickaxe: 81.0%
-make_wood_sword: 52.0%
-place_furnace: 66.0%
-place_plant: 99.0%
-place_stone: 66.0%
-place_table: 92.0%
-wake_up: 46.0%
-
-===== Calculated Metrics =====
-Reward (Average Achievement): 57.77
-Score: 39.69
-
 
 Most recent 150 (Fetched 73220657 total transitions from 153600 episodes) 
 
 
- ===== FINAL EVALUATION =====
-Episodes: 100
-Average Reward: 16.26
 
 Achievement Success Rates:
 collect_coal: 81.0%
@@ -484,6 +411,38 @@ wake_up: 79.0%
 Reward (Average Achievement): 77.64
 Score: 58.58
 
+same as above but seed 50 instead of 42 
+
+
+===== FINAL EVALUATION =====
+Episodes: 100
+Achievement Success Rates:
+collect_coal: 83.0%
+collect_diamond: 0.0%
+collect_drink: 91.0%
+collect_iron: 78.0%
+collect_sapling: 100.0%
+collect_stone: 97.0%
+collect_wood: 100.0%
+defeat_skeleton: 81.0%
+defeat_zombie: 95.0%
+eat_cow: 93.0%
+eat_plant: 2.0%
+make_iron_pickaxe: 39.0%
+make_iron_sword: 63.0%
+make_stone_pickaxe: 89.0%
+make_stone_sword: 81.0%
+make_wood_pickaxe: 98.0%
+make_wood_sword: 92.0%
+place_furnace: 95.0%
+place_plant: 100.0%
+place_stone: 91.0%
+place_table: 99.0%
+wake_up: 78.0%
+
+===== Calculated Metrics =====
+Reward (Average Achievement): 79.32
+Score: 59.64
 
 top 40 per environment ( 20288042 total transitions from 40960 episodes)                                                                                                    
 chievement Success Rates:
@@ -544,4 +503,99 @@ wake_up: 72.0%
 
 ===== Calculated Metrics =====
 Reward (Average Achievement): 79.45
-Score: 59.41
+Score: 59.4
+
+
+10 most recent Fetched 4996439 total transitions from 10240 episodes.                                                                                                    
+
+Achievemen Success Rates:
+collect_coal: 79.0%
+collect_diamond: 2.0%
+collect_drink: 87.0%
+collect_iron: 76.0%
+collect_sapling: 100.0%
+collect_stone: 92.0%
+collect_wood: 100.0%
+defeat_skeleton: 78.0%
+defeat_zombie: 97.0%
+eat_cow: 88.0%
+eat_plant: 0.0%
+make_iron_pickaxe: 33.0%
+make_iron_sword: 60.0%
+make_stone_pickaxe: 86.0%
+make_stone_sword: 82.0%
+make_wood_pickaxe: 93.0%
+make_wood_sword: 93.0%
+place_furnace: 88.0%
+place_plant: 100.0%
+place_stone: 87.0%
+place_table: 96.0%
+wake_up: 74.0%
+
+===== Calculated Metrics =====
+Reward (Average Achievement): 76.86
+Score: 57.69                                                                                                         
+
+
+
+random 10k control (for curriculumn) 
+
+===== FINAL EVALUATION =====
+Episodes: 100
+Achievement Success Rates:
+collect_coal: 44.0%
+collect_diamond: 0.0%
+collect_drink: 61.0%
+collect_iron: 29.0%
+collect_sapling: 100.0%
+collect_stone: 77.0%
+collect_wood: 99.0%
+defeat_skeleton: 40.0%
+defeat_zombie: 78.0%
+eat_cow: 63.0%
+eat_plant: 0.0%
+make_iron_pickaxe: 8.0%
+make_iron_sword: 10.0%
+make_stone_pickaxe: 45.0%
+make_stone_sword: 47.0%
+make_wood_pickaxe: 80.0%
+make_wood_sword: 62.0%
+place_furnace: 51.0%
+place_plant: 96.0%
+place_stone: 73.0%
+place_table: 90.0%
+wake_up: 31.0%
+
+===== Calculated Metrics =====
+Reward (Average Achievement): 53.82
+Score: 34.93
+
+===== FINAL EVALUATION =====
+Episodes: 100
+Achievement Success Rates:
+collect_coal: 77.0%
+collect_diamond: 0.0%
+collect_drink: 80.0%
+collect_iron: 63.0%
+collect_sapling: 100.0%
+collect_stone: 94.0%
+collect_wood: 100.0%
+defeat_skeleton: 70.0%
+defeat_zombie: 97.0%
+eat_cow: 91.0%
+eat_plant: 0.0%
+make_iron_pickaxe: 26.0%
+make_iron_sword: 32.0%
+make_stone_pickaxe: 83.0%
+make_stone_sword: 76.0%
+make_wood_pickaxe: 98.0%
+make_wood_sword: 93.0%
+place_furnace: 92.0%
+place_plant: 100.0%
+place_stone: 86.0%
+place_table: 99.0%
+wake_up: 38.0%
+
+===== Calculated Metrics =====
+Reward (Average Achievement): 72.50
+Score: 50.35

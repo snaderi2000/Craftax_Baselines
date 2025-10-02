@@ -11,7 +11,7 @@ from d3rlpy import load_learnable
 # ===============================
 # CONFIG
 # ===============================
-MODEL_PATH = "cql_model_20_episodes.d3" #"/home/synaderi/Craftax_Baselines/wandb/run-20250928_000002-t9euxo7k/files/policies/200000000/default" #"latest_20480_episodes.h5"
+MODEL_PATH = "cql_model_curriculum.d3" #"/home/synaderi/Craftax_Baselines/wandb/run-20250928_000002-t9euxo7k/files/policies/200000000/default" #"latest_20480_episodes.h5"
 ENV_NAME = "Craftax-Classic-Symbolic-v1"
 EVAL_EPISODES = 100
 SEED = 42  # reproducibility
@@ -127,7 +127,7 @@ def evaluate_model():
     # ===============================
     print("\n===== FINAL EVALUATION =====")
     print(f"Episodes: {EVAL_EPISODES}")
-    print(f"Average Reward: {np.mean(episode_rewards):.2f}\n")
+    #print(f"Average Reward: {np.mean(episode_rewards):.2f}\n")
 
     print("Achievement Success Rates:")
     for key in ACHIEVEMENT_KEYS:

@@ -101,8 +101,8 @@ def main(args):
 
         cql.fit(
             replay_buffer,
-            n_steps=total_steps,      # Use the appropriate number of steps
-            n_steps_per_epoch=50000,         # Or your desired epoch size
+            n_steps=2_250_000,      # Use the appropriate number of steps
+            n_steps_per_epoch=250000,         # Or your desired epoch size
             experiment_name=wandb_run_name,
             with_timestamp=True,
             show_progress=True,
