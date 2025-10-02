@@ -97,15 +97,17 @@ def main(args):
         replay_buffer = d3rlpy.dataset.ReplayBuffer(buffer=d3rlpy.dataset.InfiniteBuffer(), episodes=episodes)
 
         print(f"🚀 Starting training for {total_steps} steps...")
+        print(f"🚀 Starting training for {steps_for_this_run} steps...")
+
         cql.fit(
             replay_buffer,
-            n_steps=total_steps,
-            n_steps_per_epoch=50000,
+            n_steps=steps_for_this_run,      # Use the appropriate number of steps
+            n_steps_per_epoch=50000,         # Or your desired epoch size
             experiment_name=wandb_run_name,
             with_timestamp=True,
             show_progress=True,
-            logger_adapter=wandb_logger,
-            evaluators={"td_error": d3rlpy.metrics.TDErrorEvaluator(limit=10000)}
+            logger_adapter=logger_adapter_to_use
+            # No 'evaluators' dictionary for speed and consistency
         )
 
     elif args.strategy == "curriculum":
@@ -143,15 +145,17 @@ def main(args):
             replay_buffer = d3rlpy.dataset.ReplayBuffer(buffer=d3rlpy.dataset.InfiniteBuffer(), episodes=episodes)
             
             logger_adapter_to_use = wandb_logger if i == 0 else "wandb"
+            print(f"🚀 Starting training for {steps_for_this_run} steps...")
+
             cql.fit(
                 replay_buffer,
-                n_steps=stage['steps'],
-                n_steps_per_epoch=50000,
+                n_steps=steps_for_this_run,      # Use the appropriate number of steps
+                n_steps_per_epoch=50000,         # Or your desired epoch size
                 experiment_name=wandb_run_name,
-                with_timestamp=(i==0),
+                with_timestamp=True,
                 show_progress=True,
-                logger_adapter=logger_adapter_to_use,
-                evaluators={"td_error": d3rlpy.metrics.TDErrorEvaluator(limit=10000)}
+                logger_adapter=logger_adapter_to_use
+                # No 'evaluators' dictionary for speed and consistency
             )
 
     con.close()
