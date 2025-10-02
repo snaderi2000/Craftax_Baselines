@@ -36,12 +36,32 @@ print("Connecting to database...")
 con = duckdb.connect(DB_PATH)
 
 print(f"Finding top {N_EPISODES} episodes by cumulative reward...")
-top_episodes_df = con.execute(f"""
-    SELECT episode_id, SUM(reward) as total_reward
-    FROM transitions
-    GROUP BY episode_id
-    ORDER BY total_reward DESC
-    LIMIT {N_EPISODES}
+# top_episodes_df = con.execute(f"""
+#     SELECT episode_id, SUM(reward) as total_reward
+#     FROM transitions
+#     GROUP BY episode_id
+#     ORDER BY total_reward DESC
+#     LIMIT {N_EPISODES}
+# """).fetchdf()
+
+
+top_episode_ids = con.execute("""
+    WITH ranked_episodes AS (
+        SELECT
+            episode_id,
+            ROW_NUMBER() OVER (
+                PARTITION BY (episode_id // 1000000)
+                ORDER BY (episode_id % 1000000) DESC
+            ) AS rank
+        FROM (
+            SELECT DISTINCT episode_id FROM transitions
+        )
+    )
+    SELECT
+        episode_id
+    FROM ranked_episodes
+    WHERE rank <= 200
+    ORDER BY episode_id;
 """).fetchdf()
 
 top_episode_ids = top_episodes_df['episode_id'].tolist()
