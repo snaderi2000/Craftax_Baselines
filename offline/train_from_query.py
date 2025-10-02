@@ -33,7 +33,7 @@ def decompress_array(blob, dtype=np.float32, shape=OBS_SHAPE):
 # 3. LOAD DATA FROM DATABASE
 # ===================================================================
 print("Connecting to database...")
-con = duckdb.connect(DB_PATH)
+con = duckdb.connect(DB_PATH, read_only=True)
 
 print(f"Finding top {N_EPISODES} episodes by cumulative reward...")
 # top_episodes_df = con.execute(f"""
