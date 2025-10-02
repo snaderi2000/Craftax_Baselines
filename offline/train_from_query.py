@@ -10,15 +10,15 @@ import pandas as pd
 # ===================================================================
 # --- Data Config ---
 DB_PATH = "merged.duckdb"
-N_EPISODES = 1200
+N_EPISODES = 200000000
 OBS_SHAPE = (1345,)
 
 # --- Training Config ---
 WANDB_PROJECT = "Craftax-OfflineRL"
 WANDB_RUN_NAME = f"cql-run-{N_EPISODES}-episodes-direct"
 MODEL_SAVE_PATH = f"cql_model_{N_EPISODES}_episodes.d3"
-TOTAL_STEPS = 500_000
-EPOCH_STEPS = 10_000
+TOTAL_STEPS = 750_000
+EPOCH_STEPS = 150_000
 BATCH_SIZE = 256
 
 # ===================================================================

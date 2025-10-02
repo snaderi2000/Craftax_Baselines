@@ -11,7 +11,7 @@ from d3rlpy import load_learnable
 # ===============================
 # CONFIG
 # ===============================
-MODEL_PATH = "latest_20480_episodes_long.h5" #"/home/synaderi/Craftax_Baselines/wandb/run-20250928_000002-t9euxo7k/files/policies/200000000/default" #"latest_20480_episodes.h5"
+MODEL_PATH = "top_12000_episodes.d3" #"/home/synaderi/Craftax_Baselines/wandb/run-20250928_000002-t9euxo7k/files/policies/200000000/default" #"latest_20480_episodes.h5"
 ENV_NAME = "Craftax-Classic-Symbolic-v1"
 EVAL_EPISODES = 100
 SEED = 42  # reproducibility
