@@ -10,7 +10,7 @@ import pandas as pd
 # ===================================================================
 # --- Data Config ---
 DB_PATH = "merged.duckdb"
-N_EPISODES = 200000000
+N_EPISODES = 10
 OBS_SHAPE = (1345,)
 
 # --- Training Config ---
