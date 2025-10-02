@@ -50,8 +50,8 @@ def main(args):
         SELECT
             episode_id,
             NTILE(100) OVER (ORDER BY total_reward) as percentile
-        FROM shuffled_episodes;
-    """
+        FROM shuffled_episodes
+    """ 
     
     # Create a temporary table with our fixed pool of 10,000 episodes
     con.execute(f"CREATE OR REPLACE TEMP TABLE episode_pool AS ({episode_pool_query});")
