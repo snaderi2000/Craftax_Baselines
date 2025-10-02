@@ -45,7 +45,7 @@ print(f"Finding top {N_EPISODES} episodes by cumulative reward...")
 # """).fetchdf()
 
 
-top_episode_ids = con.execute("""
+top_episodes_df = con.execute(f"""
     WITH ranked_episodes AS (
         SELECT
             episode_id,
@@ -60,12 +60,13 @@ top_episode_ids = con.execute("""
     SELECT
         episode_id
     FROM ranked_episodes
-    WHERE rank <= 200
+    WHERE rank <= {N_EPISODES}
     ORDER BY episode_id;
 """).fetchdf()
 
+
 top_episode_ids = top_episodes_df['episode_id'].tolist()
-print(f"Top episodes selected. Highest reward: {top_episodes_df.iloc[0]['total_reward']:.2f}")
+#print(f"Top episodes selected. Highest reward: {top_episodes_df.iloc[0]['total_reward']:.2f}")
 
 print("Fetching all transitions for selected episodes...")
 placeholders = ",".join(map(str, top_episode_ids))
