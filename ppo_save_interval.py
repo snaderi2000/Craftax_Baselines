@@ -579,11 +579,11 @@ def make_train(config):
                 rng = ex_update_state[-1]
 
             # --- Save checkpoints at milestones ---
-            # Trigger saves at 50k, 100k, 500k, and 1M environment steps
-            SAVE_INTERVALS = jnp.array([50_000, 100_000, 500_000, 1_000_000], dtype=jnp.int32)
-            current_step = (
-                (update_step * config["NUM_STEPS"] * config["NUM_ENVS"]).astype(jnp.int32)
-            )
+            # Trigger saves at 50k, 100k, 500k, and 1M environment steps (on threshold crossing)
+            SAVE_INTERVALS = jnp.array([50_000, 100_000, 500_000, 1_000_000], dtype=jnp.int64)
+            batch_size = config["NUM_STEPS"] * config["NUM_ENVS"]
+            current_step = (update_step * batch_size).astype(jnp.int64)
+            prev_step = jnp.maximum(0, current_step - jnp.int64(batch_size))
 
             def _save_checkpoint(ts, cs):
                 import numpy as _np
@@ -606,7 +606,11 @@ def make_train(config):
                 save_args = orbax_utils.save_args_from_target(ts)
                 checkpoint_manager.save(step, ts, save_kwargs={"save_args": save_args})
 
-            should_save = jnp.any(current_step == SAVE_INTERVALS)
+            crossed = jnp.logical_and(prev_step[:, None] < SAVE_INTERVALS[None, :],
+                                       current_step[:, None] >= SAVE_INTERVALS[None, :]) if current_step.ndim > 0 else (
+                (prev_step < SAVE_INTERVALS) & (current_step >= SAVE_INTERVALS)
+            )
+            should_save = jnp.any(crossed)
 
             # Only execute host-side saving when the condition is met
             def _do_save(_):
