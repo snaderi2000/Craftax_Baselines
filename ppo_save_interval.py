@@ -580,7 +580,7 @@ def make_train(config):
 
             # --- Save checkpoints at milestones ---
             # Trigger saves at 50k, 100k, 500k, and 1M environment steps (on threshold crossing)
-            SAVE_INTERVALS = jnp.array([50_000, 100_000, 500_000, 1_000_000], dtype=jnp.int64)
+            SAVE_INTERVALS = jnp.array([100_000, 1_000_000, 50_000_000, 100_000_000, 1_000_000_000, 2_000_000_000], dtype=jnp.int64)
             batch_size = config["NUM_STEPS"] * config["NUM_ENVS"]
             current_step = (update_step * batch_size).astype(jnp.int64)
             prev_step = jnp.maximum(0, current_step - jnp.int64(batch_size))
