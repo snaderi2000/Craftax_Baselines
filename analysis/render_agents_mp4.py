@@ -95,32 +95,38 @@ def build_renderer(is_classic: bool, env, env_params, pixel_scale: int):
     return renderer
 
 
-def restore_ckpt(ckpt_path: str, template_items: Dict):
+def restore_ckpt(ckpt_path: str, state_template: TrainState) -> TrainState:
     cp = PyTreeCheckpointer()
 
-    # If they pointed to the leaf shard dir (e.g., …/default), restore directly
-    if os.path.basename(ckpt_path) == "default":
-        return cp.restore(ckpt_path, template_items)
+    # Normalize to manager-based restore: find step directory and its parent
+    path = os.path.abspath(ckpt_path)
+    base = os.path.basename(path)
 
-    # Else they likely pointed to the <step> directory; use a manager
-    # Extract numeric step if present, else try best-effort
-    base = os.path.basename(ckpt_path)
-    step_match = re.match(r"^(\d+)$", base)
-    step = int(step_match.group(1)) if step_match else None
+    if base == "default":
+        step_dir = os.path.dirname(path)
+        policies_dir = os.path.dirname(step_dir)
+        step_name = os.path.basename(step_dir)
+    else:
+        # Maybe they passed the step dir directly
+        step_dir = path
+        policies_dir = os.path.dirname(step_dir)
+        step_name = os.path.basename(step_dir)
 
-    mgr = CheckpointManager(
-        ckpt_path,
-        cp,
-        CheckpointManagerOptions(max_to_keep=1, create=False),
-    )
+    step = None
+    if re.match(r"^(\d+)$", step_name):
+        step = int(step_name)
 
-    if step is None:
-        # Probe latest if step not parseable
-        latest = mgr.latest_step()
-        if latest is None:
-            raise ValueError(f"No checkpoints found under: {ckpt_path}")
-        step = latest
-    return mgr.restore(step, template_items)
+    # If we have a valid policies_dir and step, prefer manager restore
+    if step is not None and os.path.isdir(policies_dir):
+        mgr = CheckpointManager(
+            policies_dir,
+            cp,
+            CheckpointManagerOptions(max_to_keep=1, create=False),
+        )
+        return mgr.restore(step, items=state_template)
+
+    # Fallback: direct restore from provided path
+    return cp.restore(path, state_template)
 
 
 def capture_surface_frame() -> np.ndarray:
@@ -163,12 +169,11 @@ def run_agent_videos(
     # Build initial params and a holder TrainState for convenience
     params_init = net.init(init_key, init_x)
     tx = optax.identity()
-    state = TrainState.create(apply_fn=net.apply, params=params_init, tx=tx)
+    state = TrainState.create(apply_fn=net.apply, params=params_init["params"], tx=tx)
 
-    # Restore params from checkpoint; handle nested collections (e.g., batch_stats) if present
-    template = {"params": params_init["params"]}
-    restored = restore_ckpt(ckpt_path, template)
-    params = restored["params"]
+    # Restore full TrainState (expects same structure that was saved during training)
+    state = restore_ckpt(ckpt_path, state)
+    params = state.params
 
     # Build renderer if symbolic (we need to map to pixels)
     renderer = None
