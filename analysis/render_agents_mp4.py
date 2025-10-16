@@ -169,7 +169,8 @@ def run_agent_videos(
     # Build initial params and a holder TrainState for convenience
     params_init = net.init(init_key, init_x)
     tx = optax.identity()
-    state = TrainState.create(apply_fn=net.apply, params=params_init["params"], tx=tx)
+    # IMPORTANT: keep the same structure saved during training (full FrozenDict)
+    state = TrainState.create(apply_fn=net.apply, params=params_init, tx=tx)
 
     # Restore full TrainState (expects same structure that was saved during training)
     state = restore_ckpt(ckpt_path, state)
@@ -212,7 +213,7 @@ def run_agent_videos(
 
             # Select action deterministically (mode)
             obs_b = jnp.expand_dims(obs, 0)
-            pi, _v = net.apply({"params": params}, obs_b)
+            pi, _v = net.apply(params, obs_b)
             a = int(np.asarray(pi.mode()[0]))
 
             # Step environment with deterministic RNG stream per episode
