@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import argparse
 import os
+import sys
 import re
 from typing import Dict, List, Optional, Tuple
 
@@ -14,6 +15,11 @@ import pygame
 
 from flax.training.train_state import TrainState
 from orbax.checkpoint import PyTreeCheckpointer, CheckpointManager, CheckpointManagerOptions
+
+"""Ensure repo root (parent of this file's directory) is on sys.path for local imports."""
+_REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
 
 from wrappers import AutoResetEnvWrapper
 from models.actor_critic import ActorCritic, ActorCriticConv
