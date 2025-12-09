@@ -1138,10 +1138,26 @@ def make_train(config):
             # Unpack the states needed for the world model update
             train_state, tokenizer_state, wm_state, env_state, last_obs, rng, update_step_count, h, buffer_state = runner_state
             
-            # Call the JIT'd world model update function
-            tokenizer_state, wm_state, rng, tok_loss_mean, wm_loss_mean, wm_comp_mean = update_world_model(
-                config["N_TOK_ITERS"],config["N_WM_ITERS"],tokenizer_state, wm_state, buffer_state, rng, buffer
-            )
+            # # Call the JIT'd world model update function
+            # tokenizer_state, wm_state, rng, tok_loss_mean, wm_loss_mean, wm_comp_mean = update_world_model(
+            #     config["N_TOK_ITERS"],config["N_WM_ITERS"],tokenizer_state, wm_state, buffer_state, rng, buffer
+            # )
+
+            if config["N_TOK_ITERS"] > 0 or config["N_WM_ITERS"] > 0:
+                tokenizer_state, wm_state, rng, tok_loss_mean, wm_loss_mean, wm_comp_mean = update_world_model(
+                    config["N_TOK_ITERS"],
+                    config["N_WM_ITERS"],
+                    tokenizer_state,
+                    wm_state,
+                    buffer_state,
+                    rng,
+                    buffer,
+                )
+            else:
+                # no WM update at all; just pass things through and fill logs with NaNs
+                tok_loss_mean = jnp.full((4,), jnp.nan, dtype=jnp.float32)
+                wm_loss_mean = jnp.array(jnp.nan, dtype=jnp.float32)
+                wm_comp_mean = jnp.full((3,), jnp.nan, dtype=jnp.float32)
              
             # Re-assemble the runner_state for the next iteration
             runner_state = (train_state, tokenizer_state, wm_state, env_state, last_obs, rng, update_step_count, h, buffer_state)
