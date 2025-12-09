@@ -329,7 +329,13 @@ class ActorCriticConvRNN(nn.Module):
                  ) -> Tuple[distrax.Categorical,
                             jnp.ndarray,
                             jnp.ndarray]:
-
+        # 🔍 Debug obs layout / range
+        jax.debug.print(
+            "obs shape={s}, min={mn}, max={mx}",
+            s=obs.shape,
+            mn=jnp.min(obs),
+            mx=jnp.max(obs),
+        )
         # --------------------------------------------------------------
         # 1. CNN encoder  z_t  (8192-dim)
         # --------------------------------------------------------------
