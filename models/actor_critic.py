@@ -329,13 +329,7 @@ class ActorCriticConvRNN(nn.Module):
                  ) -> Tuple[distrax.Categorical,
                             jnp.ndarray,
                             jnp.ndarray]:
-        # 🔍 Debug obs layout / range
-        jax.debug.print(
-            "obs shape={s}, min={mn}, max={mx}",
-            s=obs.shape,
-            mn=jnp.min(obs),
-            mx=jnp.max(obs),
-        )
+        
         # --------------------------------------------------------------
         # 1. CNN encoder  z_t  (8192-dim)
         # --------------------------------------------------------------
@@ -353,6 +347,13 @@ class ActorCriticConvRNN(nn.Module):
         # --------------------------------------------------------------
         do_gru = (self.use_gru and self.rnn_hidden > 0)
 
+        jax.debug.print(
+            "[ActorCriticConvRNN] use_gru={u}, rnn_hidden={h}, do_gru={d}",
+            u=self.use_gru,
+            h=self.rnn_hidden,
+            d=do_gru,
+        )
+
         if do_gru:
             #jax.debug.print("[GRU ON] using GRU with rnn_hidden = {}", self.rnn_hidden)
             if h is None:
@@ -364,6 +365,17 @@ class ActorCriticConvRNN(nn.Module):
             x = nn.relu(x)
 
             h_next, _ = nn.GRUCell(features=self.rnn_hidden)(h, x)
+            # 🔍 Debug GRU behaviour
+            def _rms(v):
+                return jnp.sqrt(jnp.mean(v**2))
+
+            jax.debug.print(
+                "[GRU] x_rms={xr}, h_rms={hr}, h_next_rms={hnr}, h_nan={hn}",
+                xr=_rms(x),
+                hr=_rms(h),
+                hnr=_rms(h_next),
+                hn=jnp.isnan(h_next).any(),
+            )
             y = nn.relu(h_next)
 
         else:
