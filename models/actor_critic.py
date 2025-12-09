@@ -78,27 +78,34 @@ class CnnBasicBlock(nn.Module):
 
     @nn.compact
     def __call__(self, x):
-        conv0 = FanInInitReLULayer(
-            inchan=self.inchan,
-            outchan=self.inchan,
-            layer_type="conv",
-            kernel_size=3,
-            padding=1,
-            init_scale=math.sqrt(self.init_scale),
-            **self.init_norm_kwargs,
-            train=self.train
-        )
-        conv1 = FanInInitReLULayer(
-            inchan=self.inchan,
-            outchan=self.inchan,
-            layer_type="conv",
-            kernel_size=3,
-            padding=1,
-            init_scale=math.sqrt(self.init_scale),
-            **self.init_norm_kwargs,
-            train=self.train
-        )
-        return x + conv1(conv0(x))
+        # Paper: each ResNet block:
+        # (a) ReLU -> BatchNorm
+        # (b) Conv 3x3, stride 1
+        residual = x
+
+        # (a) ReLU
+        y = nn.relu(x)
+
+        # (b) BatchNorm (if enabled via init_norm_kwargs)
+        if self.init_norm_kwargs.get("batch_norm", False):
+            bn_kwargs = self.init_norm_kwargs.get("batch_norm_kwargs", {})
+            y = nn.BatchNorm(
+                use_running_average=not self.train,
+                **bn_kwargs,
+            )(y)
+
+        # (c) Conv 3x3, stride 1
+        y = nn.Conv(
+            features=self.inchan,
+            kernel_size=(3, 3),
+            strides=(1, 1),
+            padding="SAME",
+            use_bias=False,  # typical with BN
+            kernel_init=orthogonal(math.sqrt(self.init_scale)),
+            bias_init=constant(0.0),
+        )(y)
+
+        return residual + y
 
 class CnnDownStack(nn.Module):
     inchan: int
@@ -106,40 +113,123 @@ class CnnDownStack(nn.Module):
     outchan: int
     init_scale: float = 1.0
     pool: bool = True
-    post_pool_groups: Optional[int] = None
+    post_pool_groups: Optional[int] = None  # will be ignored now
     init_norm_kwargs: Dict = field(default_factory=dict)
-    first_conv_norm: bool = False
+    first_conv_norm: bool = False           # will be ignored too
     train: bool = True
 
     @nn.compact
     def __call__(self, x):
-        # first convolution
-        first_norm_kwargs = dict(self.init_norm_kwargs)
-        if not self.first_conv_norm:
-            first_norm_kwargs.update({"batch_norm": False, "group_norm_groups": None})
-        x = FanInInitReLULayer(
-            inchan=self.inchan,
-            outchan=self.outchan,
-            layer_type="conv",
-            init_scale=1.0,
-            kernel_size=(3,3), padding="SAME",
-            **first_norm_kwargs,
-            train=self.train
+        # (a) BatchNorm at the start of the stack (if requested)
+        if self.init_norm_kwargs.get("batch_norm", False):
+            bn_kwargs = self.init_norm_kwargs.get("batch_norm_kwargs", {})
+            x = nn.BatchNorm(
+                use_running_average=not self.train,
+                **bn_kwargs,
+            )(x)
+
+        # (b) Conv 3x3, stride 1
+        x = nn.Conv(
+            features=self.outchan,
+            kernel_size=(3, 3),
+            strides=(1, 1),
+            padding="SAME",
+            use_bias=False,
+            kernel_init=orthogonal(1.0),
+            bias_init=constant(0.0),
         )(x)
-        # optional pooling + post-norm
+
+        # (c) MaxPool 3x3, stride 2
         if self.pool:
-            x = nn.max_pool(x, window_shape=(3,3), strides=(2,2), padding="SAME")
-            if self.post_pool_groups is not None:
-                x = nn.GroupNorm(num_groups=self.post_pool_groups)(x)
-        # residual blocks
+            x = nn.max_pool(
+                x,
+                window_shape=(3, 3),
+                strides=(2, 2),
+                padding="SAME",
+            )
+
+        # (d) Residual blocks (as defined above)
         for _ in range(self.nblock):
             x = CnnBasicBlock(
                 inchan=self.outchan,
                 init_scale=self.init_scale / math.sqrt(self.nblock),
                 init_norm_kwargs=self.init_norm_kwargs,
-                train=self.train
+                train=self.train,
             )(x)
+
         return x
+
+
+# class CnnBasicBlock(nn.Module):
+#     inchan: int
+#     init_scale: float = 1.0
+#     init_norm_kwargs: Dict = field(default_factory=dict)
+#     train: bool = True
+
+#     @nn.compact
+#     def __call__(self, x):
+#         conv0 = FanInInitReLULayer(
+#             inchan=self.inchan,
+#             outchan=self.inchan,
+#             layer_type="conv",
+#             kernel_size=3,
+#             padding=1,
+#             init_scale=math.sqrt(self.init_scale),
+#             **self.init_norm_kwargs,
+#             train=self.train
+#         )
+#         conv1 = FanInInitReLULayer(
+#             inchan=self.inchan,
+#             outchan=self.inchan,
+#             layer_type="conv",
+#             kernel_size=3,
+#             padding=1,
+#             init_scale=math.sqrt(self.init_scale),
+#             **self.init_norm_kwargs,
+#             train=self.train
+#         )
+#         return x + conv1(conv0(x))
+
+# class CnnDownStack(nn.Module):
+#     inchan: int
+#     nblock: int
+#     outchan: int
+#     init_scale: float = 1.0
+#     pool: bool = True
+#     post_pool_groups: Optional[int] = None
+#     init_norm_kwargs: Dict = field(default_factory=dict)
+#     first_conv_norm: bool = False
+#     train: bool = True
+
+#     @nn.compact
+#     def __call__(self, x):
+#         # first convolution
+#         first_norm_kwargs = dict(self.init_norm_kwargs)
+#         if not self.first_conv_norm:
+#             first_norm_kwargs.update({"batch_norm": False, "group_norm_groups": None})
+#         x = FanInInitReLULayer(
+#             inchan=self.inchan,
+#             outchan=self.outchan,
+#             layer_type="conv",
+#             init_scale=1.0,
+#             kernel_size=(3,3), padding="SAME",
+#             **first_norm_kwargs,
+#             train=self.train
+#         )(x)
+#         # optional pooling + post-norm
+#         if self.pool:
+#             x = nn.max_pool(x, window_shape=(3,3), strides=(2,2), padding="SAME")
+#             if self.post_pool_groups is not None:
+#                 x = nn.GroupNorm(num_groups=self.post_pool_groups)(x)
+#         # residual blocks
+#         for _ in range(self.nblock):
+#             x = CnnBasicBlock(
+#                 inchan=self.outchan,
+#                 init_scale=self.init_scale / math.sqrt(self.nblock),
+#                 init_norm_kwargs=self.init_norm_kwargs,
+#                 train=self.train
+#             )(x)
+#         return x
 
 class ImpalaCNN(nn.Module):
     inshape: Sequence[int]
@@ -224,8 +314,8 @@ class ActorCriticConv(nn.Module):
             chans=(64, 128, 128),
             outsize=256,
             nblock=2,
-            init_norm_kwargs={'batch_norm': False, 'group_norm_groups': 1},
-            post_pool_groups=1,
+            init_norm_kwargs={'batch_norm': True, 'batch_norm_kwargs': {'momentum': 0.10}},
+            post_pool_groups=None,
             dense_init_norm_kwargs={"layer_norm": True},
             train=self.train
         )(x)
@@ -365,17 +455,6 @@ class ActorCriticConvRNN(nn.Module):
             x = nn.relu(x)
 
             h_next, _ = nn.GRUCell(features=self.rnn_hidden)(h, x)
-            # 🔍 Debug GRU behaviour
-            def _rms(v):
-                return jnp.sqrt(jnp.mean(v**2))
-
-            jax.debug.print(
-                "[GRU] x_rms={xr}, h_rms={hr}, h_next_rms={hnr}, h_nan={hn}",
-                xr=_rms(x),
-                hr=_rms(h),
-                hnr=_rms(h_next),
-                hn=jnp.isnan(h_next).any(),
-            )
             y = nn.relu(h_next)
 
         else:
