@@ -430,6 +430,8 @@ def make_train(config):
 
                         jax.debug.print("obs_t0 {}", mb_traj.obs[0].shape)   # should be (Bmb, 63,63,3)
                         jax.debug.print("done_t0 {}", mb_traj.done[0].shape) # should be (Bmb,)
+                        jax.debug.print("obs dtype {} min {} max {}", mb_traj.obs.dtype,
+                                        mb_traj.obs.min(), mb_traj.obs.max())
 
                         (hT, new_batch_stats), (value_T, new_logp_T, ent_T) = jax.lax.scan(
                             step,
