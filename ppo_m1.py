@@ -374,74 +374,106 @@ def make_train(config):
             # UPDATE NETWORK
             def _update_epoch(update_state, unused):
                 def _update_minbatch(train_state, batch_info):
-                    traj_batch, advantages, targets = batch_info
+                    #traj_batch, advantages, targets = batch_info
+                    mb_traj, mb_adv, targets_mb = batch_info
 
 
                     ema_decay = config["ALPHA"]   #add a command line argument for this
                     q_mean, q_var = train_state.q_mean, train_state.q_var
 
-                    batch_mean = jax.lax.stop_gradient(jnp.mean(targets))
-                    batch_var  = jax.lax.stop_gradient(jnp.var(targets))
+                    batch_mean = jax.lax.stop_gradient(jnp.mean(targets_mb))
+                    batch_var  = jax.lax.stop_gradient(jnp.var(targets_mb))
 
                     q_mean_new = ema_decay * q_mean + (1 - ema_decay) * batch_mean
                     q_var_new  = ema_decay * q_var  + (1 - ema_decay) * batch_var
 
-                    targets_std = jax.lax.stop_gradient(
-                        (targets - q_mean_new) / jnp.sqrt(q_var_new + 1e-8)
+                    targets_std_mb = jax.lax.stop_gradient(
+                        (targets_mb - q_mean_new) / jnp.sqrt(q_var_new + 1e-8)
                     )
 
 
                     # Policy/value network
-                    def _loss_fn(params, batch_stats, traj_batch, advs, targets_std):
-                        # RERUN NETWORK
-                        #pi, value = network.apply(params, traj_batch.obs)
+                    def _loss_fn(params, batch_stats, mb_traj, mb_adv, targets_std_mb):
+                        # mb_traj.obs:      [T, Bmb, ...]
+                        # mb_traj.done:     [T, Bmb]
+                        # mb_traj.action:   [T, Bmb]
+                        # mb_traj.log_prob: [T, Bmb]
 
-                        # 1) bundle params + BN state
-                        vars = {'params':      params,
-                                'batch_stats': batch_stats}
+                        T = mb_traj.obs.shape[0]
+                        Bmb = mb_traj.obs.shape[1]
+                        H = config.get("RNN_HIDDEN", 256)
 
-                        # 2) rerun the network in train mode, allow BN to update
-                        ((pi, value, h_next), new_model_state) = train_state.apply_fn(
-                            vars,
-                            traj_batch.obs,
-                            traj_batch.h,
-                            mutable=['batch_stats']  # let BatchNorm write its running‐stats
+                        # Initial hidden state for TBPTT chunk
+                        h0 = jnp.zeros((Bmb, H), dtype=jnp.float32)
+
+                        def step(carry, inp):
+                            h, bn_state = carry
+                            obs_t, done_t, act_t, old_logp_t = inp  # each is [Bmb, ...]
+
+                            
+
+                            vars_t = {'params': params, 'batch_stats': bn_state}
+
+                            ((pi_t, value_t, h_next), new_state) = train_state.apply_fn(
+                                vars_t,
+                                obs_t,
+                                h,
+                                mutable=['batch_stats']
+                            )
+
+                            new_logp_t = pi_t.log_prob(act_t)   # [Bmb]
+                            ent_t      = pi_t.entropy()         # [Bmb]
+
+                            h_next = jnp.where(done_t[:, None], jnp.zeros_like(h_next), h_next)
+
+                            return (h_next, new_state['batch_stats']), (value_t, new_logp_t, ent_t)
+
+                        jax.debug.print("obs_t0 {}", mb_traj.obs[0].shape)   # should be (Bmb, 63,63,3)
+                        jax.debug.print("done_t0 {}", mb_traj.done[0].shape) # should be (Bmb,)
+
+                        (hT, new_batch_stats), (value_T, new_logp_T, ent_T) = jax.lax.scan(
+                            step,
+                            init=(h0, batch_stats),
+                            xs=(mb_traj.obs, mb_traj.done, mb_traj.action, mb_traj.log_prob),
+                            length=T,
                         )
 
-                        
-                        new_logp = pi.log_prob(traj_batch.action)
-                        ratio   = jnp.exp(new_logp - traj_batch.log_prob)
+                        # PPO losses computed over [T, Bmb]
+                        ratio = jnp.exp(new_logp_T - mb_traj.log_prob)
 
-                        unclipped = ratio * advs
-                        clipped   = jnp.clip(ratio, 1.0 - config["CLIP_EPS"], 1.0 + config["CLIP_EPS"]) * advs
-                        loss_actor = -jnp.minimum(unclipped, clipped).mean()
-                        
-                        value_loss = 0.5 * jnp.square(value - targets_std).mean() # scalar
+                        unclipped = ratio * mb_adv
+                        clipped   = jnp.clip(
+                            ratio,
+                            1.0 - config["CLIP_EPS"],
+                            1.0 + config["CLIP_EPS"]
+                        ) * mb_adv
 
-                        entropy = pi.entropy().mean()
+                        loss_actor = -jnp.mean(jnp.minimum(unclipped, clipped))
+
+                        value_loss = 0.5 * jnp.mean(jnp.square(value_T - targets_std_mb))
+
+                        entropy = jnp.mean(ent_T)
 
                         total_loss = (
                             loss_actor
-                            + config["VF_COEF"]  * value_loss   # e.g. 0.5
-                            - config["ENT_COEF"] * entropy      # e.g. 0.01
+                            + config["VF_COEF"]  * value_loss
+                            - config["ENT_COEF"] * entropy
                         )
 
-                        return total_loss, (new_model_state['batch_stats'],
-                            value_loss.mean(),
-                            loss_actor,
-                            entropy)
+                        return total_loss, (new_batch_stats, value_loss, loss_actor, entropy)
 
                     grad_fn = jax.value_and_grad(_loss_fn, has_aux=True)
-
-
-
                     (total_loss, (new_batch_stats, value_loss, loss_actor, entropy)), grads = grad_fn(
                         train_state.params,
                         train_state.batch_stats,
-                        traj_batch,
-                        advantages,
-                        targets_std,
+                        mb_traj,
+                        mb_adv,
+                        targets_std_mb, 
                     )
+
+
+
+                    
                     #jax.debug.print("value_loss={:.3f}", value_loss)
                     
                     train_state = train_state.apply_gradients(grads=grads)
@@ -458,32 +490,35 @@ def make_train(config):
                     rng,
                 ) = update_state
                 rng, _rng = jax.random.split(rng)
-                batch_size = config["MINIBATCH_SIZE"] * config["NUM_MINIBATCHES"]
-                assert (
-                    batch_size == config["NUM_STEPS"] * config["NUM_ENVS"]
-                ), "batch size must be equal to number of steps * number of envs"
-                permutation = jax.random.permutation(_rng, batch_size)
-                batch = (traj_batch, advantages, targets)
-                batch = jax.tree.map(
-                    lambda x: x.reshape((batch_size,) + x.shape[2:]), batch
-                )
-                shuffled_batch = jax.tree.map(
-                    lambda x: jnp.take(x, permutation, axis=0), batch
-                )
-                # minibatches = jax.tree.map(
-                #     lambda x: jnp.reshape(
-                #         x, [config["NUM_MINIBATCHES"], -1] + list(x.shape[1:])
-                #     ),
-                #     shuffled_batch,
-                # )
 
-                # This helper function explicitly calculates the minibatch size, avoiding the error.
-                def create_minibatches(x):
-                    minibatch_size = x.shape[0] // config["NUM_MINIBATCHES"]
-                    return jnp.reshape(x, (config["NUM_MINIBATCHES"], minibatch_size) + x.shape[1:])
+                T  = config["NUM_STEPS"]
+                B  = config["NUM_ENVS"]
+                MB = config["NUM_MINIBATCHES"]
+                Bmb = B // MB
+                assert B % MB == 0
 
-                # Use the new robust function to create the minibatches
-                minibatches = jax.tree.map(create_minibatches, shuffled_batch)
+                # Permute only across env dimension, NOT across time.
+                perm_env = jax.random.permutation(_rng, B)
+
+                def permute_env(x):
+                    # x is [T, B, ...] or [T, B]
+                    return jnp.take(x, perm_env, axis=1)
+
+                traj_shuf = jax.tree_util.tree_map(permute_env, traj_batch)
+                adv_shuf  = permute_env(advantages)
+                tgt_shuf  = permute_env(targets)   # <-- (see note below)
+
+                def split_env_minibatches(x):
+                    # [T, B, ...] -> [MB, T, Bmb, ...]
+                    x = x.reshape((T, MB, Bmb) + x.shape[2:])
+                    return jnp.swapaxes(x, 0, 1)   # [MB, T, Bmb, ...]
+
+                mb_traj = jax.tree_util.tree_map(split_env_minibatches, traj_shuf)
+                mb_adv  = split_env_minibatches(adv_shuf)
+                mb_tgt  = split_env_minibatches(tgt_shuf)
+
+                # This is what jax.lax.scan will iterate over (MB steps)
+                minibatches = (mb_traj, mb_adv, mb_tgt)
 
                 train_state, losses = jax.lax.scan(
                     _update_minbatch, train_state, minibatches
