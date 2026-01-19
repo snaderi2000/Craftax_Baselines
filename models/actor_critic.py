@@ -594,24 +594,18 @@ class ActorCriticConvRNN(nn.Module):
     train: bool = True
 
     @nn.compact
-    def __call__(
-        self,
-        obs: jnp.ndarray,
-        h: Optional[jnp.ndarray] = None,
-    ) -> Tuple[distrax.Categorical, jnp.ndarray, jnp.ndarray]:
-
-        # --------------------------------------------------------------
-        # 1. CNN encoder  z_t
-        # --------------------------------------------------------------
-        z = ImpalaCNN_RNN(
+    def encode(self, obs):
+        return ImpalaCNN_RNN(
             inshape=(3, 63, 63),
             chans=self.cnn_chans,
             nblock=2,
             first_conv_norm=True,
             post_pool_groups=None,
             train=self.train,
-        )(obs)                               # (B, flat_cnn_dim), ~8192
+        )(obs)
 
+    @nn.compact
+    def core(self, z, h):
         # --------------------------------------------------------------
         # 2. Shared pre-projection for both GRU and no-GRU
         # --------------------------------------------------------------
@@ -679,7 +673,6 @@ class ActorCriticConvRNN(nn.Module):
             kernel_init=orthogonal(0.01),
             bias_init=constant(0.0),
         )(a)
-        pi = distrax.Categorical(logits=logits)
 
         # --------------------------------------------------------------
         # 6. Critic head
@@ -715,6 +708,17 @@ class ActorCriticConvRNN(nn.Module):
         )(v)
         value = jnp.squeeze(v, axis=-1)      # (B,)
 
+        return logits, value, h_next
+
+    @nn.compact
+    def __call__(
+        self,
+        obs: jnp.ndarray,
+        h: Optional[jnp.ndarray] = None,
+    ) -> Tuple[distrax.Categorical, jnp.ndarray, jnp.ndarray]:
+        z = self.encode(obs)
+        logits, value, h_next = self.core(z, h)
+        pi = distrax.Categorical(logits=logits)
         return pi, value, h_next
 
 class ActorCriticConv(nn.Module):
