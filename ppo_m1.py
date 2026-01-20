@@ -446,9 +446,13 @@ def make_train(config):
                                 method=network_eval.core,
                             )
 
-                            pi_t = distrax.Categorical(logits=logits_t)
-                            new_logp_t = pi_t.log_prob(act_t)
-                            ent_t = pi_t.entropy()
+                            logp_all = jax.nn.log_softmax(logits_t, axis=-1)          # [B, A]
+                            new_logp_t = jnp.take_along_axis(
+                                logp_all, act_t[..., None], axis=-1
+                            ).squeeze(-1)                                            # [B]
+
+                            p_all = jnp.exp(logp_all)
+                            ent_t = -(p_all * logp_all).sum(axis=-1)                  # [B]
 
                             h_next = jnp.where(done_t[:, None], jnp.zeros_like(h_next), h_next)
                             return (h_next, bn_state), (value_t, new_logp_t, ent_t)
