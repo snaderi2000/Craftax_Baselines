@@ -452,56 +452,52 @@ class ActorCriticConvRNN(nn.Module):
     head_width: int
     rnn_hidden: int
     use_gru: bool
-    train: bool = True
+    train: bool = True  # Toggle for BatchNorm running stats
 
     @nn.compact
     def encode(self, x):
-        # Craftax observations are usually (63, 63, 3) or (64, 64, 3)
-        # Scale to [0, 1] if not already handled by a wrapper
         if x.dtype == jnp.uint8:
             x = x.astype(jnp.float32) / 255.0
 
-        # Standard Atari-style / Craftax CNN
+        # CNN Layers with BatchNorm
         x = nn.Conv(features=32, kernel_size=(3, 3), strides=(2, 2))(x)
+        # BatchNorm creates the 'batch_stats' collection
+        x = nn.BatchNorm(use_running_average=not self.train)(x)
         x = nn.relu(x)
+        
         x = nn.Conv(features=32, kernel_size=(3, 3), strides=(2, 2))(x)
+        x = nn.BatchNorm(use_running_average=not self.train)(x)
         x = nn.relu(x)
+        
         x = nn.Conv(features=32, kernel_size=(3, 3), strides=(2, 2))(x)
+        x = nn.BatchNorm(use_running_average=not self.train)(x)
         x = nn.relu(x)
         
         x = x.reshape((x.shape[0], -1))  # Flatten
         
-        # Initial projection layer (the "Head Width" from the paper)
         x = nn.Dense(features=self.head_width)(x)
-        x = nn.LayerNorm(use_scale=True, use_bias=True)(x)
         x = nn.relu(x)
         return x
 
     @nn.compact
     def core(self, z, h):
         if self.use_gru:
-            # RNN / GRU logic
-            # z: [Batch, HeadWidth], h: [Batch, RNN_Hidden]
+            # Unpack GRU: (new_carry, output)
             new_h, rnn_output = nn.GRUCell(features=self.rnn_hidden)(h, z)
         else:
             rnn_output = z
             new_h = h
 
         # Actor Head
-        actor_mean = nn.Dense(features=self.head_width, name="actor_dense_1")(rnn_output)
-        actor_mean = nn.relu(actor_mean)
-        actor_logits = nn.Dense(features=self.action_dim, name="actor_dense_2")(actor_mean)
+        actor_logits = nn.Dense(features=self.action_dim)(nn.relu(nn.Dense(self.head_width)(rnn_output)))
         pi = distrax.Categorical(logits=actor_logits)
 
         # Critic Head
-        critic = nn.Dense(features=self.head_width, name="critic_dense_1")(rnn_output)
-        critic = nn.relu(critic)
-        value = nn.Dense(features=1, name="critic_dense_2")(critic)
+        value = nn.Dense(features=1)(nn.relu(nn.Dense(self.head_width)(rnn_output)))
 
         return pi, jnp.squeeze(value, axis=-1), new_h
 
     def __call__(self, x, h):
-        """Standard call method to prevent AttributeError during .init()"""
         z = self.encode(x)
         return self.core(z, h)
 

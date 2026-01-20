@@ -156,8 +156,8 @@ def make_train(config):
 
 
         variables = network_train.init(_rng, init_x, init_h)
-        params = variables["params"]
-        batch_stats = variables["batch_stats"]
+        params = variables.get("params", {}) 
+        batch_stats = variables.get("batch_stats", {})
 
 
         def count_parameters(params):
