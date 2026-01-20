@@ -433,7 +433,8 @@ def make_train(config):
                         # 2) Initialize hidden state h0 from stored h0
                         # jax.debug.print("mb_traj.h {}", mb_traj.h.shape)
                         if config["USE_GRU"]:
-                            h0 = jnp.zeros((Bmb, config.get("RNN_HIDDEN", 256)), dtype=jnp.float32) #mb_traj.h[0]
+                            #h0 = jnp.zeros((Bmb, config.get("RNN_HIDDEN", 256)), dtype=jnp.float32) 
+                            h0 = mb_traj.h[0]
                         else:
                             h0 = jnp.zeros((Bmb, config.get("RNN_HIDDEN", 256)), dtype=jnp.float32)
 
@@ -656,31 +657,7 @@ def run_ppo(config):
     print("SPS: ", config["TOTAL_TIMESTEPS"] / (t1 - t0))
 
 
-    #    # --- (Corrected save block) ---
-    #  # --- (Corrected save block using vault_uid) ---
-    # if config["SAVE_BUFFER"]:
-    #     print("\n--- Saving Final Replay Buffer ---")
-        
-    #     final_runner_state = jax.tree.map(lambda x: x[0], out["runner_state"])
-    #     final_buffer_state = final_runner_state[-1]
-        
-    #     # Use a specific, consistent UID for saving
-    #     VAULT_UID = "my_first_buffer_run"
 
-    #     # Initialize the Vault with the UID
-    #     vault = Vault(
-    #         vault_name="craftax_replay_buffer",
-    #         experience_structure=final_buffer_state.experience,
-    #         rel_dir=".",
-    #         vault_uid=VAULT_UID
-    #     )
-        
-    #     # Write the data to disk
-    #     vault.write(final_buffer_state)
-    #     print(f"✅ Replay buffer saved with UID: {VAULT_UID}")
-    # # -----------------------------------------------
-
-        # --- SAVE BUFFER WITH NUMPY ---
     # --- Corrected save block (stable UID + wrap-around safe) ---
     if config["SAVE_BUFFER"]:
         print("\n--- Saving Final Replay Buffer ---")
