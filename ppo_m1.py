@@ -152,9 +152,10 @@ def make_train(config):
 
         rng, _rng = jax.random.split(rng)
         init_x = jnp.zeros((1, *env.observation_space(env_params).shape))
+        init_h = jnp.zeros((1, config.get("RNN_HIDDEN", 256)))
 
 
-        variables = network_train.init(_rng, init_x)
+        variables = network_train.init(_rng, init_x, init_h)
         params = variables["params"]
         batch_stats = variables["batch_stats"]
 
@@ -442,21 +443,18 @@ def make_train(config):
                             h, bn_state = carry
                             z_t, done_t, act_t = inp  # z_t: [Bmb, Dz]
 
-                            logits_t, value_t, h_next = network_eval.apply(
+                            logits_pi, value_t, h_next = network_eval.apply(
                                 {"params": params, "batch_stats": bn_state},
                                 z_t,
                                 h,
                                 method=network_eval.core,
                             )
 
-                            logp_all = jax.nn.log_softmax(logits_t, axis=-1)          # [B, A]
-                            new_logp_t = jnp.take_along_axis(
-                                logp_all, act_t[..., None], axis=-1
-                            ).squeeze(-1)                                            # [B]
+                            # Use the distrax API for cleaner and safer probability math
+                            new_logp_t = logits_pi.log_prob(act_t)  # [Bmb]
+                            ent_t = logits_pi.entropy()             # [Bmb]
 
-                            p_all = jnp.exp(logp_all)
-                            ent_t = -(p_all * logp_all).sum(axis=-1)                  # [B]
-
+                            # Reset hidden state for the next step if this step was a 'done'
                             h_next = jnp.where(done_t[:, None], jnp.zeros_like(h_next), h_next)
                             return (h_next, bn_state), (value_t, new_logp_t, ent_t)
 

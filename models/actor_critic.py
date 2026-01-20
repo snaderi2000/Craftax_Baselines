@@ -449,63 +449,62 @@ class ImpalaCNN_RNN(nn.Module):
 
 class ActorCriticConvRNN(nn.Module):
     action_dim: int
-    cnn_chans: Sequence[int] = (64, 64, 128)
-    rnn_hidden: int = 256
-    use_gru: bool = True
-    head_width: int = 2048
-    # Update to 2 to match paper section A.1.1
-    n_res_blocks: int = 2 
+    head_width: int
+    rnn_hidden: int
+    use_gru: bool
     train: bool = True
 
     @nn.compact
+    def encode(self, x):
+        # Craftax observations are usually (63, 63, 3) or (64, 64, 3)
+        # Scale to [0, 1] if not already handled by a wrapper
+        if x.dtype == jnp.uint8:
+            x = x.astype(jnp.float32) / 255.0
+
+        # Standard Atari-style / Craftax CNN
+        x = nn.Conv(features=32, kernel_size=(3, 3), strides=(2, 2))(x)
+        x = nn.relu(x)
+        x = nn.Conv(features=32, kernel_size=(3, 3), strides=(2, 2))(x)
+        x = nn.relu(x)
+        x = nn.Conv(features=32, kernel_size=(3, 3), strides=(2, 2))(x)
+        x = nn.relu(x)
+        
+        x = x.reshape((x.shape[0], -1))  # Flatten
+        
+        # Initial projection layer (the "Head Width" from the paper)
+        x = nn.Dense(features=self.head_width)(x)
+        x = nn.LayerNorm(use_scale=True, use_bias=True)(x)
+        x = nn.relu(x)
+        return x
+
+    @nn.compact
     def core(self, z, h):
-        do_gru = (self.use_gru and self.rnn_hidden > 0)
-
-        if do_gru:
-            # RNN input processing [cite: 629]
-            x = nn.LayerNorm()(z)
-            x = nn.Dense(self.rnn_hidden, kernel_init=orthogonal(np.sqrt(2)))(x)
-            x = nn.relu(x)
-
-            if h is None:
-                h = jnp.zeros((z.shape[0], self.rnn_hidden), z.dtype)
-
-            h_next, _ = nn.GRUCell(features=self.rnn_hidden)(h, x)
-            y = nn.relu(h_next)
-            # Concatenate CNN and RNN outputs 
-            shared = jnp.concatenate([z, y], axis=-1)
+        if self.use_gru:
+            # RNN / GRU logic
+            # z: [Batch, HeadWidth], h: [Batch, RNN_Hidden]
+            new_h = nn.GRUCell(features=self.rnn_hidden)(h, z)
+            rnn_output = new_h
         else:
-            h_next = jnp.zeros((z.shape[0], self.rnn_hidden), z.dtype)
-            shared = z
+            rnn_output = z
+            new_h = h
 
-        # --- ACTOR HEAD [cite: 632] ---
-        a = nn.LayerNorm()(shared)
-        a = nn.Dense(self.head_width, kernel_init=orthogonal(np.sqrt(2)))(a)
-        a = nn.relu(a)
-        for _ in range(self.n_res_blocks):
-            res = a
-            a = nn.Dense(self.head_width, kernel_init=orthogonal(np.sqrt(2)))(a)
-            a = nn.relu(a)
-            a = nn.Dense(self.head_width, kernel_init=orthogonal(np.sqrt(2)))(a)
-            a = nn.relu(a + res)
-        a = nn.LayerNorm()(a)
-        logits = nn.Dense(self.action_dim, kernel_init=orthogonal(0.01))(a)
+        # Actor Head
+        actor_mean = nn.Dense(features=self.head_width)(rnn_output)
+        actor_mean = nn.relu(actor_mean)
+        actor_logits = nn.Dense(features=self.action_dim)(actor_mean)
+        pi = distrax.Categorical(logits=actor_logits)
 
-        # --- CRITIC HEAD [cite: 633] ---
-        v = nn.LayerNorm()(shared)
-        v = nn.Dense(self.head_width, kernel_init=orthogonal(np.sqrt(2)))(v)
-        v = nn.relu(v)
-        for _ in range(self.n_res_blocks):
-            res = v
-            v = nn.Dense(self.head_width, kernel_init=orthogonal(np.sqrt(2)))(v)
-            v = nn.relu(v)
-            v = nn.Dense(self.head_width, kernel_init=orthogonal(np.sqrt(2)))(v)
-            v = nn.relu(v + res)
-        v = nn.LayerNorm()(v)
-        v = nn.Dense(1, kernel_init=orthogonal(1.0))(v)
-        value = jnp.squeeze(v, axis=-1)
+        # Critic Head
+        critic = nn.Dense(features=self.head_width)(rnn_output)
+        critic = nn.relu(critic)
+        value = nn.Dense(features=1)(critic)
 
-        return logits, value, h_next
+        return pi, jnp.squeeze(value, axis=-1), new_h
+
+    def __call__(self, x, h):
+        """Standard call method to prevent AttributeError during .init()"""
+        z = self.encode(x)
+        return self.core(z, h)
 
 class ActorCriticConv(nn.Module):
     action_dim: int
