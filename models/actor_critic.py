@@ -482,22 +482,21 @@ class ActorCriticConvRNN(nn.Module):
         if self.use_gru:
             # RNN / GRU logic
             # z: [Batch, HeadWidth], h: [Batch, RNN_Hidden]
-            new_h = nn.GRUCell(features=self.rnn_hidden)(h, z)
-            rnn_output = new_h
+            new_h, rnn_output = nn.GRUCell(features=self.rnn_hidden)(h, z)
         else:
             rnn_output = z
             new_h = h
 
         # Actor Head
-        actor_mean = nn.Dense(features=self.head_width)(rnn_output)
+        actor_mean = nn.Dense(features=self.head_width, name="actor_dense_1")(rnn_output)
         actor_mean = nn.relu(actor_mean)
-        actor_logits = nn.Dense(features=self.action_dim)(actor_mean)
+        actor_logits = nn.Dense(features=self.action_dim, name="actor_dense_2")(actor_mean)
         pi = distrax.Categorical(logits=actor_logits)
 
         # Critic Head
-        critic = nn.Dense(features=self.head_width)(rnn_output)
+        critic = nn.Dense(features=self.head_width, name="critic_dense_1")(rnn_output)
         critic = nn.relu(critic)
-        value = nn.Dense(features=1)(critic)
+        value = nn.Dense(features=1, name="critic_dense_2")(critic)
 
         return pi, jnp.squeeze(value, axis=-1), new_h
 
