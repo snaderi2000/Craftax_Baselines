@@ -7,6 +7,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import optax
+import distrax
 from craftax.craftax_env import make_craftax_env_from_name
 from flax.core.frozen_dict import unfreeze
 
@@ -123,18 +124,35 @@ def make_train(config):
             # network = ActorCriticConvRNN(
             #     env.action_space(env_params).n, config["LAYER_SIZE"]
             # )
-            network = ActorCriticConvRNN(
-                action_dim   = env.action_space(env_params).n,
-                head_width   = config["LAYER_SIZE"],   # 2048 in the paper
-                rnn_hidden   = config.get("RNN_HIDDEN", 256),  # ← 0 = “no-GRU” ablation
-                use_gru      = config.get("USE_GRU", True)     # optional explicit flag
+            # network = ActorCriticConvRNN(
+            #     action_dim   = env.action_space(env_params).n,
+            #     head_width   = config["LAYER_SIZE"],   # 2048 in the paper
+            #     rnn_hidden   = config.get("RNN_HIDDEN", 256),  # ← 0 = “no-GRU” ablation
+            #     use_gru      = config.get("USE_GRU", True)     # optional explicit flag
+            # )
+
+            network_train = ActorCriticConvRNN(
+                action_dim = env.action_space(env_params).n,
+                head_width = config["LAYER_SIZE"],
+                rnn_hidden = config.get("RNN_HIDDEN", 256),
+                use_gru    = config.get("USE_GRU", True),
+                train=True,          # 🔹 BN updates allowed
             )
+
+            network_eval = ActorCriticConvRNN(
+                action_dim = env.action_space(env_params).n,
+                head_width = config["LAYER_SIZE"],
+                rnn_hidden = config.get("RNN_HIDDEN", 256),
+                use_gru    = config.get("USE_GRU", True),
+                train=False,         # 🔹 BN frozen
+            )
+
 
         rng, _rng = jax.random.split(rng)
         init_x = jnp.zeros((1, *env.observation_space(env_params).shape))
 
 
-        variables = network.init(_rng, init_x)
+        variables = network_train.init(_rng, init_x)
         params = variables["params"]
         batch_stats = variables["batch_stats"]
 
@@ -166,7 +184,7 @@ def make_train(config):
 
 
         train_state = TrainState.create(
-            apply_fn=network.apply,
+            apply_fn=network_train.apply,
             params=params,
             batch_stats=batch_stats,
             tx=tx,
@@ -234,11 +252,11 @@ def make_train(config):
 
                 # 3) run apply_fn in TRAIN mode, allowing batch_stats to mutate
                 #    note how we pull out the updated stats in new_model_state
-                ((pi, value, h_next), new_model_state) = train_state.apply_fn(
+                ((pi, value, h_next), new_model_state) = network_train.apply(
                     vars,
                     last_obs,
                     h,
-                    mutable=['batch_stats']  # allow BatchNorm to write new running‐stats
+                    mutable=["batch_stats"]  # allow BatchNorm to write new running‐stats
                 )
 
 
@@ -329,11 +347,11 @@ def make_train(config):
                 'params':      train_state.params,
                 'batch_stats': train_state.batch_stats,
             }
-            ((_, last_val, _), new_model_state) = train_state.apply_fn(
+            ((_, last_val, _), new_model_state) = network_train.apply(
                 vars,
                 last_obs,
                 h,
-                mutable=['batch_stats'],   # allow BatchNorm to write its running stats
+                mutable=["batch_stats"],   # allow BatchNorm to write its running stats
             )
             train_state = train_state.replace(
                 batch_stats=new_model_state['batch_stats']
@@ -399,44 +417,46 @@ def make_train(config):
                         # mb_traj.action:   [T, Bmb]
                         # mb_traj.log_prob: [T, Bmb]
 
-                        T = mb_traj.obs.shape[0]
-                        Bmb = mb_traj.obs.shape[1]
-                        H = config.get("RNN_HIDDEN", 256)
+                        T, Bmb = mb_traj.obs.shape[:2]
+                        
+                        # 1) Batch CNN once on [T*Bmb, 63,63,3] using method=encode
+                        obs_flat = mb_traj.obs.reshape((T * Bmb,) + mb_traj.obs.shape[2:])
+                        z_flat = network_eval.apply(
+                            {"params": params, "batch_stats": batch_stats},
+                            obs_flat,
+                            method=network_eval.encode,
+                        )
+                        z = z_flat.reshape((T, Bmb, -1))
 
-                        # Initial hidden state for TBPTT chunk
-                        h0 = jnp.zeros((Bmb, H), dtype=jnp.float32)
+                        # 2) Initialize hidden state h0 from stored h0
+                        # jax.debug.print("mb_traj.h {}", mb_traj.h.shape)
+                        if config["USE_GRU"]:
+                            h0 = mb_traj.h[0]
+                        else:
+                            h0 = jnp.zeros((Bmb, config.get("RNN_HIDDEN", 256)), dtype=jnp.float32)
 
                         def step(carry, inp):
                             h, bn_state = carry
-                            obs_t, done_t, act_t, old_logp_t = inp  # each is [Bmb, ...]
+                            z_t, done_t, act_t = inp  # z_t: [Bmb, Dz]
 
-                            
-
-                            vars_t = {'params': params, 'batch_stats': bn_state}
-
-                            ((pi_t, value_t, h_next), new_state) = train_state.apply_fn(
-                                vars_t,
-                                obs_t,
+                            logits_t, value_t, h_next = network_eval.apply(
+                                {"params": params, "batch_stats": bn_state},
+                                z_t,
                                 h,
-                                mutable=['batch_stats']
+                                method=network_eval.core,
                             )
 
-                            new_logp_t = pi_t.log_prob(act_t)   # [Bmb]
-                            ent_t      = pi_t.entropy()         # [Bmb]
+                            pi_t = distrax.Categorical(logits=logits_t)
+                            new_logp_t = pi_t.log_prob(act_t)
+                            ent_t = pi_t.entropy()
 
                             h_next = jnp.where(done_t[:, None], jnp.zeros_like(h_next), h_next)
+                            return (h_next, bn_state), (value_t, new_logp_t, ent_t)
 
-                            return (h_next, new_state['batch_stats']), (value_t, new_logp_t, ent_t)
-
-                        jax.debug.print("obs_t0 {}", mb_traj.obs[0].shape)   # should be (Bmb, 63,63,3)
-                        jax.debug.print("done_t0 {}", mb_traj.done[0].shape) # should be (Bmb,)
-                        jax.debug.print("obs dtype {} min {} max {}", mb_traj.obs.dtype,
-                                        mb_traj.obs.min(), mb_traj.obs.max())
-
-                        (hT, new_batch_stats), (value_T, new_logp_T, ent_T) = jax.lax.scan(
+                        (hT, _), (value_T, new_logp_T, ent_T) = jax.lax.scan(
                             step,
                             init=(h0, batch_stats),
-                            xs=(mb_traj.obs, mb_traj.done, mb_traj.action, mb_traj.log_prob),
+                            xs=(z, mb_traj.done, mb_traj.action),
                             length=T,
                         )
 
@@ -462,10 +482,10 @@ def make_train(config):
                             - config["ENT_COEF"] * entropy
                         )
 
-                        return total_loss, (new_batch_stats, value_loss, loss_actor, entropy)
+                        return total_loss, (batch_stats, value_loss, loss_actor, entropy)
 
                     grad_fn = jax.value_and_grad(_loss_fn, has_aux=True)
-                    (total_loss, (new_batch_stats, value_loss, loss_actor, entropy)), grads = grad_fn(
+                    (total_loss, (_, value_loss, loss_actor, entropy)), grads = grad_fn(
                         train_state.params,
                         train_state.batch_stats,
                         mb_traj,
@@ -479,7 +499,7 @@ def make_train(config):
                     #jax.debug.print("value_loss={:.3f}", value_loss)
                     
                     train_state = train_state.apply_gradients(grads=grads)
-                    train_state = train_state.replace(batch_stats=new_batch_stats, q_mean=q_mean_new, q_var=q_var_new)
+                    train_state = train_state.replace(q_mean=q_mean_new, q_var=q_var_new)
 
                     losses = (total_loss, value_loss, loss_actor, entropy)
                     return train_state,  (total_loss, value_loss, loss_actor, entropy)
@@ -591,7 +611,7 @@ def make_train(config):
         #     0,
         # )
 
-        h0 = jnp.zeros((config["NUM_ENVS"], network.rnn_hidden))
+        h0 = jnp.zeros((config["NUM_ENVS"], config["RNN_HIDDEN"]), dtype=jnp.float32)
         # Add buffer_state to the runner_state tuple
         runner_state = (train_state, env_state, obsv, rng, 0, h0, buffer_state)
 

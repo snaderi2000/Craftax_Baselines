@@ -160,77 +160,6 @@ class CnnDownStack(nn.Module):
         return x
 
 
-# class CnnBasicBlock(nn.Module):
-#     inchan: int
-#     init_scale: float = 1.0
-#     init_norm_kwargs: Dict = field(default_factory=dict)
-#     train: bool = True
-
-#     @nn.compact
-#     def __call__(self, x):
-#         conv0 = FanInInitReLULayer(
-#             inchan=self.inchan,
-#             outchan=self.inchan,
-#             layer_type="conv",
-#             kernel_size=3,
-#             padding=1,
-#             init_scale=math.sqrt(self.init_scale),
-#             **self.init_norm_kwargs,
-#             train=self.train
-#         )
-#         conv1 = FanInInitReLULayer(
-#             inchan=self.inchan,
-#             outchan=self.inchan,
-#             layer_type="conv",
-#             kernel_size=3,
-#             padding=1,
-#             init_scale=math.sqrt(self.init_scale),
-#             **self.init_norm_kwargs,
-#             train=self.train
-#         )
-#         return x + conv1(conv0(x))
-
-# class CnnDownStack(nn.Module):
-#     inchan: int
-#     nblock: int
-#     outchan: int
-#     init_scale: float = 1.0
-#     pool: bool = True
-#     post_pool_groups: Optional[int] = None
-#     init_norm_kwargs: Dict = field(default_factory=dict)
-#     first_conv_norm: bool = False
-#     train: bool = True
-
-#     @nn.compact
-#     def __call__(self, x):
-#         # first convolution
-#         first_norm_kwargs = dict(self.init_norm_kwargs)
-#         if not self.first_conv_norm:
-#             first_norm_kwargs.update({"batch_norm": False, "group_norm_groups": None})
-#         x = FanInInitReLULayer(
-#             inchan=self.inchan,
-#             outchan=self.outchan,
-#             layer_type="conv",
-#             init_scale=1.0,
-#             kernel_size=(3,3), padding="SAME",
-#             **first_norm_kwargs,
-#             train=self.train
-#         )(x)
-#         # optional pooling + post-norm
-#         if self.pool:
-#             x = nn.max_pool(x, window_shape=(3,3), strides=(2,2), padding="SAME")
-#             if self.post_pool_groups is not None:
-#                 x = nn.GroupNorm(num_groups=self.post_pool_groups)(x)
-#         # residual blocks
-#         for _ in range(self.nblock):
-#             x = CnnBasicBlock(
-#                 inchan=self.outchan,
-#                 init_scale=self.init_scale / math.sqrt(self.nblock),
-#                 init_norm_kwargs=self.init_norm_kwargs,
-#                 train=self.train
-#             )(x)
-#         return x
-
 class ImpalaCNN(nn.Module):
     inshape: Sequence[int]
     chans: Sequence[int]
@@ -399,108 +328,6 @@ class ImpalaCNN_RNN(nn.Module):
 
 
 
-# class ActorCriticConvRNN(nn.Module):
-#     action_dim: int
-#     cnn_chans: Sequence[int] = (64, 64, 128)
-
-#     # --- GRU controls -------------------------------------------------
-#     rnn_hidden: int = 256          # set to 0 for “no-GRU” ablation
-#     use_gru: bool   = False         # optional explicit flag
-#     # ------------------------------------------------------------------
-
-#     head_width: int = 2048
-#     n_res_blocks: int = 1
-#     train: bool = True
-
-#     @nn.compact
-#     def __call__(self,
-#                  obs: jnp.ndarray,
-#                  h: Optional[jnp.ndarray] = None
-#                  ) -> Tuple[distrax.Categorical,
-#                             jnp.ndarray,
-#                             jnp.ndarray]:
-        
-#         # --------------------------------------------------------------
-#         # 1. CNN encoder  z_t  (8192-dim)
-#         # --------------------------------------------------------------
-#         z = ImpalaCNN_RNN(
-#                 inshape=(3, 63, 63),
-#                 chans=self.cnn_chans,
-#                 nblock=2,
-#                 first_conv_norm=True,
-#                 post_pool_groups=None,
-#                 train=self.train
-#             )(obs)                      # (B, 8192)
-
-#         # --------------------------------------------------------------
-#         # 2. Optional GRU pathway  (y_t, h_next)
-#         # --------------------------------------------------------------
-#         do_gru = (self.use_gru and self.rnn_hidden > 0)
-
-#         jax.debug.print(
-#             "[ActorCriticConvRNN] use_gru={u}, rnn_hidden={h}, do_gru={d}",
-#             u=self.use_gru,
-#             h=self.rnn_hidden,
-#             d=do_gru,
-#         )
-
-#         if do_gru:
-#             #jax.debug.print("[GRU ON] using GRU with rnn_hidden = {}", self.rnn_hidden)
-#             if h is None:
-#                 # Allow caller to omit h when first calling the net
-#                 h = jnp.zeros((z.shape[0], self.rnn_hidden), z.dtype)
-
-#             x = nn.LayerNorm()(z)
-#             x = nn.Dense(self.rnn_hidden)(x)
-#             x = nn.relu(x)
-
-#             h_next, _ = nn.GRUCell(features=self.rnn_hidden)(h, x)
-#             y = nn.relu(h_next)
-
-#         else:
-#             #jax.debug.print("[GRU OFF] skipping GRU, using h.shape = {}", h.shape if h is not None else "(None)")
-#             # “No-GRU” mode:   y = []   and h passes through unchanged
-#             y       = jnp.zeros((z.shape[0], 0), z.dtype)   # keeps concat clean
-#             h_next  = h if h is not None else jnp.zeros((z.shape[0], 0), z.dtype)
-
-#         # --------------------------------------------------------------
-#         # 3. Shared embedding  [z_t , y_t]
-#         # --------------------------------------------------------------
-#         shared = jnp.concatenate([z, y], axis=-1)           # (B, 8192 [+ 256])
-
-#         # --------------------------------------------------------------
-#         # 4. Actor head
-#         # --------------------------------------------------------------
-#         a = nn.LayerNorm()(shared)
-#         a = nn.relu(nn.Dense(self.head_width)(a))
-#         for _ in range(self.n_res_blocks):
-#             res = a
-#             a = nn.relu(nn.Dense(self.head_width)(a))
-#             a = nn.relu(nn.Dense(self.head_width)(a) + res)
-#         a = nn.LayerNorm()(a)
-#         logits = nn.Dense(self.action_dim,
-#                           kernel_init=orthogonal(0.01),
-#                           bias_init=constant(0.0))(a)
-#         pi = distrax.Categorical(logits=logits)
-
-#         # --------------------------------------------------------------
-#         # 5. Critic head
-#         # --------------------------------------------------------------
-#         v = nn.LayerNorm()(shared)
-#         v = nn.relu(nn.Dense(self.head_width)(v))
-#         for _ in range(self.n_res_blocks):
-#             res = v
-#             v = nn.relu(nn.Dense(self.head_width)(v))
-#             v = nn.relu(nn.Dense(self.head_width)(v) + res)
-#         v = nn.LayerNorm()(v)
-#         value = jnp.squeeze(nn.Dense(1,
-#                                      kernel_init=orthogonal(1.0),
-#                                      bias_init=constant(0.0))(v),
-#                             axis=-1)
-
-#         return pi, value, h_next
-
-
 
 
 
@@ -606,44 +433,26 @@ class ActorCriticConvRNN(nn.Module):
 
     @nn.compact
     def core(self, z, h):
-        # --------------------------------------------------------------
-        # 2. Shared pre-projection for both GRU and no-GRU
-        # --------------------------------------------------------------
-        x = nn.LayerNorm()(z)
-        x = nn.Dense(
-            self.rnn_hidden,
-            kernel_init=orthogonal(np.sqrt(2)),
-            bias_init=constant(0.0),
-        )(x)
-        x = nn.relu(x)                       # (B, rnn_hidden)
-
         do_gru = (self.use_gru and self.rnn_hidden > 0)
 
-        # --------------------------------------------------------------
-        # 3. GRU / no-GRU branch
-        # --------------------------------------------------------------
         if do_gru:
+            x = nn.LayerNorm()(z)
+            x = nn.Dense(self.rnn_hidden, kernel_init=orthogonal(np.sqrt(2)),
+                        bias_init=constant(0.0))(x)
+            x = nn.relu(x)
+
             if h is None:
                 h = jnp.zeros((z.shape[0], self.rnn_hidden), z.dtype)
 
             h_next, _ = nn.GRUCell(features=self.rnn_hidden)(h, x)
-            y = nn.relu(h_next)              # recurrent hidden
+            y = nn.relu(h_next)
+            shared = jnp.concatenate([z, y], axis=-1)
         else:
-            # no-GRU baseline: treat x as the “hidden state”
-            y = x                            # purely feed-forward
-            if h is None:
-                h_next = jnp.zeros_like(x)   # dummy state for API compat
-            else:
-                h_next = h                   # or keep whatever was passed
+            h_next = jnp.zeros((z.shape[0], self.rnn_hidden), z.dtype)
+            shared = z
 
-        # --------------------------------------------------------------
-        # 4. Shared embedding  [z_t , y_t]
-        # --------------------------------------------------------------
-        shared = jnp.concatenate([z, y], axis=-1)   # (B, flat_cnn_dim + rnn_hidden)
 
-        # --------------------------------------------------------------
-        # 5. Actor head
-        # --------------------------------------------------------------
+
         a = nn.LayerNorm()(shared)
         a = nn.Dense(
             self.head_width,
