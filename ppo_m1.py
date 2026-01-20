@@ -147,6 +147,8 @@ def make_train(config):
                 train=False,         # 🔹 BN frozen
             )
 
+        jax.debug.print("DEBUG: config[USE_GRU] is {}", config.get("USE_GRU"))
+
 
         rng, _rng = jax.random.split(rng)
         init_x = jnp.zeros((1, *env.observation_space(env_params).shape))
@@ -431,7 +433,7 @@ def make_train(config):
                         # 2) Initialize hidden state h0 from stored h0
                         # jax.debug.print("mb_traj.h {}", mb_traj.h.shape)
                         if config["USE_GRU"]:
-                            h0 = mb_traj.h[0]
+                            h0 = jnp.zeros((Bmb, config.get("RNN_HIDDEN", 256)), dtype=jnp.float32) #mb_traj.h[0]
                         else:
                             h0 = jnp.zeros((Bmb, config.get("RNN_HIDDEN", 256)), dtype=jnp.float32)
 
