@@ -512,33 +512,35 @@ class ActorCriticConvRNN(nn.Module):
 
     @nn.compact
     def core(self, zt, h):
-        # RNN Input
+        # 1. RNN Architecture (yt)
         rnn_in = nn.relu(nn.Dense(256)(nn.LayerNorm()(zt)))
-        # RNN Update
         if self.use_gru:
             new_h, yt_raw = nn.GRUCell(self.rnn_hidden)(h, rnn_in)
         else:
             yt_raw, new_h = rnn_in, h
-        yt = nn.relu(yt_raw) # yt (256)
+        yt = nn.relu(yt_raw)
 
-        # Algorithm 2 Concatenation (8448)
+        # 2. Shared Concatenation (8448)
         shared_input = jnp.concatenate([zt, yt], axis=-1)
 
-        # Actor Head
-        a = nn.LayerNorm()(shared_input)
-        a = nn.relu(nn.Dense(self.head_width)(a))
-        a = DenseResBlock(self.head_width)(a)
-        a = DenseResBlock(self.head_width)(a)
-        a = nn.LayerNorm()(nn.relu(a))
-        pi = distrax.Categorical(logits=nn.Dense(self.action_dim)(a))
+        # --- THE SHARED NECK (The Parameter Fix) ---
+        # Instead of each head having its own 17M parameter layer, they share this one.
+        shared_neck = nn.LayerNorm()(shared_input)
+        shared_neck = nn.Dense(features=self.head_width, name="shared_fc")(shared_neck)
+        shared_neck = nn.relu(shared_neck)
 
-        # Critic Head
-        c = nn.LayerNorm()(shared_input)
-        c = nn.relu(nn.Dense(self.head_width)(c))
-        c = DenseResBlock(self.head_width)(c)
-        c = DenseResBlock(self.head_width)(c)
+        # 3. Actor Head (Branches from shared_neck)
+        a = DenseResBlock(self.head_width, name="actor_res1")(shared_neck)
+        a = DenseResBlock(self.head_width, name="actor_res2")(a)
+        a = nn.LayerNorm()(nn.relu(a))
+        actor_logits = nn.Dense(self.action_dim, name="actor_logits")(a)
+        pi = distrax.Categorical(logits=actor_logits)
+
+        # 4. Critic Head (Branches from shared_neck)
+        c = DenseResBlock(self.head_width, name="critic_res1")(shared_neck)
+        c = DenseResBlock(self.head_width, name="critic_res2")(c)
         c = nn.LayerNorm()(nn.relu(c))
-        value = nn.Dense(1)(c)
+        value = nn.Dense(1, name="value_logits")(c)
 
         return pi, jnp.squeeze(value, axis=-1), new_h
 
