@@ -503,8 +503,7 @@ class ActorCriticConvRNN(nn.Module):
 
     @nn.compact
     def encode(self, x):
-        if x.dtype == jnp.uint8:
-            x = x.astype(jnp.float32) #/ 255.0
+        x = x.astype(jnp.float32) / 255.0
         for channels in [64, 64, 128]:
             x = ImpalaStack(channels=channels, train=self.train)(x)
         x = nn.relu(x)
