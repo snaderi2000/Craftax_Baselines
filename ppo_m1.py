@@ -392,6 +392,10 @@ def make_train(config):
             #jax.debug.print("adv std={:.3f}", jnp.std(advantages))
             advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
 
+            jax.debug.print("ADVANTAGES: mean={m}, std={s}", 
+                            m=jnp.mean(advantages), 
+                            s=jnp.std(advantages))
+
             # UPDATE NETWORK
             def _update_epoch(update_state, unused):
                 def _update_minbatch(train_state, batch_info):
@@ -490,6 +494,13 @@ def make_train(config):
                         return total_loss, (batch_stats, value_loss, loss_actor, entropy)
 
                     grad_fn = jax.value_and_grad(_loss_fn, has_aux=True)
+                    
+                    jax.debug.print("POPART: q_mean={m}, q_var={v}, targets_std_range=[{tmin}, {tmax}]",
+                                    m=train_state.q_mean, 
+                                    v=train_state.q_var,
+                                    tmin=jnp.min(targets_std_mb),
+                                    tmax=jnp.max(targets_std_mb))
+
                     (total_loss, (_, value_loss, loss_actor, entropy)), grads = grad_fn(
                         train_state.params,
                         train_state.batch_stats,
@@ -498,7 +509,8 @@ def make_train(config):
                         targets_std_mb, 
                     )
 
-
+                    grad_norm = jnp.sqrt(sum(jnp.sum(jnp.square(g)) for g in jax.tree_util.tree_leaves(grads)))
+                    jax.debug.print("GRAD NORM: {gn}", gn=grad_norm)
 
                     
                     #jax.debug.print("value_loss={:.3f}", value_loss)
