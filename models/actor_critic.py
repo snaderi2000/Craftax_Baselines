@@ -447,79 +447,107 @@ class ImpalaCNN_RNN(nn.Module):
 #         pi = distrax.Categorical(logits=logits)
 #         return pi, value, h_next
 
+class ResNetBlock(nn.Module):
+    channels: int
+    train: bool = True
+
+    @nn.compact
+    def __call__(self, x):
+        res = x
+        # (a) ReLU followed by BatchNorm
+        x = nn.relu(x)
+        x = nn.BatchNorm(use_running_average=not self.train)(x)
+        # (b) Conv 3x3, stride 1
+        x = nn.Conv(features=self.channels, kernel_size=(3, 3), strides=(1, 1))(x)
+        return x + res
+
+class ImpalaStack(nn.Module):
+    channels: int
+    train: bool = True
+
+    @nn.compact
+    def __call__(self, x):
+        # (a) Batch Norm
+        x = nn.BatchNorm(use_running_average=not self.train)(x)
+        # (b) Conv 3x3, stride 1
+        x = nn.Conv(features=self.channels, kernel_size=(3, 3), strides=(1, 1))(x)
+        # (c) Max Pool 3x3, stride 2
+        x = nn.max_pool(x, window_shape=(3, 3), strides=(2, 2), padding="SAME")
+        # (d) Two ResNet Blocks
+        x = ResNetBlock(self.channels, train=self.train)(x)
+        x = ResNetBlock(self.channels, train=self.train)(x)
+        return x
+
+# --- 2. Actor/Critic Residual Sub-components ---
+
+class DenseResBlock(nn.Module):
+    features: int
+
+    @nn.compact
+    def __call__(self, x):
+        res = x
+        # Standard Dense Residual Block: Linear -> ReLU -> Linear
+        x = nn.Dense(self.features)(x)
+        x = nn.relu(x)
+        x = nn.Dense(self.features)(x)
+        return nn.relu(x + res)
+
+# --- 3. Full MFRL Agent (Algorithm 2) ---
+
 class ActorCriticConvRNN(nn.Module):
     action_dim: int
-    head_width: int
-    rnn_hidden: int
-    use_gru: bool
-    train: bool = True  # Toggle for BatchNorm running stats
+    head_width: int = 2048
+    rnn_hidden: int = 256
+    use_gru: bool = True
+    train: bool = True
 
     @nn.compact
     def encode(self, x):
         if x.dtype == jnp.uint8:
             x = x.astype(jnp.float32) / 255.0
-
-        # CNN Layers with BatchNorm
-        x = nn.Conv(features=32, kernel_size=(3, 3), strides=(2, 2))(x)
-        # BatchNorm creates the 'batch_stats' collection
-        x = nn.BatchNorm(use_running_average=not self.train)(x)
+        for channels in [64, 64, 128]:
+            x = ImpalaStack(channels=channels, train=self.train)(x)
         x = nn.relu(x)
-        
-        x = nn.Conv(features=32, kernel_size=(3, 3), strides=(2, 2))(x)
-        x = nn.BatchNorm(use_running_average=not self.train)(x)
-        x = nn.relu(x)
-        
-        x = nn.Conv(features=32, kernel_size=(3, 3), strides=(2, 2))(x)
-        x = nn.BatchNorm(use_running_average=not self.train)(x)
-        x = nn.relu(x)
-        
-        x = x.reshape((x.shape[0], -1))  # Flatten
-        
-        x = nn.Dense(features=self.head_width)(x)
-        x = nn.relu(x)
-        return x
+        return x.reshape((x.shape[0], -1)) # zt (8192)
 
     @nn.compact
-    def core(self, z, h):
+    def core(self, zt, h):
+        # RNN Input
+        rnn_in = nn.relu(nn.Dense(256)(nn.LayerNorm()(zt)))
+        # RNN Update
         if self.use_gru:
-            # Unpack GRU: (new_carry, output)
-            new_h, rnn_output = nn.GRUCell(features=self.rnn_hidden)(h, z)
+            new_h, yt_raw = nn.GRUCell(self.rnn_hidden)(h, rnn_in)
         else:
-            rnn_output = z
-            new_h = h
+            yt_raw, new_h = rnn_in, h
+        yt = nn.relu(yt_raw) # yt (256)
+
+        # Algorithm 2 Concatenation (8448)
+        shared_input = jnp.concatenate([zt, yt], axis=-1)
 
         # Actor Head
-        actor_logits = nn.Dense(features=self.action_dim)(nn.relu(nn.Dense(self.head_width)(rnn_output)))
-        pi = distrax.Categorical(logits=actor_logits)
+        a = nn.LayerNorm()(shared_input)
+        a = nn.relu(nn.Dense(self.head_width)(a))
+        a = DenseResBlock(self.head_width)(a)
+        a = DenseResBlock(self.head_width)(a)
+        a = nn.LayerNorm()(nn.relu(a))
+        pi = distrax.Categorical(logits=nn.Dense(self.action_dim)(a))
 
         # Critic Head
-        value = nn.Dense(features=1)(nn.relu(nn.Dense(self.head_width)(rnn_output)))
+        c = nn.LayerNorm()(shared_input)
+        c = nn.relu(nn.Dense(self.head_width)(c))
+        c = DenseResBlock(self.head_width)(c)
+        c = DenseResBlock(self.head_width)(c)
+        c = nn.LayerNorm()(nn.relu(c))
+        value = nn.Dense(1)(c)
 
         return pi, jnp.squeeze(value, axis=-1), new_h
 
     def __call__(self, x, h):
-        z = self.encode(x)
-        return self.core(z, h)
+        zt = self.encode(x)
+        return self.core(zt, h)
 
-class ActorCriticConv(nn.Module):
-    action_dim: int
-    layer_width: int = 2048   # kept for CLI compatibility; tied to head_width
-    train: bool = True
 
-    @nn.compact
-    def __call__(self, obs: jnp.ndarray) -> Tuple[distrax.Categorical, jnp.ndarray]:
-        # Simply call the RNN module with use_gru=False
-        pi, value, _ = ActorCriticConvRNN(
-            action_dim=self.action_dim,
-            cnn_chans=(64, 64, 128),
-            rnn_hidden=256,
-            use_gru=False,          # 🔹 key: no recurrence
-            head_width=self.layer_width,
-            n_res_blocks=1,
-            train=self.train,
-        )(obs, h=None)
 
-        return pi, value
 
 
 
