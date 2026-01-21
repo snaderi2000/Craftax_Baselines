@@ -38,13 +38,15 @@ def run_diagnostic():
     print(f"✅ Total Parameter Count: {total_params / 1e6:.2f}M")
     # Expected: ~55.6M
 
-    # --- TEST 2: Encoder Logic (zt) ---
-    zt = model.apply(variables, dummy_obs, method=model.encode)
-    print(f"✅ Encoder Output (zt) Shape: {zt.shape} (Expected: ({batch_size}, 8192))")
+    # --- TEST 2: Encoder Logic ---
+    # Add mutable=['batch_stats'] so BatchNorm can run
+    zt, _ = model.apply(variables, dummy_obs, method=model.encode, mutable=['batch_stats'])
+    print(f"✅ Encoder Output (zt) Shape: {zt.shape}")
 
-    # --- TEST 3: Core & Concatenation Logic (yt + Heads) ---
-    pi, value, h_next = model.apply(variables, zt, dummy_h, method=model.core)
-    
+    # --- TEST 3: Core Logic ---
+    # Again, add mutable=['batch_stats']
+    (pi, value, h_next), _ = model.apply(variables, zt, dummy_h, method=model.core, mutable=['batch_stats'])
+        
     # The concatenation happens inside .core()
     # zt (8192) + yt (256) = 8448
     print(f"✅ Shared Input Size: {zt.shape[1] + rnn_hidden} (Expected: 8448)")
