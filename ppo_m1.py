@@ -147,14 +147,13 @@ def make_train(config):
                 train=False,         # 🔹 BN frozen
             )
 
-        jax.debug.print("DEBUG: config[USE_GRU] is {}", config.get("USE_GRU"))
-
-
+        # jax.debug.print("DEBUG: config[USE_GRU] is {}", config.get("USE_GRU"))
         rng, _rng = jax.random.split(rng)
         init_x = jnp.zeros((1, *env.observation_space(env_params).shape))
         init_h = jnp.zeros((1, config.get("RNN_HIDDEN", 256)))
 
 
+        # variables = network_train.init(_rng, init_x, init_h)
         variables = network_train.init(_rng, init_x, init_h)
         params = variables.get("params", {}) 
         batch_stats = variables.get("batch_stats", {})
@@ -163,8 +162,6 @@ def make_train(config):
         def count_parameters(params):
             flat_params = jax.tree_util.tree_leaves(unfreeze(params))
             return sum(p.size for p in flat_params)
-
-        print("Total parameters:", count_parameters(params))
         
         
         #network_params = network.init(_rng, init_x)
@@ -197,7 +194,6 @@ def make_train(config):
 
         # --- ADD THIS BLOCK TO INITIALIZE THE BUFFER ---
         if config["USE_FLASHBAX"]:
-            print("Initializing Flashbax replay buffer...")
             # Define the structure of what we want to save from each timestep
             example_item = {
                 "obs": jnp.zeros(env.observation_space(env_params).shape, dtype=jnp.float32),
@@ -401,10 +397,6 @@ def make_train(config):
             #jax.debug.print("adv std={:.3f}", jnp.std(advantages))
             advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
 
-            jax.debug.print("ADVANTAGES: mean={m}, std={s}", 
-                            m=jnp.mean(advantages), 
-                            s=jnp.std(advantages))
-
             # UPDATE NETWORK
             def _update_epoch(update_state, unused):
                 def _update_minbatch(train_state, batch_info):
@@ -504,12 +496,6 @@ def make_train(config):
 
                     grad_fn = jax.value_and_grad(_loss_fn, has_aux=True)
                     
-                    jax.debug.print("POPART: q_mean={m}, q_var={v}, targets_std_range=[{tmin}, {tmax}]",
-                                    m=train_state.q_mean, 
-                                    v=train_state.q_var,
-                                    tmin=jnp.min(targets_std_mb),
-                                    tmax=jnp.max(targets_std_mb))
-
                     (total_loss, (_, value_loss, loss_actor, entropy)), grads = grad_fn(
                         train_state.params,
                         train_state.batch_stats,
@@ -519,8 +505,6 @@ def make_train(config):
                     )
 
                     grad_norm = jnp.sqrt(sum(jnp.sum(jnp.square(g)) for g in jax.tree_util.tree_leaves(grads)))
-                    jax.debug.print("GRAD NORM: {gn}", gn=grad_norm)
-
                     
                     #jax.debug.print("value_loss={:.3f}", value_loss)
                     
@@ -678,14 +662,9 @@ def run_ppo(config):
     t0 = time.time()
     out = train_vmap(rngs)
     t1 = time.time()
-    print("Time to run experiment", t1 - t0)
-    print("SPS: ", config["TOTAL_TIMESTEPS"] / (t1 - t0))
-
-
 
     # --- Corrected save block (stable UID + wrap-around safe) ---
     if config["USE_FLASHBAX"] and config["SAVE_BUFFER"]:
-        print("\n--- Saving Final Replay Buffer ---")
 
         final_runner_state = jax.tree.map(lambda x: x[0], out["runner_state"])
         final_buffer_state = final_runner_state[-1]
@@ -703,7 +682,6 @@ def run_ppo(config):
         )
 
         n_written = write_entire_buffer_once(vault, final_buffer_state)
-        print(f"✅ Saved {n_written} timesteps to: {REL_DIR}/craftax_replay_buffer/{VAULT_UID}")
 
         
 
@@ -718,7 +696,6 @@ def run_ppo(config):
             options = CheckpointManagerOptions(max_to_keep=1, create=True)
             path = os.path.join(wandb.run.dir, dir_name)
             checkpoint_manager = CheckpointManager(path, orbax_checkpointer, options)
-            print(f"saved runner state to {path}")
             save_args = orbax_utils.save_args_from_target(train_state)
             checkpoint_manager.save(
                 config["TOTAL_TIMESTEPS"],
