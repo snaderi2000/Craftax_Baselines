@@ -22,7 +22,7 @@ from orbax.checkpoint import (
 
 from logz.batch_logging import batch_log, create_log_dict
 from models.actor_critic import (
-    #ActorCritic,
+    ActorCritic,
     ActorCriticConv,
 )
 from models.icm import ICMEncoder, ICMForward, ICMInverse

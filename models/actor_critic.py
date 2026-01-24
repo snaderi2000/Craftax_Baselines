@@ -8,6 +8,10 @@ import math
 import distrax
 import jax
 
+
+
+
+
 class FanInInitReLULayer(nn.Module):
     inchan: int
     outchan: int
@@ -215,72 +219,182 @@ class ImpalaCNN(nn.Module):
 
 
 
+# class ActorCriticConv(nn.Module):
+#     action_dim: Sequence[int]
+#     layer_width: int
+#     activation: str = "tanh"
+#     train: bool = True
+
+#     @nn.compact
+#     def __call__(self, obs):
+#         # x = nn.Conv(features=32, kernel_size=(5, 5))(obs)
+#         # x = nn.relu(x)
+#         # x = nn.max_pool(x, window_shape=(3, 3), strides=(3, 3))
+#         # x = nn.Conv(features=32, kernel_size=(5, 5))(x)
+#         # x = nn.relu(x)
+#         # x = nn.max_pool(x, window_shape=(3, 3), strides=(3, 3))
+#         # x = nn.Conv(features=32, kernel_size=(5, 5))(x)
+#         # x = nn.relu(x)
+#         # x = nn.max_pool(x, window_shape=(3, 3), strides=(3, 3))
+
+#         # embedding = x.reshape(x.shape[0], -1)
+#         print("DEBUG — raw obs.shape:", obs.shape)
+#         #x = jnp.transpose(obs, (0, 2, 3, 1))
+#         x = obs
+#         # 2) Hard‑coded ImpalaCNN
+#         x = ImpalaCNN(
+#             inshape=(3, 63, 63),
+#             chans=(64, 128, 128),
+#             outsize=256,
+#             nblock=2,
+#             init_norm_kwargs={'batch_norm': True, 'batch_norm_kwargs': {'momentum': 0.10}},
+#             post_pool_groups=None,
+#             dense_init_norm_kwargs={},
+#             train=self.train
+#         )(x)
+
+
+#         # 3) Hard‑coded projection to hidsize=1024 with layer_norm
+#         x = FanInInitReLULayer(
+#             inchan=x.shape[-1],
+#             outchan=1024,
+#             layer_type='linear',
+#             init_scale=1.4,
+#             layer_norm=True,
+#             train=self.train
+#         )(x)
+
+#         embedding = x
+#         # 1) Single‐layer policy head → logits → Categorical
+#         pi_logits = nn.Dense(
+#             features=self.action_dim,
+#             kernel_init=orthogonal(0.01),
+#             bias_init=constant(0.0),
+#         )(x)
+#         pi = distrax.Categorical(logits=pi_logits)
+
+#         # 2) Single‐layer value head → scalar value
+#         v = nn.Dense(
+#             features=1,
+#             kernel_init=orthogonal(1.0),
+#             bias_init=constant(0.0),
+#         )(x)
+#         critic = jnp.squeeze(v, axis=-1)
+
+#         # 3) Return exactly (pi, critic)
+#         return pi, critic
+
 class ActorCriticConv(nn.Module):
     action_dim: Sequence[int]
     layer_width: int
     activation: str = "tanh"
-    train: bool = True
 
     @nn.compact
     def __call__(self, obs):
-        # x = nn.Conv(features=32, kernel_size=(5, 5))(obs)
-        # x = nn.relu(x)
-        # x = nn.max_pool(x, window_shape=(3, 3), strides=(3, 3))
-        # x = nn.Conv(features=32, kernel_size=(5, 5))(x)
-        # x = nn.relu(x)
-        # x = nn.max_pool(x, window_shape=(3, 3), strides=(3, 3))
-        # x = nn.Conv(features=32, kernel_size=(5, 5))(x)
-        # x = nn.relu(x)
-        # x = nn.max_pool(x, window_shape=(3, 3), strides=(3, 3))
+        x = nn.Conv(features=32, kernel_size=(5, 5))(obs)
+        x = nn.relu(x)
+        x = nn.max_pool(x, window_shape=(3, 3), strides=(3, 3))
+        x = nn.Conv(features=32, kernel_size=(5, 5))(x)
+        x = nn.relu(x)
+        x = nn.max_pool(x, window_shape=(3, 3), strides=(3, 3))
+        x = nn.Conv(features=32, kernel_size=(5, 5))(x)
+        x = nn.relu(x)
+        x = nn.max_pool(x, window_shape=(3, 3), strides=(3, 3))
 
-        # embedding = x.reshape(x.shape[0], -1)
-        print("DEBUG — raw obs.shape:", obs.shape)
-        #x = jnp.transpose(obs, (0, 2, 3, 1))
-        x = obs
-        # 2) Hard‑coded ImpalaCNN
-        x = ImpalaCNN(
-            inshape=(3, 63, 63),
-            chans=(64, 128, 128),
-            outsize=256,
-            nblock=2,
-            init_norm_kwargs={'batch_norm': True, 'batch_norm_kwargs': {'momentum': 0.10}},
-            post_pool_groups=None,
-            dense_init_norm_kwargs={},
-            train=self.train
-        )(x)
+        embedding = x.reshape(x.shape[0], -1)
+
+        actor_mean = nn.Dense(
+            self.layer_width, kernel_init=orthogonal(2), bias_init=constant(0.0)
+        )(embedding)
+        actor_mean = nn.relu(actor_mean)
+
+        actor_mean = nn.Dense(
+            self.action_dim, kernel_init=orthogonal(0.01), bias_init=constant(0.0)
+        )(actor_mean)
+        actor_mean = nn.relu(actor_mean)
+
+        actor_mean = nn.Dense(
+            self.action_dim, kernel_init=orthogonal(0.01), bias_init=constant(0.0)
+        )(actor_mean)
+
+        pi = distrax.Categorical(logits=actor_mean)
+
+        critic = nn.Dense(
+            self.layer_width, kernel_init=orthogonal(2), bias_init=constant(0.0)
+        )(embedding)
+        critic = nn.relu(critic)
+        critic = nn.Dense(1, kernel_init=orthogonal(1.0), bias_init=constant(0.0))(
+            critic
+        )
+
+        return pi, jnp.squeeze(critic, axis=-1)
 
 
-        # 3) Hard‑coded projection to hidsize=1024 with layer_norm
-        x = FanInInitReLULayer(
-            inchan=x.shape[-1],
-            outchan=1024,
-            layer_type='linear',
-            init_scale=1.4,
-            layer_norm=True,
-            train=self.train
-        )(x)
 
-        embedding = x
-        # 1) Single‐layer policy head → logits → Categorical
-        pi_logits = nn.Dense(
-            features=self.action_dim,
-            kernel_init=orthogonal(0.01),
+class ActorCritic(nn.Module):
+    action_dim: Sequence[int]
+    layer_width: int
+    activation: str = "tanh"
+
+    @nn.compact
+    def __call__(self, x):
+        if self.activation == "relu":
+            activation = nn.relu
+        else:
+            activation = nn.tanh
+
+        actor_mean = nn.Dense(
+            self.layer_width,
+            kernel_init=orthogonal(np.sqrt(2)),
             bias_init=constant(0.0),
         )(x)
-        pi = distrax.Categorical(logits=pi_logits)
+        actor_mean = activation(actor_mean)
 
-        # 2) Single‐layer value head → scalar value
-        v = nn.Dense(
-            features=1,
-            kernel_init=orthogonal(1.0),
+        actor_mean = nn.Dense(
+            self.layer_width,
+            kernel_init=orthogonal(np.sqrt(2)),
+            bias_init=constant(0.0),
+        )(actor_mean)
+        actor_mean = activation(actor_mean)
+
+        actor_mean = nn.Dense(
+            self.layer_width,
+            kernel_init=orthogonal(np.sqrt(2)),
+            bias_init=constant(0.0),
+        )(actor_mean)
+        actor_mean = activation(actor_mean)
+
+        actor_mean = nn.Dense(
+            self.action_dim, kernel_init=orthogonal(0.01), bias_init=constant(0.0)
+        )(actor_mean)
+        pi = distrax.Categorical(logits=actor_mean)
+
+        critic = nn.Dense(
+            self.layer_width,
+            kernel_init=orthogonal(np.sqrt(2)),
             bias_init=constant(0.0),
         )(x)
-        critic = jnp.squeeze(v, axis=-1)
+        critic = activation(critic)
 
-        # 3) Return exactly (pi, critic)
-        return pi, critic
+        critic = nn.Dense(
+            self.layer_width,
+            kernel_init=orthogonal(np.sqrt(2)),
+            bias_init=constant(0.0),
+        )(critic)
+        critic = activation(critic)
 
+        critic = nn.Dense(
+            self.layer_width,
+            kernel_init=orthogonal(np.sqrt(2)),
+            bias_init=constant(0.0),
+        )(critic)
+        critic = activation(critic)
 
+        critic = nn.Dense(1, kernel_init=orthogonal(1.0), bias_init=constant(0.0))(
+            critic
+        )
+
+        return pi, jnp.squeeze(critic, axis=-1)
 
 
 #Make the actor critic with a rnn
