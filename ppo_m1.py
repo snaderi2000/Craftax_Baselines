@@ -199,7 +199,7 @@ def make_train(config):
         print("Initializing Flashbax replay buffer...")
         # Define the structure of what we want to save from each timestep
         example_item = {
-            "obs": jnp.zeros(env.observation_space(env_params).shape, dtype=jnp.uint8),
+            "obs": jnp.zeros(env.observation_space(env_params).shape, dtype=jnp.float32),
             "actions": jnp.zeros((), dtype=jnp.int32),
             "rewards": jnp.zeros((), dtype=jnp.float32),
             "dones": jnp.zeros((), dtype=bool),
@@ -324,7 +324,7 @@ def make_train(config):
                 traj_batch
             )
             data_to_add = {
-                "obs": (transposed_traj.obs * 255).astype(jnp.uint8),
+                "obs": transposed_traj.obs.astype(jnp.float32),
                 "actions": transposed_traj.action,
                 "rewards": transposed_traj.reward,
                 "dones": transposed_traj.done,

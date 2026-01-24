@@ -502,10 +502,8 @@ class ActorCriticConvRNN(nn.Module):
     train: bool = True
 
     @nn.compact
-    def encode(self, x):
-        jax.debug.print("RAW OBS RANGE: min={min}, max={max}", 
-                    min=jnp.min(x), max=jnp.max(x))
-        x = x.astype(jnp.float32) / 255.0
+    def encode(self, x): 
+        x = x.astype(jnp.float32)
         for channels in [64, 64, 128]:
             x = ImpalaStack(channels=channels, train=self.train)(x)
         x = nn.relu(x)
