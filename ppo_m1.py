@@ -196,27 +196,31 @@ def make_train(config):
         )
 
         # --- ADD THIS BLOCK TO INITIALIZE THE BUFFER ---
-        print("Initializing Flashbax replay buffer...")
-        # Define the structure of what we want to save from each timestep
-        example_item = {
-            "obs": jnp.zeros(env.observation_space(env_params).shape, dtype=jnp.float32),
-            "actions": jnp.zeros((), dtype=jnp.int32),
-            "rewards": jnp.zeros((), dtype=jnp.float32),
-            "dones": jnp.zeros((), dtype=bool),
-        }
-        
-        # Create the buffer function
-        buffer = fbx.make_trajectory_buffer(
-            max_length_time_axis=config["BUFFER_SIZE"] // config["NUM_ENVS"],
-            min_length_time_axis=config["T_WM"], # Can't sample a sequence until you have one
-            add_batch_size=config["NUM_ENVS"],
-            # --- ADD THE MISSING ARGUMENTS ---
-            sample_batch_size=32, # A reasonable default for how many trajectories to sample at once
-            sample_sequence_length=config["T_WM"], # This is T_WM=20 from the paper
-            period=1, # This is a standard value, allowing sampling to start at any valid step
-        )
-        # Initialize the buffer's state
-        buffer_state = buffer.init(example_item)
+        if config["USE_FLASHBAX"]:
+            print("Initializing Flashbax replay buffer...")
+            # Define the structure of what we want to save from each timestep
+            example_item = {
+                "obs": jnp.zeros(env.observation_space(env_params).shape, dtype=jnp.float32),
+                "actions": jnp.zeros((), dtype=jnp.int32),
+                "rewards": jnp.zeros((), dtype=jnp.float32),
+                "dones": jnp.zeros((), dtype=bool),
+            }
+            
+            # Create the buffer function
+            buffer = fbx.make_trajectory_buffer(
+                max_length_time_axis=config["BUFFER_SIZE"] // config["NUM_ENVS"],
+                min_length_time_axis=config["T_WM"], # Can't sample a sequence until you have one
+                add_batch_size=config["NUM_ENVS"],
+                # --- ADD THE MISSING ARGUMENTS ---
+                sample_batch_size=32, # A reasonable default for how many trajectories to sample at once
+                sample_sequence_length=config["T_WM"], # This is T_WM=20 from the paper
+                period=1, # This is a standard value, allowing sampling to start at any valid step
+            )
+            # Initialize the buffer's state
+            buffer_state = buffer.init(example_item)
+        else:
+            buffer = None
+            buffer_state = None
         # --------------------------------------------------
 
         # INIT ENV
@@ -229,7 +233,11 @@ def make_train(config):
         def _update_step(runner_state, unused):
 
             # Unpack the new runner_state which includes the buffer_state
-            train_state, env_state, last_obs, rng, update_step, h, buffer_state = runner_state
+            if config["USE_FLASHBAX"]:
+                train_state, env_state, last_obs, rng, update_step, h, buffer_state = runner_state
+            else:
+                train_state, env_state, last_obs, rng, update_step, h = runner_state
+                buffer_state = None
 
             # COLLECT TRAJECTORIES
             def _env_step(runner_state, unused):
@@ -317,22 +325,23 @@ def make_train(config):
 
 
             # --- ADD THIS BLOCK TO POPULATE THE BUFFER ---
-            # Create a dictionary with the data we want to store
+            if config["USE_FLASHBAX"]:
+                # Create a dictionary with the data we want to store
 
-            transposed_traj = jax.tree.map(
-                lambda x: jnp.swapaxes(x, 0, 1),
-                traj_batch
-            )
-            data_to_add = {
-                "obs": transposed_traj.obs.astype(jnp.float32),
-                "actions": transposed_traj.action,
-                "rewards": transposed_traj.reward,
-                "dones": transposed_traj.done,
-            }
-            
+                transposed_traj = jax.tree.map(
+                    lambda x: jnp.swapaxes(x, 0, 1),
+                    traj_batch
+                )
+                data_to_add = {
+                    "obs": transposed_traj.obs.astype(jnp.float32),
+                    "actions": transposed_traj.action,
+                    "rewards": transposed_traj.reward,
+                    "dones": transposed_traj.done,
+                }
+                
 
-            # Add the data to the buffer
-            buffer_state = buffer.add(buffer_state, data_to_add)
+                # Add the data to the buffer
+                buffer_state = buffer.add(buffer_state, data_to_add)
             # -----------------------------------------------
 
 
@@ -616,7 +625,10 @@ def make_train(config):
             #     update_step + 1,
             #     h
             # )
-            runner_state = (train_state, env_state, last_obs, rng, update_step + 1, h, buffer_state)
+            if config["USE_FLASHBAX"]:
+                runner_state = (train_state, env_state, last_obs, rng, update_step + 1, h, buffer_state)
+            else:
+                runner_state = (train_state, env_state, last_obs, rng, update_step + 1, h)
             return runner_state, metric
 
         rng, _rng = jax.random.split(rng)
@@ -630,7 +642,10 @@ def make_train(config):
 
         h0 = jnp.zeros((config["NUM_ENVS"], config["RNN_HIDDEN"]), dtype=jnp.float32)
         # Add buffer_state to the runner_state tuple
-        runner_state = (train_state, env_state, obsv, rng, 0, h0, buffer_state)
+        if config["USE_FLASHBAX"]:
+            runner_state = (train_state, env_state, obsv, rng, 0, h0, buffer_state)
+        else:
+            runner_state = (train_state, env_state, obsv, rng, 0, h0)
 
         runner_state, metric = jax.lax.scan(
             _update_step, runner_state, None, config["NUM_UPDATES"]
@@ -669,7 +684,7 @@ def run_ppo(config):
 
 
     # --- Corrected save block (stable UID + wrap-around safe) ---
-    if config["SAVE_BUFFER"]:
+    if config["USE_FLASHBAX"] and config["SAVE_BUFFER"]:
         print("\n--- Saving Final Replay Buffer ---")
 
         final_runner_state = jax.tree.map(lambda x: x[0], out["runner_state"])
@@ -760,6 +775,7 @@ if __name__ == "__main__":
     parser.add_argument("--buffer_size", type=int, default=128000)
     parser.add_argument("--t_wm", type=int, default=20, help="Trajectory length for the TWM.")
     parser.add_argument("--save_buffer", action="store_true", help="Save the final replay buffer to disk.")
+    parser.add_argument("--use_flashbax", action=argparse.BooleanOptionalAction, default=True, help="Use Flashbax replay buffer.")
     parser.add_argument("--vault_uid", type=str, default=None)
 
     args, rest_args = parser.parse_known_args(sys.argv[1:])
