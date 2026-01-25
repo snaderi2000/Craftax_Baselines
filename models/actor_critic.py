@@ -953,6 +953,7 @@ class ActorCriticImpala(nn.Module):
             1,
             kernel_init=orthogonal(1.0),
             bias_init=constant(0.0),
+            name="critic_out",
         )(h)
 
         return pi, jnp.squeeze(value, axis=-1)
