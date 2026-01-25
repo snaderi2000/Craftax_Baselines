@@ -422,7 +422,7 @@ def make_train(config):
 
                         # CALCULATE ACTOR LOSS
                         ratio = jnp.exp(log_prob - traj_batch.log_prob)
-                        gae = (gae - gae.mean()) / (gae.std() + 1e-8)
+                        #gae = (gae - gae.mean()) / (gae.std() + 1e-8)
                         loss_actor1 = ratio * gae
                         loss_actor2 = (
                             jnp.clip(
@@ -458,6 +458,9 @@ def make_train(config):
                     targets,
                     rng,
                 ) = update_state
+
+                # This standardizes the GAEs for the WHOLE pool of data at once.
+                advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
 
                 rng, _rng = jax.random.split(rng)
                 permutation = jax.random.permutation(_rng, config["NUM_ENVS"])
