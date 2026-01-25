@@ -357,33 +357,30 @@ def make_train(config):
                     traj_batch, advantages, targets = batch_info
 
                     # Update PopArt statistics
+                    old_mu = train_state.popart_mu
+                    old_sigma = train_state.popart_sigma
+
                     alpha = config.get("POPART_ALPHA", 0.999)
                     batch_mean = targets.mean()
                     batch_std = targets.std() + 1e-8
 
-                    old_mu = train_state.popart_mu
-                    old_sigma = train_state.popart_sigma
-
                     new_mu = alpha * old_mu + (1 - alpha) * batch_mean
                     new_sigma = alpha * old_sigma + (1 - alpha) * batch_std
 
-                    # ----- POPART CRITIC RESCALING -----
-                    params = unfreeze(train_state.params)
-
-                    critic_kernel = params["params"]["critic_out"]["kernel"]
-                    critic_bias = params["params"]["critic_out"]["bias"]
+                    # ----- POPART CRITIC RESCALING (KEEP PARAMS AS FrozenDict) -----
+                    p = unfreeze(train_state.params)  # <- Python dict
 
                     scale = old_sigma / (new_sigma + 1e-8)
 
-                    params["params"]["critic_out"]["kernel"] = critic_kernel * scale
-                    params["params"]["critic_out"]["bias"] = (
-                        old_sigma * critic_bias + old_mu - new_mu
+                    p["params"]["critic_out"]["kernel"] = p["params"]["critic_out"]["kernel"] * scale
+                    p["params"]["critic_out"]["bias"] = (
+                        old_sigma * p["params"]["critic_out"]["bias"] + old_mu - new_mu
                     ) / (new_sigma + 1e-8)
 
-                    params = freeze(params)
+                    p = freeze(p)  # <- back to FrozenDict
 
                     train_state = train_state.replace(
-                        params=params,
+                        params=p,
                         popart_mu=new_mu,
                         popart_sigma=new_sigma,
                     )
