@@ -575,22 +575,22 @@ class ResNetBlock(nn.Module):
         x = nn.Conv(features=self.channels, kernel_size=(3, 3), strides=(1, 1))(x)
         return x + res
 
-class ImpalaStack(nn.Module):
-    channels: int
-    train: bool = True
+# class ImpalaStack(nn.Module):
+#     channels: int
+#     train: bool = True
 
-    @nn.compact
-    def __call__(self, x):
-        # (a) Batch Norm
-        x = nn.BatchNorm(use_running_average=not self.train)(x)
-        # (b) Conv 3x3, stride 1
-        x = nn.Conv(features=self.channels, kernel_size=(3, 3), strides=(1, 1))(x)
-        # (c) Max Pool 3x3, stride 2
-        x = nn.max_pool(x, window_shape=(3, 3), strides=(2, 2), padding="SAME")
-        # (d) Two ResNet Blocks
-        x = ResNetBlock(self.channels, train=self.train)(x)
-        x = ResNetBlock(self.channels, train=self.train)(x)
-        return x
+#     @nn.compact
+#     def __call__(self, x):
+#         # (a) Batch Norm
+#         x = nn.BatchNorm(use_running_average=not self.train)(x)
+#         # (b) Conv 3x3, stride 1
+#         x = nn.Conv(features=self.channels, kernel_size=(3, 3), strides=(1, 1))(x)
+#         # (c) Max Pool 3x3, stride 2
+#         x = nn.max_pool(x, window_shape=(3, 3), strides=(2, 2), padding="SAME")
+#         # (d) Two ResNet Blocks
+#         x = ResNetBlock(self.channels, train=self.train)(x)
+#         x = ResNetBlock(self.channels, train=self.train)(x)
+#         return x
 
 # --- 2. Actor/Critic Residual Sub-components ---
 
@@ -859,6 +859,78 @@ class ActorCriticConvSymbolicCraftax(nn.Module):
         critic = nn.Dense(
             self.layer_width, kernel_init=orthogonal(2), bias_init=constant(0.0)
         )(critic)
+        critic = nn.relu(critic)
+        critic = nn.Dense(1, kernel_init=orthogonal(1.0), bias_init=constant(0.0))(
+            critic
+        )
+
+        return pi, jnp.squeeze(critic, axis=-1)
+
+################################################################################
+
+
+class ImpalaResBlock(nn.Module):
+    channels: int
+
+    @nn.compact
+    def __call__(self, x):
+        residual = x
+        # (a) ReLU
+        x = nn.relu(x)
+        # (b) Conv 3x3 stride 1
+        x = nn.Conv(self.channels, (3, 3), strides=(1, 1), padding="SAME")(x)
+        return x + residual
+
+
+class ImpalaStack(nn.Module):
+    channels: int
+
+    @nn.compact
+    def __call__(self, x):
+        # (b) Conv 3x3 stride 1
+        x = nn.Conv(self.channels, (3, 3), strides=(1, 1), padding="SAME")(x)
+        # (c) MaxPool 3x3 stride 2
+        x = nn.max_pool(x, window_shape=(3, 3), strides=(2, 2), padding="SAME")
+        # (d) Two ResNet blocks
+        x = ImpalaResBlock(self.channels)(x)
+        x = ImpalaResBlock(self.channels)(x)
+        return x
+
+class ActorCriticImpala(nn.Module):
+    action_dim: Sequence[int]
+    layer_width: int
+    activation: str = "tanh"
+
+    @nn.compact
+    def __call__(self, obs):
+        x = obs.astype(jnp.float32)
+        for ch in (64, 64, 128):
+            x = ImpalaStack(ch)(x)
+
+        x = nn.relu(x)
+
+        embedding = x.reshape(x.shape[0], -1)
+        jax.debug.print("Impala embedding shape: {}", embedding.shape
+
+        actor_mean = nn.Dense(
+            self.layer_width, kernel_init=orthogonal(2), bias_init=constant(0.0)
+        )(embedding)
+        actor_mean = nn.relu(actor_mean)
+
+        actor_mean = nn.Dense(
+            self.action_dim, kernel_init=orthogonal(0.01), bias_init=constant(0.0)
+        )(actor_mean)
+        actor_mean = nn.relu(actor_mean)
+
+        actor_mean = nn.Dense(
+            self.action_dim, kernel_init=orthogonal(0.01), bias_init=constant(0.0)
+        )(actor_mean)
+
+        pi = distrax.Categorical(logits=actor_mean)
+
+        critic = nn.Dense(
+            self.layer_width, kernel_init=orthogonal(2), bias_init=constant(0.0)
+        )(embedding)
         critic = nn.relu(critic)
         critic = nn.Dense(1, kernel_init=orthogonal(1.0), bias_init=constant(0.0))(
             critic
