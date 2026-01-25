@@ -9,7 +9,7 @@ do
 
     python ppo_rnn.py \
         --num_envs 48 \
-        --total_timesteps 1e9 \
+        --total_timesteps 1e6 \
         --num_steps 96 \
         --update_epochs 4 \
         --num_minibatches 8 \
