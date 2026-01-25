@@ -874,7 +874,6 @@ class ImpalaResBlock(nn.Module):
         residual = x
         # (a) ReLU
         x = nn.relu(x)
-        x = nn.LayerNorm()(x) #change to layer norm
         # (b) Conv 3x3 stride 1
         x = nn.Conv(self.channels, (3, 3), strides=(1, 1), padding="SAME")(x)
         return x + residual
@@ -885,7 +884,6 @@ class ImpalaStack(nn.Module):
 
     @nn.compact
     def __call__(self, x):
-        x = nn.LayerNorm()(x) #change to layer norm
         # (b) Conv 3x3 stride 1
         x = nn.Conv(self.channels, (3, 3), strides=(1, 1), padding="SAME")(x)
         # (c) MaxPool 3x3 stride 2
