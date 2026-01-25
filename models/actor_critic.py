@@ -896,43 +896,105 @@ class ImpalaStack(nn.Module):
         x = ImpalaResBlock(self.channels)(x)
         return x
 
+class DenseResBlock(nn.Module):
+    width: int
+
+    @nn.compact
+    def __call__(self, x):
+        residual = x
+        x = nn.Dense(self.width, kernel_init=orthogonal(2))(x)
+        x = nn.relu(x)
+        return x + residual
+
 class ActorCriticImpala(nn.Module):
-    action_dim: Sequence[int]
-    layer_width: int
-    activation: str = "tanh"
+    action_dim: int
+    layer_width: int = 2048
 
     @nn.compact
     def __call__(self, obs):
+        # ------------------
+        # Impala CNN encoder
+        # ------------------
         x = obs.astype(jnp.float32)
         for ch in (64, 64, 128):
             x = ImpalaStack(ch)(x)
 
         x = nn.relu(x)
 
-        embedding = x.reshape(x.shape[0], -1) 
+        # Flatten → z_t (8192)
+        z = x.reshape(x.shape[0], -1)
 
-        actor_mean = nn.Dense(
-            self.layer_width, kernel_init=orthogonal(2), bias_init=constant(0.0)
-        )(embedding)
-        actor_mean = nn.relu(actor_mean)
+        # ------------------
+        # MFRL shared trunk
+        # ------------------
+        h = nn.LayerNorm()(z)
+        h = nn.Dense(self.layer_width, kernel_init=orthogonal(2))(h)
+        h = nn.relu(h)
 
-        actor_mean = nn.Dense(
-            self.action_dim, kernel_init=orthogonal(0.01), bias_init=constant(0.0)
-        )(actor_mean)
-        actor_mean = nn.relu(actor_mean)
+        h = DenseResBlock(self.layer_width)(h)
+        h = DenseResBlock(self.layer_width)(h)
 
-        actor_mean = nn.Dense(
-            self.action_dim, kernel_init=orthogonal(0.01), bias_init=constant(0.0)
-        )(actor_mean)
+        h = nn.LayerNorm()(h)
 
-        pi = distrax.Categorical(logits=actor_mean)
+        # ------------------
+        # Actor head
+        # ------------------
+        logits = nn.Dense(
+            self.action_dim,
+            kernel_init=orthogonal(0.01),
+            bias_init=constant(0.0),
+        )(h)
+        pi = distrax.Categorical(logits=logits)
 
-        critic = nn.Dense(
-            self.layer_width, kernel_init=orthogonal(2), bias_init=constant(0.0)
-        )(embedding)
-        critic = nn.relu(critic)
-        critic = nn.Dense(1, kernel_init=orthogonal(1.0), bias_init=constant(0.0))(
-            critic
-        )
+        # ------------------
+        # Critic head
+        # ------------------
+        value = nn.Dense(
+            1,
+            kernel_init=orthogonal(1.0),
+            bias_init=constant(0.0),
+        )(h)
 
-        return pi, jnp.squeeze(critic, axis=-1)
+        return pi, jnp.squeeze(value, axis=-1)
+
+
+# class ActorCriticImpala(nn.Module):
+#     action_dim: Sequence[int]
+#     layer_width: int
+#     activation: str = "tanh"
+
+#     @nn.compact
+#     def __call__(self, obs):
+#         x = obs.astype(jnp.float32)
+#         for ch in (64, 64, 128):
+#             x = ImpalaStack(ch)(x)
+
+#         x = nn.relu(x)
+
+#         embedding = x.reshape(x.shape[0], -1) 
+
+#         actor_mean = nn.Dense(
+#             self.layer_width, kernel_init=orthogonal(2), bias_init=constant(0.0)
+#         )(embedding)
+#         actor_mean = nn.relu(actor_mean)
+
+#         actor_mean = nn.Dense(
+#             self.action_dim, kernel_init=orthogonal(0.01), bias_init=constant(0.0)
+#         )(actor_mean)
+#         actor_mean = nn.relu(actor_mean)
+
+#         actor_mean = nn.Dense(
+#             self.action_dim, kernel_init=orthogonal(0.01), bias_init=constant(0.0)
+#         )(actor_mean)
+
+#         pi = distrax.Categorical(logits=actor_mean)
+
+#         critic = nn.Dense(
+#             self.layer_width, kernel_init=orthogonal(2), bias_init=constant(0.0)
+#         )(embedding)
+#         critic = nn.relu(critic)
+#         critic = nn.Dense(1, kernel_init=orthogonal(1.0), bias_init=constant(0.0))(
+#             critic
+#         )
+
+#         return pi, jnp.squeeze(critic, axis=-1)
