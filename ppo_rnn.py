@@ -33,6 +33,8 @@ from logz.batch_logging import create_log_dict, batch_log
 
 from craftax.craftax_env import make_craftax_env_from_name
 
+from models.actor_critic import ImpalaStack
+
 # Code adapted from the original implementation made by Chris Lu
 # Original code located at https://github.com/luchris429/purejaxrl
 
@@ -72,12 +74,22 @@ class ActorCriticRNN(nn.Module):
     @nn.compact
     def __call__(self, hidden, x):
         obs, dones = x
-        embedding = nn.Dense(
-            self.config["LAYER_SIZE"],
-            kernel_init=orthogonal(np.sqrt(2)),
-            bias_init=constant(0.0),
-        )(obs)
-        embedding = nn.relu(embedding)
+
+        x_enc = obs.astype(jnp.float32)
+
+        for ch in (64, 64, 128):
+            x_enc = ImpalaStack(ch)(x_enc)
+        
+        x_enc = nn.relu(x_enc)
+
+        embedding = x_enc.reshape(x_enc.shape[0], -1)
+
+        # embedding = nn.Dense(
+        #     self.config["LAYER_SIZE"],
+        #     kernel_init=orthogonal(np.sqrt(2)),
+        #     bias_init=constant(0.0),
+        # )(obs)
+        # embedding = nn.relu(embedding)
 
         rnn_in = (embedding, dones)
         hidden, embedding = ScannedRNN()(hidden, rnn_in)
@@ -171,12 +183,12 @@ def make_train(config):
         rng, _rng = jax.random.split(rng)
         init_x = (
             jnp.zeros(
-                (1, config["NUM_ENVS"], *env.observation_space(env_params).shape)
+                (1, config["NUM_ENVS"], 63, 63, 3)
             ),
             jnp.zeros((1, config["NUM_ENVS"])),
         )
         init_hstate = ScannedRNN.initialize_carry(
-            config["NUM_ENVS"], config["LAYER_SIZE"]
+            config["NUM_ENVS"], 256 #config["LAYER_SIZE"]
         )
         network_params = network.init(_rng, init_hstate, init_x)
         if config["ANNEAL_LR"]:
@@ -199,7 +211,7 @@ def make_train(config):
         rng, _rng = jax.random.split(rng)
         obsv, env_state = env.reset(_rng, env_params)
         init_hstate = ScannedRNN.initialize_carry(
-            config["NUM_ENVS"], config["LAYER_SIZE"]
+            config["NUM_ENVS"], 256 #config["LAYER_SIZE"]
         )
 
         # TRAIN LOOP
