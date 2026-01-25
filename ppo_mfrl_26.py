@@ -14,7 +14,6 @@ from typing import NamedTuple
 
 from flax.training import orbax_utils
 from flax.training.train_state import TrainState
-from flax.core import freeze, unfreeze
 from orbax.checkpoint import (
     PyTreeCheckpointer,
     CheckpointManagerOptions,
@@ -50,11 +49,6 @@ class Transition(NamedTuple):
     obs: jnp.ndarray
     next_obs: jnp.ndarray
     info: jnp.ndarray
-
-
-class PopArtTrainState(TrainState):
-    popart_mu: jnp.ndarray
-    popart_sigma: jnp.ndarray
 
 
 def make_train(config):
@@ -111,12 +105,10 @@ def make_train(config):
                 optax.clip_by_global_norm(config["MAX_GRAD_NORM"]),
                 optax.adam(config["LR"], eps=1e-5),
             )
-        train_state = PopArtTrainState.create(
+        train_state = TrainState.create(
             apply_fn=network.apply,
             params=network_params,
             tx=tx,
-            popart_mu=jnp.array(0.0, dtype=jnp.float32),
-            popart_sigma=jnp.array(1.0, dtype=jnp.float32),
         )
 
         # Exploration state
@@ -356,48 +348,21 @@ def make_train(config):
                 def _update_minbatch(train_state, batch_info):
                     traj_batch, advantages, targets = batch_info
 
-                    # Update PopArt statistics
-                    old_mu = train_state.popart_mu
-                    old_sigma = train_state.popart_sigma
-
-                    alpha = config.get("POPART_ALPHA", 0.999)
-                    batch_mean = targets.mean()
-                    batch_std = targets.std() + 1e-8
-
-                    new_mu = alpha * old_mu + (1 - alpha) * batch_mean
-                    new_sigma = alpha * old_sigma + (1 - alpha) * batch_std
-
-                    # ----- POPART CRITIC RESCALING (KEEP PARAMS AS FrozenDict) -----
-                    p = unfreeze(train_state.params)  # <- Python dict
-
-                    scale = old_sigma / (new_sigma + 1e-8)
-
-                    p["params"]["critic_out"]["kernel"] = p["params"]["critic_out"]["kernel"] * scale
-                    p["params"]["critic_out"]["bias"] = (
-                        old_sigma * p["params"]["critic_out"]["bias"] + old_mu - new_mu
-                    ) / (new_sigma + 1e-8)
-
-                    p = freeze(p)  # <- back to FrozenDict
-
-                    train_state = train_state.replace(
-                        params=p,
-                        popart_mu=new_mu,
-                        popart_sigma=new_sigma,
-                    )
-
-                    # Normalize targets
-                    targets_norm = (targets - new_mu) / new_sigma
-
                     # Policy/value network
-                    def _loss_fn(params, traj_batch, gae, targets_norm):
+                    def _loss_fn(params, traj_batch, gae, targets):
                         # RERUN NETWORK
                         pi, value = network.apply(params, traj_batch.obs)
                         log_prob = pi.log_prob(traj_batch.action)
 
                         # CALCULATE VALUE LOSS
-                        # value is the unnormalized network output
-                        value_losses = jnp.square(value - targets_norm)
-                        value_loss = 0.5 * value_losses.mean()
+                        value_pred_clipped = traj_batch.value + (
+                            value - traj_batch.value
+                        ).clip(-config["CLIP_EPS"], config["CLIP_EPS"])
+                        value_losses = jnp.square(value - targets)
+                        value_losses_clipped = jnp.square(value_pred_clipped - targets)
+                        value_loss = (
+                            0.5 * jnp.maximum(value_losses, value_losses_clipped).mean()
+                        )
 
                         # CALCULATE ACTOR LOSS
                         ratio = jnp.exp(log_prob - traj_batch.log_prob)
@@ -424,7 +389,7 @@ def make_train(config):
 
                     grad_fn = jax.value_and_grad(_loss_fn, has_aux=True)
                     total_loss, grads = grad_fn(
-                        train_state.params, traj_batch, advantages, targets_norm
+                        train_state.params, traj_batch, advantages, targets
                     )
                     train_state = train_state.apply_gradients(grads=grads)
 
@@ -741,7 +706,6 @@ if __name__ == "__main__":
         "--use_optimistic_resets", action=argparse.BooleanOptionalAction, default=True
     )
     parser.add_argument("--optimistic_reset_ratio", type=int, default=16)
-    parser.add_argument("--popart_alpha", type=float, default=0.999)
 
     # EXPLORATION
     parser.add_argument("--exploration_update_epochs", type=int, default=4)
