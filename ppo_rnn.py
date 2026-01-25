@@ -82,7 +82,10 @@ class ActorCriticRNN(nn.Module):
         
         x_enc = nn.relu(x_enc)
 
-        embedding = x_enc.reshape(x_enc.shape[0], -1)
+        embedding = x_enc.reshape(x_enc.shape[0], x_enc.shape[1], -1)
+
+        rnn_in = nn.Dense(256, kernel_init=orthogonal(2))(z)
+        rnn_in = nn.relu(rnn_in)
 
         # embedding = nn.Dense(
         #     self.config["LAYER_SIZE"],
