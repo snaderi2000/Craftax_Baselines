@@ -14,6 +14,7 @@ from typing import NamedTuple
 
 from flax.training import orbax_utils
 from flax.training.train_state import TrainState
+from flax.core import freeze, unfreeze
 from orbax.checkpoint import (
     PyTreeCheckpointer,
     CheckpointManagerOptions,
@@ -367,31 +368,19 @@ def make_train(config):
                     new_sigma = alpha * old_sigma + (1 - alpha) * batch_std
 
                     # ----- POPART CRITIC RESCALING -----
-                    params = train_state.params
-                    
-                    # W_new = W_old * (sigma_old / sigma_new)
-                    # b_new = (sigma_old * b_old + mu_old - mu_new) / sigma_new
-                    scale = old_sigma / (new_sigma + 1e-8) # avoid division by zero
-                    
-                    # Both ActorCritic and ActorCriticImpala use "critic_out" for the final layer
+                    params = unfreeze(train_state.params)
+
                     critic_kernel = params["params"]["critic_out"]["kernel"]
                     critic_bias = params["params"]["critic_out"]["bias"]
 
-                    new_kernel = critic_kernel * scale
-                    new_bias = (old_sigma * critic_bias + old_mu - new_mu) / new_sigma
+                    scale = old_sigma / (new_sigma + 1e-8)
 
-                    params = params.copy(
-                        {
-                            "params": {
-                                **params["params"],
-                                "critic_out": {
-                                    **params["params"]["critic_out"],
-                                    "kernel": new_kernel,
-                                    "bias": new_bias,
-                                },
-                            }
-                        }
-                    )
+                    params["params"]["critic_out"]["kernel"] = critic_kernel * scale
+                    params["params"]["critic_out"]["bias"] = (
+                        old_sigma * critic_bias + old_mu - new_mu
+                    ) / (new_sigma + 1e-8)
+
+                    params = freeze(params)
 
                     train_state = train_state.replace(
                         params=params,
