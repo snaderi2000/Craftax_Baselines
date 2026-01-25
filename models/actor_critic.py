@@ -908,7 +908,7 @@ class ActorCriticImpala(nn.Module):
     layer_width: int = 2048
 
     @nn.compact
-    def __call__(self, obs):
+    def __call__(self, rnn_state, obs): # NEW: Added rnn_state
         # ------------------
         # Impala CNN encoder
         # ------------------
@@ -922,38 +922,127 @@ class ActorCriticImpala(nn.Module):
         z = x.reshape(x.shape[0], -1)
 
         # ------------------
-        # MFRL shared trunk
+        # NEW: RNN architecture (A.1.1)
         # ------------------
-        h = nn.LayerNorm()(z)
-        h = nn.Dense(self.layer_width, kernel_init=orthogonal(2))(h)
-        h = nn.relu(h)
+        # (a) Layer norm operator
+        rnn_in = nn.LayerNorm()(z)
+        # (b) Linearly mapped to 256-dimensional vector
+        rnn_in = nn.Dense(256, kernel_init=orthogonal(2))(rnn_in)
+        # (c) ReLU activation
+        rnn_in = nn.relu(rnn_in)
 
-        h = DenseResBlock(self.layer_width)(h)
-        h = DenseResBlock(self.layer_width)(h)
-
-        h = nn.LayerNorm()(h)
+        # RNN update: h_t, y_t = RNN([h_{t-1}, rnn_in])
+        # We use GRUCell for the recurrent update
+        new_rnn_state, y = nn.GRUCell(features=256)(rnn_state, rnn_in)
+        
+        # y_t goes through another ReLU activation
+        y = nn.relu(y)
 
         # ------------------
-        # Actor head
+        # NEW: Actor and critic shared input
         # ------------------
+        # Concatenate z_t (8192) and y_t (256) -> 8448 dimensions
+        shared_input = jnp.concatenate([y, z], axis=-1)
+
+        # ------------------
+        # Actor head (A.1.1)
+        # ------------------
+        # (a) Layer normalization
+        h_actor = nn.LayerNorm()(shared_input)
+        # (b) FC network (2048) -> ReLU
+        h_actor = nn.Dense(self.layer_width, kernel_init=orthogonal(2))(h_actor)
+        h_actor = nn.relu(h_actor)
+        # (c) Two dense residual blocks
+        h_actor = DenseResBlock(self.layer_width)(h_actor)
+        h_actor = DenseResBlock(self.layer_width)(h_actor)
+        # (c) ...whose output goes through a ReLU
+        h_actor = nn.relu(h_actor)
+        # (d) Last layer normalization
+        h_actor = nn.LayerNorm()(h_actor)
+        # (e) Final FC predicting action logits
         logits = nn.Dense(
             self.action_dim,
             kernel_init=orthogonal(0.01),
             bias_init=constant(0.0),
-        )(h)
+        )(h_actor)
         pi = distrax.Categorical(logits=logits)
 
         # ------------------
-        # Critic head
+        # Critic head (A.1.1)
         # ------------------
+        # (a) Layer normalization
+        h_critic = nn.LayerNorm()(shared_input)
+        # (b) FC network (2048) -> ReLU
+        h_critic = nn.Dense(self.layer_width, kernel_init=orthogonal(2))(h_critic)
+        h_critic = nn.relu(h_critic)
+        # (c) Two dense residual blocks
+        h_critic = DenseResBlock(self.layer_width)(h_critic)
+        h_critic = DenseResBlock(self.layer_width)(h_critic)
+        # (c) ...whose output goes through a ReLU
+        h_critic = nn.relu(h_critic)
+        # (d) Last layer normalization
+        h_critic = nn.LayerNorm()(h_critic)
+        # (e) Final layer predicting value
         value = nn.Dense(
             1,
             kernel_init=orthogonal(1.0),
             bias_init=constant(0.0),
             name="critic_out",
-        )(h)
+        )(h_critic)
 
-        return pi, jnp.squeeze(value, axis=-1)
+        return (pi, jnp.squeeze(value, axis=-1)), new_rnn_state # NEW: Returns new state
+
+# class ActorCriticImpala(nn.Module):
+#     action_dim: int
+#     layer_width: int = 2048
+
+#     @nn.compact
+#     def __call__(self, obs):
+#         # ------------------
+#         # Impala CNN encoder
+#         # ------------------
+#         x = obs.astype(jnp.float32)
+#         for ch in (64, 64, 128):
+#             x = ImpalaStack(ch)(x)
+
+#         x = nn.relu(x)
+
+#         # Flatten → z_t (8192)
+#         z = x.reshape(x.shape[0], -1)
+
+#         # ------------------
+#         # MFRL shared trunk
+#         # ------------------
+#         h = nn.LayerNorm()(z)
+#         h = nn.Dense(self.layer_width, kernel_init=orthogonal(2))(h)
+#         h = nn.relu(h)
+
+#         h = DenseResBlock(self.layer_width)(h)
+#         h = DenseResBlock(self.layer_width)(h)
+
+#         h = nn.LayerNorm()(h)
+
+#         # ------------------
+#         # Actor head
+#         # ------------------
+#         logits = nn.Dense(
+#             self.action_dim,
+#             kernel_init=orthogonal(0.01),
+#             bias_init=constant(0.0),
+#         )(h)
+#         pi = distrax.Categorical(logits=logits)
+
+#         # ------------------
+#         # Critic head
+#         # ------------------
+#         value = nn.Dense(
+#             1,
+#             kernel_init=orthogonal(1.0),
+#             bias_init=constant(0.0),
+#             name="critic_out",
+#         )(h)
+
+#         return pi, jnp.squeeze(value, axis=-1)
 
 
 # class ActorCriticImpala(nn.Module):

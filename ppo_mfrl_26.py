@@ -49,6 +49,7 @@ class Transition(NamedTuple):
     obs: jnp.ndarray
     next_obs: jnp.ndarray
     info: jnp.ndarray
+    rnn_state: jnp.ndarray      
 
 
 def make_train(config):
