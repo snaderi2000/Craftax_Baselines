@@ -66,72 +66,128 @@ class ScannedRNN(nn.Module):
         cell = nn.GRUCell(features=hidden_size)
         return cell.initialize_carry(jax.random.PRNGKey(0), (batch_size, hidden_size))
 
-
 class ActorCriticRNN(nn.Module):
-    action_dim: Sequence[int]
+    action_dim: int
     config: Dict
 
     @nn.compact
     def __call__(self, hidden, x):
-        obs, dones = x
+        obs, dones = x  # x is (Time, Batch, 63, 63, 3) and (Time, Batch)
 
+        # 1. Impala CNN Encoder (Paper Section A.1.1)
         x_enc = obs.astype(jnp.float32)
-
         for ch in (64, 64, 128):
             x_enc = ImpalaStack(ch)(x_enc)
-        
         x_enc = nn.relu(x_enc)
+        
+        # Flatten CNN output while preserving Time (T) and Batch (B) dimensions
+        # Paper calls this z_t (dimension 8192) [cite: 628]
+        z_t = x_enc.reshape((*x_enc.shape[:2], -1)) 
 
-        z = x_enc.reshape(x_enc.shape[0], x_enc.shape[1], -1)
+        # 2. RNN Bridge (Paper Section A.1.1)
+        # (a) Layer norm, (b) Linear map to 256, (c) ReLU [cite: 629]
+        rnn_input_features = nn.LayerNorm()(z_t)
+        rnn_input_features = nn.Dense(256, kernel_init=orthogonal(2))(rnn_input_features)
+        rnn_input_features = nn.relu(rnn_input_features)
 
-        rnn_in = nn.Dense(256, kernel_init=orthogonal(2))(z)
-        rnn_in = nn.relu(rnn_in)
+        # 3. RNN Update (Paper calls output y_t) [cite: 630]
+        # We pass the processed features and dones into the ScannedRNN
+        rnn_in = (rnn_input_features, dones)
+        hidden, y_t = ScannedRNN()(hidden, rnn_in)
+        y_t = nn.relu(y_t)
 
-        # embedding = nn.Dense(
-        #     self.config["LAYER_SIZE"],
-        #     kernel_init=orthogonal(np.sqrt(2)),
-        #     bias_init=constant(0.0),
-        # )(obs)
-        # embedding = nn.relu(embedding)
+        # 4. Concatenate z_t and y_t (Paper Section A.1.1)
+        # Resulting embedding is 8192 + 256 = 8448 dimensions 
+        shared_input = jnp.concatenate([y_t, z_t], axis=-1)
 
-        rnn_in = (embedding, dones)
-        hidden, embedding = ScannedRNN()(hidden, rnn_in)
+        # 5. Actor Head (Paper Section A.1.1) [cite: 632]
+        h_actor = nn.LayerNorm()(shared_input)
+        h_actor = nn.Dense(self.config["LAYER_SIZE"], kernel_init=orthogonal(2))(h_actor)
+        h_actor = nn.relu(h_actor)
+        h_actor = DenseResBlock(self.config["LAYER_SIZE"])(h_actor)
+        h_actor = DenseResBlock(self.config["LAYER_SIZE"])(h_actor)
+        h_actor = nn.relu(h_actor)
+        h_actor = nn.LayerNorm()(h_actor)
+        actor_logits = nn.Dense(self.action_dim, kernel_init=orthogonal(0.01))(h_actor)
+        pi = distrax.Categorical(logits=actor_logits)
 
-        actor_mean = nn.Dense(
-            self.config["LAYER_SIZE"],
-            kernel_init=orthogonal(2),
-            bias_init=constant(0.0),
-        )(embedding)
-        actor_mean = nn.relu(actor_mean)
-        actor_mean = nn.Dense(
-            self.config["LAYER_SIZE"],
-            kernel_init=orthogonal(2),
-            bias_init=constant(0.0),
-        )(actor_mean)
-        actor_mean = nn.relu(actor_mean)
-        actor_mean = nn.Dense(
-            self.action_dim, kernel_init=orthogonal(0.01), bias_init=constant(0.0)
-        )(actor_mean)
+        # 6. Critic Head (Paper Section A.1.1) [cite: 633]
+        h_critic = nn.LayerNorm()(shared_input)
+        h_critic = nn.Dense(self.config["LAYER_SIZE"], kernel_init=orthogonal(2))(h_critic)
+        h_critic = nn.relu(h_critic)
+        h_critic = DenseResBlock(self.config["LAYER_SIZE"])(h_critic)
+        h_critic = DenseResBlock(self.config["LAYER_SIZE"])(h_critic)
+        h_critic = nn.relu(h_critic)
+        h_critic = nn.LayerNorm()(h_critic)
+        critic_value = nn.Dense(1, kernel_init=orthogonal(1.0))(h_critic)
 
-        pi = distrax.Categorical(logits=actor_mean)
+        return hidden, pi, jnp.squeeze(critic_value, axis=-1)
 
-        critic = nn.Dense(
-            self.config["LAYER_SIZE"],
-            kernel_init=orthogonal(2),
-            bias_init=constant(0.0),
-        )(embedding)
-        critic = nn.relu(critic)
-        critic = nn.Dense(
-            self.config["LAYER_SIZE"],
-            kernel_init=orthogonal(2),
-            bias_init=constant(0.0),
-        )(critic)
-        critic = nn.relu(critic)
-        critic = nn.Dense(1, kernel_init=orthogonal(1.0), bias_init=constant(0.0))(
-            critic
-        )
+# class ActorCriticRNN(nn.Module):
+#     action_dim: Sequence[int]
+#     config: Dict
 
-        return hidden, pi, jnp.squeeze(critic, axis=-1)
+#     @nn.compact
+#     def __call__(self, hidden, x):
+#         obs, dones = x
+
+#         x_enc = obs.astype(jnp.float32)
+
+#         for ch in (64, 64, 128):
+#             x_enc = ImpalaStack(ch)(x_enc)
+        
+#         x_enc = nn.relu(x_enc)
+
+#         z_t = x_enc.reshape((*x_enc.shape[:2], -1))
+
+#         rnn_in = nn.Dense(256, kernel_init=orthogonal(2))(z)
+#         rnn_in = nn.relu(rnn_in)
+
+#         # embedding = nn.Dense(
+#         #     self.config["LAYER_SIZE"],
+#         #     kernel_init=orthogonal(np.sqrt(2)),
+#         #     bias_init=constant(0.0),
+#         # )(obs)
+#         # embedding = nn.relu(embedding)
+
+#         rnn_in = (embedding, dones)
+#         hidden, embedding = ScannedRNN()(hidden, rnn_in)
+
+#         actor_mean = nn.Dense(
+#             self.config["LAYER_SIZE"],
+#             kernel_init=orthogonal(2),
+#             bias_init=constant(0.0),
+#         )(embedding)
+#         actor_mean = nn.relu(actor_mean)
+#         actor_mean = nn.Dense(
+#             self.config["LAYER_SIZE"],
+#             kernel_init=orthogonal(2),
+#             bias_init=constant(0.0),
+#         )(actor_mean)
+#         actor_mean = nn.relu(actor_mean)
+#         actor_mean = nn.Dense(
+#             self.action_dim, kernel_init=orthogonal(0.01), bias_init=constant(0.0)
+#         )(actor_mean)
+
+#         pi = distrax.Categorical(logits=actor_mean)
+
+#         critic = nn.Dense(
+#             self.config["LAYER_SIZE"],
+#             kernel_init=orthogonal(2),
+#             bias_init=constant(0.0),
+#         )(embedding)
+#         critic = nn.relu(critic)
+#         critic = nn.Dense(
+#             self.config["LAYER_SIZE"],
+#             kernel_init=orthogonal(2),
+#             bias_init=constant(0.0),
+#         )(critic)
+#         critic = nn.relu(critic)
+#         critic = nn.Dense(1, kernel_init=orthogonal(1.0), bias_init=constant(0.0))(
+#             critic
+#         )
+
+#         return hidden, pi, jnp.squeeze(critic, axis=-1)
 
 
 class Transition(NamedTuple):
