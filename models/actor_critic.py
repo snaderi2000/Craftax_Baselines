@@ -909,8 +909,7 @@ class ActorCriticImpala(nn.Module):
 
         x = nn.relu(x)
 
-        embedding = x.reshape(x.shape[0], -1)
-        jax.debug.print("Impala embedding shape: {}", embedding.shape)
+        embedding = x.reshape(x.shape[0], -1) 
 
         actor_mean = nn.Dense(
             self.layer_width, kernel_init=orthogonal(2), bias_init=constant(0.0)

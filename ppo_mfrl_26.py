@@ -111,93 +111,7 @@ def make_train(config):
             tx=tx,
         )
 
-        # Exploration state
-        ex_state = {
-            "icm_encoder": None,
-            "icm_forward": None,
-            "icm_inverse": None,
-            "e3b_matrix": None,
-        }
-
-        if config["TRAIN_ICM"]:
-            obs_shape = env.observation_space(env_params).shape
-            assert len(obs_shape) == 1, "Only configured for 1D observations"
-            obs_shape = obs_shape[0]
-
-            # Encoder
-            icm_encoder_network = ICMEncoder(
-                num_layers=3,
-                output_dim=config["ICM_LATENT_SIZE"],
-                layer_size=config["ICM_LAYER_SIZE"],
-            )
-            rng, _rng = jax.random.split(rng)
-            icm_encoder_network_params = icm_encoder_network.init(
-                _rng, jnp.zeros((1, obs_shape))
-            )
-            tx = optax.chain(
-                optax.clip_by_global_norm(config["MAX_GRAD_NORM"]),
-                optax.adam(config["ICM_LR"], eps=1e-5),
-            )
-            ex_state["icm_encoder"] = TrainState.create(
-                apply_fn=icm_encoder_network.apply,
-                params=icm_encoder_network_params,
-                tx=tx,
-            )
-
-            # Forward
-            icm_forward_network = ICMForward(
-                num_layers=3,
-                output_dim=config["ICM_LATENT_SIZE"],
-                layer_size=config["ICM_LAYER_SIZE"],
-                num_actions=env.num_actions,
-            )
-            rng, _rng = jax.random.split(rng)
-            icm_forward_network_params = icm_forward_network.init(
-                _rng, jnp.zeros((1, config["ICM_LATENT_SIZE"])), jnp.zeros((1,))
-            )
-            tx = optax.chain(
-                optax.clip_by_global_norm(config["MAX_GRAD_NORM"]),
-                optax.adam(config["ICM_LR"], eps=1e-5),
-            )
-            ex_state["icm_forward"] = TrainState.create(
-                apply_fn=icm_forward_network.apply,
-                params=icm_forward_network_params,
-                tx=tx,
-            )
-
-            # Inverse
-            icm_inverse_network = ICMInverse(
-                num_layers=3,
-                output_dim=env.num_actions,
-                layer_size=config["ICM_LAYER_SIZE"],
-            )
-            rng, _rng = jax.random.split(rng)
-            icm_inverse_network_params = icm_inverse_network.init(
-                _rng,
-                jnp.zeros((1, config["ICM_LATENT_SIZE"])),
-                jnp.zeros((1, config["ICM_LATENT_SIZE"])),
-            )
-            tx = optax.chain(
-                optax.clip_by_global_norm(config["MAX_GRAD_NORM"]),
-                optax.adam(config["ICM_LR"], eps=1e-5),
-            )
-            ex_state["icm_inverse"] = TrainState.create(
-                apply_fn=icm_inverse_network.apply,
-                params=icm_inverse_network_params,
-                tx=tx,
-            )
-
-            if config["USE_E3B"]:
-                ex_state["e3b_matrix"] = (
-                    jnp.repeat(
-                        jnp.expand_dims(
-                            jnp.identity(config["ICM_LATENT_SIZE"]), axis=0
-                        ),
-                        config["NUM_ENVS"],
-                        axis=0,
-                    )
-                    / config["E3B_LAMBDA"]
-                )
+       
 
         # INIT ENV
         rng, _rng = jax.random.split(rng)
@@ -230,53 +144,7 @@ def make_train(config):
 
                 reward_i = jnp.zeros(config["NUM_ENVS"])
 
-                if config["TRAIN_ICM"]:
-                    latent_obs = ex_state["icm_encoder"].apply_fn(
-                        ex_state["icm_encoder"].params, last_obs
-                    )
-                    latent_next_obs = ex_state["icm_encoder"].apply_fn(
-                        ex_state["icm_encoder"].params, obsv
-                    )
-
-                    latent_next_obs_pred = ex_state["icm_forward"].apply_fn(
-                        ex_state["icm_forward"].params, latent_obs, action
-                    )
-                    error = (latent_next_obs - latent_next_obs_pred) * (
-                        1 - done[:, None]
-                    )
-                    mse = jnp.square(error).mean(axis=-1)
-
-                    reward_i = mse * config["ICM_REWARD_COEFF"]
-
-                    if config["USE_E3B"]:
-                        # Embedding is (NUM_ENVS, 128)
-                        # e3b_matrix is (NUM_ENVS, 128, 128)
-                        us = jax.vmap(jnp.matmul)(ex_state["e3b_matrix"], latent_obs)
-                        bs = jax.vmap(jnp.dot)(latent_obs, us)
-
-                        def update_c(c, b, u):
-                            return c - (1.0 / (1 + b)) * jnp.outer(u, u)
-
-                        updated_cs = jax.vmap(update_c)(ex_state["e3b_matrix"], bs, us)
-                        new_cs = (
-                            jnp.repeat(
-                                jnp.expand_dims(
-                                    jnp.identity(config["ICM_LATENT_SIZE"]), axis=0
-                                ),
-                                config["NUM_ENVS"],
-                                axis=0,
-                            )
-                            / config["E3B_LAMBDA"]
-                        )
-                        ex_state["e3b_matrix"] = jnp.where(
-                            done[:, None, None], new_cs, updated_cs
-                        )
-
-                        e3b_bonus = jnp.where(
-                            done, jnp.zeros((config["NUM_ENVS"],)), bs
-                        )
-
-                        reward_i = e3b_bonus * config["E3B_REWARD_COEFF"]
+                
 
                 reward = reward_e + reward_i
 
