@@ -900,7 +900,7 @@ class DenseResBlock(nn.Module):
     def __call__(self, x):
         residual = x
         x = nn.Dense(self.width, kernel_init=orthogonal(2))(x)
-        x = nn.relu(x)
+        #x = nn.relu(x)
         return x + residual
 
 class ActorCriticImpala(nn.Module):
