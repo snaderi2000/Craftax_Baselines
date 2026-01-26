@@ -305,6 +305,16 @@ def make_train(config):
     def train(rng):
         # INIT NETWORK
         network = ActorCriticRNN(env.action_space(env_params).n, config=config)
+        # This is where they are created!
+        network_params = network.init(_rng, init_hstate, init_x)
+
+        # --- INSERT PARAMETER COUNT HERE ---
+        param_count = sum(x.size for x in jax.tree_util.tree_leaves(network_params))
+        
+        # Use jax.debug.print if you want to see it during JIT, 
+        # or just a regular print if you aren't JIT-ing the init
+        print(f"TOTAL PARAMETERS: {param_count:,}")
+        # ------------------------------------
         rng, _rng = jax.random.split(rng)
         init_x = (
             jnp.zeros(
@@ -604,13 +614,7 @@ def run_ppo(config):
 
     train_jit = jax.jit(make_train(config))
     train_vmap = jax.vmap(train_jit)
-    # 1. Calculate total parameters
-    param_count = sum(x.size for x in jax.tree_util.tree_leaves(network_params))
 
-    # 2. Print it nicely
-    print(f"==================================================")
-    print(f"TOTAL PARAMETERS: {param_count:,}")
-    print(f"==================================================")
 
     t0 = time.time()
     out = train_vmap(rngs)
