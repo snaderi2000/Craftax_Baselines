@@ -33,6 +33,7 @@ from logz.batch_logging import create_log_dict, batch_log
 
 from craftax.craftax_env import make_craftax_env_from_name
 
+
 #from models.actor_critic import ImpalaStack, DenseResBlock
 
 # Code adapted from the original implementation made by Chris Lu
@@ -40,17 +41,22 @@ from craftax.craftax_env import make_craftax_env_from_name
 
 class ImpalaResBlock(nn.Module):
     channels: int
-
+    groups: int = 32
     @nn.compact
     def __call__(self, x):
         residual = x
         # (a) ReLU
         x = nn.relu(x)
+        x = nn.GroupNorm(
+            num_groups=self.groups,
+            epsilon=1e-5
+        )(x) 
         # (b) Conv 3x3 stride 1
         x = nn.Conv(self.channels, (3, 3), strides=(1, 1), padding="SAME")(x)
         return x + residual
 class ImpalaStack(nn.Module):
     channels: int
+    groups: int = 32
 
     @nn.compact
     def __call__(self, x):
