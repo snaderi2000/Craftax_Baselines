@@ -47,12 +47,22 @@ class ImpalaResBlock(nn.Module):
         residual = x
         # (a) ReLU
         x = nn.relu(x)
+        
+
+        # GroupNorm (HERE)
         x = nn.GroupNorm(
             num_groups=self.groups,
             epsilon=1e-5
-        )(x) 
-        # (b) Conv 3x3 stride 1
-        x = nn.Conv(self.channels, (3, 3), strides=(1, 1), padding="SAME")(x)
+        )(x)
+
+        # Conv
+        x = nn.Conv(
+            self.channels,
+            kernel_size=(3, 3),
+            strides=(1, 1),
+            padding="SAME",
+        )(x)
+
         return x + residual
 class ImpalaStack(nn.Module):
     channels: int
@@ -60,12 +70,13 @@ class ImpalaStack(nn.Module):
 
     @nn.compact
     def __call__(self, x):
+        # (b) Conv 3x3 stride 1
+        x = nn.Conv(self.channels, (3, 3), strides=(1, 1), padding="SAME")(x)
+
         x = nn.GroupNorm(
             num_groups=self.groups,
             epsilon=1e-5
         )(x) 
-        # (b) Conv 3x3 stride 1
-        x = nn.Conv(self.channels, (3, 3), strides=(1, 1), padding="SAME")(x)
         # (c) MaxPool 3x3 stride 2
         x = nn.max_pool(x, window_shape=(3, 3), strides=(2, 2), padding="SAME")
         # (d) Two ResNet blocks
