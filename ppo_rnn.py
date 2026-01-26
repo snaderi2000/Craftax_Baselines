@@ -305,6 +305,7 @@ def make_train(config):
     def train(rng):
         # INIT NETWORK
         network = ActorCriticRNN(env.action_space(env_params).n, config=config)
+        rng, _rng = jax.random.split(rng)
         # This is where they are created!
         network_params = network.init(_rng, init_hstate, init_x)
 
@@ -315,7 +316,7 @@ def make_train(config):
         # or just a regular print if you aren't JIT-ing the init
         print(f"TOTAL PARAMETERS: {param_count:,}")
         # ------------------------------------
-        rng, _rng = jax.random.split(rng)
+        
         init_x = (
             jnp.zeros(
                 (1, config["NUM_ENVS"], 63, 63, 3)
