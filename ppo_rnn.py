@@ -54,6 +54,10 @@ class ImpalaStack(nn.Module):
 
     @nn.compact
     def __call__(self, x):
+        x = nn.GroupNorm(
+            num_groups=self.groups,
+            epsilon=1e-5
+        )(x) 
         # (b) Conv 3x3 stride 1
         x = nn.Conv(self.channels, (3, 3), strides=(1, 1), padding="SAME")(x)
         # (c) MaxPool 3x3 stride 2
@@ -70,7 +74,6 @@ class DenseResBlock(nn.Module):
     def __call__(self, x):
         residual = x
         x = nn.Dense(self.width, kernel_init=orthogonal(2))(x)
-        #x = nn.relu(x)
         return x + residual
 class ScannedRNN(nn.Module):
     @functools.partial(
@@ -111,6 +114,7 @@ class ActorCriticRNN(nn.Module):
         x_enc = obs.astype(jnp.float32)
         for ch in (64, 64, 128):
             x_enc = ImpalaStack(ch)(x_enc)
+            #x_enc = nn.LayerNorm()(x_enc)
         x_enc = nn.relu(x_enc)
         
         # Flatten CNN output while preserving Time (T) and Batch (B) dimensions
