@@ -33,12 +33,45 @@ from logz.batch_logging import create_log_dict, batch_log
 
 from craftax.craftax_env import make_craftax_env_from_name
 
-from models.actor_critic import ImpalaStack, DenseResBlock
+#from models.actor_critic import ImpalaStack, DenseResBlock
 
 # Code adapted from the original implementation made by Chris Lu
 # Original code located at https://github.com/luchris429/purejaxrl
 
+class ImpalaResBlock(nn.Module):
+    channels: int
 
+    @nn.compact
+    def __call__(self, x):
+        residual = x
+        # (a) ReLU
+        x = nn.relu(x)
+        # (b) Conv 3x3 stride 1
+        x = nn.Conv(self.channels, (3, 3), strides=(1, 1), padding="SAME")(x)
+        return x + residual
+class ImpalaStack(nn.Module):
+    channels: int
+
+    @nn.compact
+    def __call__(self, x):
+        # (b) Conv 3x3 stride 1
+        x = nn.Conv(self.channels, (3, 3), strides=(1, 1), padding="SAME")(x)
+        # (c) MaxPool 3x3 stride 2
+        x = nn.max_pool(x, window_shape=(3, 3), strides=(2, 2), padding="SAME")
+        # (d) Two ResNet blocks
+        x = ImpalaResBlock(self.channels)(x)
+        x = ImpalaResBlock(self.channels)(x)
+        return x
+
+class DenseResBlock(nn.Module):
+    width: int
+
+    @nn.compact
+    def __call__(self, x):
+        residual = x
+        x = nn.Dense(self.width, kernel_init=orthogonal(2))(x)
+        #x = nn.relu(x)
+        return x + residual
 class ScannedRNN(nn.Module):
     @functools.partial(
         nn.scan,
@@ -571,6 +604,13 @@ def run_ppo(config):
 
     train_jit = jax.jit(make_train(config))
     train_vmap = jax.vmap(train_jit)
+    # 1. Calculate total parameters
+    param_count = sum(x.size for x in jax.tree_util.tree_leaves(network_params))
+
+    # 2. Print it nicely
+    print(f"==================================================")
+    print(f"TOTAL PARAMETERS: {param_count:,}")
+    print(f"==================================================")
 
     t0 = time.time()
     out = train_vmap(rngs)
