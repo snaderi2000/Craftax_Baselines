@@ -306,16 +306,6 @@ def make_train(config):
         # INIT NETWORK
         network = ActorCriticRNN(env.action_space(env_params).n, config=config)
         rng, _rng = jax.random.split(rng)
-        # This is where they are created!
-        network_params = network.init(_rng, init_hstate, init_x)
-
-        # --- INSERT PARAMETER COUNT HERE ---
-        param_count = sum(x.size for x in jax.tree_util.tree_leaves(network_params))
-        
-        # Use jax.debug.print if you want to see it during JIT, 
-        # or just a regular print if you aren't JIT-ing the init
-        print(f"TOTAL PARAMETERS: {param_count:,}")
-        # ------------------------------------
         
         init_x = (
             jnp.zeros(
@@ -327,6 +317,11 @@ def make_train(config):
             config["NUM_ENVS"], 256 #config["LAYER_SIZE"]
         )
         network_params = network.init(_rng, init_hstate, init_x)
+
+        # Print parameter size
+        param_count = sum(x.size for x in jax.tree.leaves(network_params))
+        print(f"Model parameter count: {param_count:,}")
+
         if config["ANNEAL_LR"]:
             tx = optax.chain(
                 optax.clip_by_global_norm(config["MAX_GRAD_NORM"]),
