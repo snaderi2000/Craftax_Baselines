@@ -77,6 +77,20 @@ def main():
             print(f"Episode finished at step {i}")
             break
 
+    achievements_completed = [
+    k for k, v in info.items() 
+    if k.startswith("Achievements/") and v > 0
+    ]
+
+    num_achievements = len(achievements_completed)
+
+    print("-" * 30)
+    print(f"ROLLOUT SUMMARY (Seed: {args.seed})")
+    print(f"Steps survived: {i+1}")
+    print(f"Total Achievements: {num_achievements}")
+    print(f"List: {', '.join([a.split('/')[-1] for a in achievements_completed])}")
+    print("-" * 30)
+
     # 6. Save
     output_name = f"vis_{env_name}_s{args.seed}_t{args.timestep}.mp4"
     imageio.mimsave(output_name, frames, fps=15)
