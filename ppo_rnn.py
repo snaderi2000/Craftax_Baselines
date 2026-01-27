@@ -187,28 +187,6 @@ class ActorCriticRNN(nn.Module):
 
         return hidden, pi, jnp.squeeze(critic_value, axis=-1)
 
-        # # 5. Actor Head (Paper Section A.1.1) [cite: 632]
-        # h_actor = nn.LayerNorm()(shared_input)
-        # h_actor = nn.Dense(self.config["LAYER_SIZE"], kernel_init=orthogonal(2))(h_actor)
-        # h_actor = nn.relu(h_actor)
-        # h_actor = DenseResBlock(self.config["LAYER_SIZE"])(h_actor)
-        # h_actor = DenseResBlock(self.config["LAYER_SIZE"])(h_actor)
-        # h_actor = nn.relu(h_actor)
-        # h_actor = nn.LayerNorm()(h_actor)
-        # actor_logits = nn.Dense(self.action_dim, kernel_init=orthogonal(0.01))(h_actor)
-        # pi = distrax.Categorical(logits=actor_logits)
-
-        # # 6. Critic Head (Paper Section A.1.1) [cite: 633]
-        # h_critic = nn.LayerNorm()(shared_input)
-        # h_critic = nn.Dense(self.config["LAYER_SIZE"], kernel_init=orthogonal(2))(h_critic)
-        # h_critic = nn.relu(h_critic)
-        # h_critic = DenseResBlock(self.config["LAYER_SIZE"])(h_critic)
-        # h_critic = DenseResBlock(self.config["LAYER_SIZE"])(h_critic)
-        # h_critic = nn.relu(h_critic)
-        # h_critic = nn.LayerNorm()(h_critic)
-        # critic_value = nn.Dense(1, kernel_init=orthogonal(1.0))(h_critic)
-
-        return hidden, pi, jnp.squeeze(critic_value, axis=-1)
 
 # class ActorCriticRNN(nn.Module):
 #     action_dim: Sequence[int]
