@@ -40,7 +40,7 @@ def main():
         # Inference (Actor + Critic)
         obs_in = last_obs[:, None, :] 
         done_in = done_mask[:, None, None]
-        new_hstate, pi, value = network.apply(trained_params, hstate, (obs_in, done_in))
+        new_hstate, pi, value = network.apply(trained_params, hstate[None, :], (obs_in, done_in))
         new_hstate = new_hstate.squeeze(0)
         
         # Action Sampling
