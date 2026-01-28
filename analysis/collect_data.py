@@ -72,6 +72,11 @@ def main():
     reset_rngs = jax.random.split(reset_rng, args.num_episodes)
     obs, env_state = jax.vmap(env.reset, in_axes=(0, None))(reset_rngs, env_params)
     init_hstate = ScannedRNN.initialize_carry(args.num_episodes, 256)
+
+    if init_hstate.ndim == 2:
+        init_hstate = init_hstate[None, :]
+
+    init_hstate = init_hstate.squeeze(0) if init_hstate.ndim == 3 else init_hstate
     
     init_carry = (init_hstate, env_state, obs, rng, jnp.zeros(args.num_episodes, dtype=bool))
     
