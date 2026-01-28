@@ -36,11 +36,16 @@ def main():
     # 3. Define the Vmapped Scan Step
     def policy_step(carry, _):
         hstate, env_state, last_obs, rng, done_mask = carry
+
+        jax.debug.print("DEBUG | hstate in: {x}", x=hstate.shape)
         
         # Inference (Actor + Critic)
         obs_in = last_obs[:, None, :] 
         done_in = done_mask[:, None, None]
         new_hstate, pi, value = network.apply(trained_params, hstate, (obs_in, done_in))
+
+        jax.debug.print("DEBUG | hstate out: {x}", x=new_hstate.shape)
+        new_hstate = new_hstate.squeeze(0)
         
         # Action Sampling
         rng, action_rng = jax.random.split(rng)
@@ -78,14 +83,6 @@ def main():
     init_hstate = init_hstate.squeeze(0) if init_hstate.ndim == 3 else init_hstate
     
     init_carry = (init_hstate, env_state, obs, rng, jnp.zeros(args.num_episodes, dtype=bool))
-    # --- DEBUG START ---
-    obs_test = obs[:, None, :] 
-    done_test = jnp.zeros((args.num_episodes, 1, 1))
-    h_out, pi_out, v_out = network.apply(trained_params, init_hstate, (obs_test, done_test))
-
-    print(f"DEBUG | Input hstate shape:  {init_hstate.shape}")
-    print(f"DEBUG | Output hstate shape: {h_out.shape}")
-    # --- DEBUG END --- 
     print(f"Collecting {args.num_episodes} episodes...")
     _, trajectory = jax.lax.scan(policy_step, init_carry, None, length=args.max_steps)
 
