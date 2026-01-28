@@ -78,7 +78,14 @@ def main():
     init_hstate = init_hstate.squeeze(0) if init_hstate.ndim == 3 else init_hstate
     
     init_carry = (init_hstate, env_state, obs, rng, jnp.zeros(args.num_episodes, dtype=bool))
-    
+    # --- DEBUG START ---
+    obs_test = obs[:, None, :] 
+    done_test = jnp.zeros((args.num_episodes, 1, 1))
+    h_out, pi_out, v_out = network.apply(trained_params, init_hstate, (obs_test, done_test))
+
+    print(f"DEBUG | Input hstate shape:  {init_hstate.shape}")
+    print(f"DEBUG | Output hstate shape: {h_out.shape}")
+    # --- DEBUG END --- 
     print(f"Collecting {args.num_episodes} episodes...")
     _, trajectory = jax.lax.scan(policy_step, init_carry, None, length=args.max_steps)
 
