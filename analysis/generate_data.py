@@ -23,10 +23,6 @@ from tqdm import tqdm
 from ppo_rnn import ActorCriticRNN, ScannedRNN
 from craftax.craftax_env import make_craftax_env_from_name
 
-# For flashbax vault
-import flashbax as fbx
-from flashbax.vault import Vault
-from flashbax.utils import get_tree_shape_prefix
 
 
 def load_trained_model(run_path: str, timestep: int):
@@ -171,107 +167,33 @@ def generate_episodes_parallel(
     }, episode_lengths
 
 
-def save_to_vault(data: dict, output_dir: str, vault_name: str = "craftax_replay_buffer"):
-    """Save collected data to a flashbax Vault."""
+def save_data(data: dict, output_dir: str):
+    """Save collected data to NPZ format (avoids GPU memory issues with flashbax)."""
     os.makedirs(output_dir, exist_ok=True)
     
-    # Convert to jax arrays with proper structure for flashbax
-    experience = {
-        "obs": jnp.array(data["obs"]),          # (B, T, 63, 63, 3) float32
-        "actions": jnp.array(data["actions"]),   # (B, T) int32
-        "rewards": jnp.array(data["rewards"]),   # (B, T) float32
-        "dones": jnp.array(data["dones"]),       # (B, T) bool
-    }
-    
-    B, T = experience["actions"].shape
-    
     print(f"\nData shapes:")
-    for k, v in experience.items():
+    for k, v in data.items():
         print(f"  {k}: {v.shape} ({v.dtype})")
     
     # Calculate memory usage
-    total_bytes = sum(v.nbytes for v in experience.values())
+    total_bytes = sum(v.nbytes for v in data.values())
     print(f"\nTotal data size: {total_bytes / 1e9:.2f} GB")
     
-    # Create a trajectory buffer with matching structure
-    # We create a buffer that can hold all our data
-    buffer = fbx.make_trajectory_buffer(
-        max_length_time_axis=T,
-        min_length_time_axis=1,
-        add_batch_size=B,
-        sample_batch_size=1,
-        sample_sequence_length=1,
-        period=1,
-    )
-    
-    # Create example item for initialization (single timestep per env)
-    example_item = {
-        "obs": jnp.zeros((B, 63, 63, 3), dtype=jnp.float32),
-        "actions": jnp.zeros((B,), dtype=jnp.int32),
-        "rewards": jnp.zeros((B,), dtype=jnp.float32),
-        "dones": jnp.zeros((B,), dtype=jnp.bool_),
-    }
-    
-    # Initialize buffer state
-    buffer_state = buffer.init(example_item)
-    
-    # Add all timesteps to buffer
-    print("\nAdding data to buffer...")
-    for t in tqdm(range(T), desc="Adding timesteps"):
-        timestep_data = {
-            "obs": experience["obs"][:, t],
-            "actions": experience["actions"][:, t],
-            "rewards": experience["rewards"][:, t],
-            "dones": experience["dones"][:, t],
-        }
-        buffer_state = buffer.add(buffer_state, timestep_data)
-    
-    # Setup vault paths
-    vault_uid = os.path.basename(output_dir)
-    rel_dir = os.path.dirname(os.path.abspath(output_dir))
-    if not rel_dir:
-        rel_dir = "."
-    
-    print(f"\nSaving to vault:")
-    print(f"  Name: {vault_name}")
-    print(f"  UID: {vault_uid}")
-    print(f"  Directory: {rel_dir}")
-    
-    # Create vault with experience structure
-    vault = Vault(
-        vault_name=vault_name,
-        experience_structure=buffer_state.experience,
-        vault_uid=vault_uid,
-        rel_dir=rel_dir,
-    )
-    
-    # Write buffer to vault
-    T_buf = get_tree_shape_prefix(buffer_state.experience, n_axes=2)[1]
-    k = int(buffer_state.current_index)
-    
-    if bool(buffer_state.is_full):
-        n1 = vault.write(buffer_state, source_interval=(k, T_buf), dest_start=vault.vault_index)
-        n2 = vault.write(buffer_state, source_interval=(0, k), dest_start=vault.vault_index)
-        n_written = n1 + n2
-    else:
-        n_written = vault.write(buffer_state, source_interval=(0, k), dest_start=vault.vault_index)
-    
-    print(f"✅ Vault created successfully! Wrote {n_written} timesteps.")
-    return vault
-
-
-def save_to_npz(data: dict, output_path: str):
-    """Alternative: save to compressed NPZ file."""
-    print(f"\nSaving to NPZ: {output_path}")
+    # Save as NPZ (compressed)
+    npz_path = os.path.join(output_dir, "replay_data.npz")
+    print(f"\nSaving to: {npz_path}")
     np.savez_compressed(
-        output_path,
+        npz_path,
         obs=data["obs"],
         actions=data["actions"],
         rewards=data["rewards"],
         dones=data["dones"],
     )
-    file_size = os.path.getsize(output_path) / 1e9
+    
+    file_size = os.path.getsize(npz_path) / 1e9
     print(f"✅ Saved! File size: {file_size:.2f} GB")
+    
+    return npz_path
 
 
 def main():
@@ -287,9 +209,7 @@ def main():
     parser.add_argument("--seed", type=int, default=42,
                         help="Random seed for reproducibility")
     parser.add_argument("--output_dir", type=str, default="./replay_data/default_buffer",
-                        help="Output directory for the vault")
-    parser.add_argument("--save_npz", action="store_true",
-                        help="Also save as NPZ file (for debugging)")
+                        help="Output directory for the data")
     args = parser.parse_args()
     
     print("=" * 60)
@@ -325,11 +245,7 @@ def main():
     
     # Save data
     print("\n[3/3] Saving data...")
-    vault = save_to_vault(data, args.output_dir)
-    
-    if args.save_npz:
-        npz_path = os.path.join(args.output_dir, "data.npz")
-        save_to_npz(data, npz_path)
+    npz_path = save_data(data, args.output_dir)
     
     # Save metadata
     metadata = {
@@ -349,7 +265,7 @@ def main():
     
     print("\n" + "=" * 60)
     print("✅ Data generation complete!")
-    print(f"   Vault location: {args.output_dir}")
+    print(f"   Data location: {npz_path}")
     print("=" * 60)
 
 
