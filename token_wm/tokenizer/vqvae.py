@@ -208,6 +208,9 @@ class VQVAE(nn.Module):
         
         # Decode
         x_recon = self.decoder(z_q, training=training)
+
+        if x_recon.shape[1] != x.shape[1] or x_recon.shape[2] != x.shape[2]:
+            x_recon = x_recon[:, :x.shape[1], :x.shape[2], :]
         
         return x_recon, loss_codebook, loss_commitment, indices
 
