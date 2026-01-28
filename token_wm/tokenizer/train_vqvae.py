@@ -11,7 +11,7 @@ from tqdm import tqdm
 from vqvae import VQVAE
 
 # --- Configuration ---
-DATA_PATH = "./replay_data/my_buffer/replay_data.npz"
+DATA_PATH = "../../replay_data/my_buffer/replay_data.npz"
 BATCH_SIZE = 128
 LEARNING_RATE = 1e-3  # Paper uses 0.001 (Source 694)
 EPOCHS = 5            # Adjust as needed (5 is good for a quick test)
