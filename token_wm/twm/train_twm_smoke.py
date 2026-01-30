@@ -231,6 +231,85 @@ def get_batch(obs_tokens, actions, rewards, dones, ep_lengths, batch_size, seq_l
 
 # --- 3. Rollout & Viz ---
 
+def teacher_force_test(state, obs_tokens, actions, test_idx, test_start, test_len):
+    """
+    Teacher forcing test: Feed ground truth tokens and check next-token prediction accuracy.
+    This isolates model quality from autoregressive generation errors.
+    """
+    model = WorldModel(
+        obs_vocab_size=VOCAB_SIZE, 
+        act_vocab_size=ACT_VOCAB_SIZE, 
+        config=TransformerConfig(TOKENS_PER_BLOCK, MAX_BLOCKS, 'causal', NUM_LAYERS, NUM_HEADS, EMBED_DIM, EMBED_PDROP, RESID_PDROP, ATTN_PDROP)
+    )
+    
+    # Get a sequence of ground truth data
+    gt_obs = obs_tokens[test_idx, test_start:test_start+test_len+1]  # (T+1, 64)
+    gt_act = actions[test_idx, test_start:test_start+test_len]       # (T,)
+    
+    # Build the full input sequence (interleaved obs + actions)
+    # [obs_0, act_0, obs_1, act_1, ..., obs_T-1, act_T-1]
+    T = test_len
+    tokens_list = []
+    for t in range(T):
+        tokens_list.append(gt_obs[t])  # 64 obs tokens
+        tokens_list.append(np.array([gt_act[t]]))  # 1 action token
+    
+    input_tokens = np.concatenate(tokens_list)  # (T * 65,)
+    input_tokens = jnp.array(input_tokens).reshape(1, -1)  # (1, T*65)
+    
+    # Forward pass (no cache, full sequence)
+    output = model.apply(state.params, input_tokens, deterministic=True)
+    
+    # Get observation logits
+    obs_logits = output.logits_observations  # (1, T*65, 512)
+    
+    # Build target sequence (shifted by 1)
+    # Target for position i is the token at position i+1
+    target_list = []
+    for t in range(T):
+        if t < T - 1:
+            # Next obs tokens
+            target_list.append(gt_obs[t+1])  # 64 tokens
+        else:
+            # Last timestep - we predict obs_T (which we have)
+            target_list.append(gt_obs[t+1])
+        # After action, we predict first obs token of next timestep
+        # But this is complex with masking, so simplify:
+    
+    # Simpler: just check obs token predictions
+    # For each obs position i in block, logits[i] predicts obs[i+1]
+    
+    # Check accuracy for first few blocks
+    correct = 0
+    total = 0
+    
+    print("  Checking next-token prediction accuracy (teacher forcing):")
+    
+    for t in range(min(3, T-1)):  # Check first 3 timesteps
+        block_start = t * 65
+        
+        # For obs positions 0-62 in this block, check if we predict next obs token
+        for i in range(63):  # positions 0-62
+            pos = block_start + i
+            pred = int(jnp.argmax(obs_logits[0, pos, :]))
+            target = int(gt_obs[t, i+1])  # next obs token in same frame
+            if pred == target:
+                correct += 1
+            total += 1
+        
+        # After action (position 64), we predict first obs of next frame
+        action_pos = block_start + 64
+        pred_next_frame = int(jnp.argmax(obs_logits[0, action_pos, :]))
+        target_next_frame = int(gt_obs[t+1, 0])  # first obs token of next frame
+        
+        print(f"    Block {t}: After action, predict obs[0] of next frame: pred={pred_next_frame}, target={target_next_frame}, match={pred_next_frame==target_next_frame}")
+    
+    accuracy = 100 * correct / total if total > 0 else 0
+    print(f"  Within-frame next-token accuracy: {correct}/{total} = {accuracy:.1f}%")
+    print(f"  (If this is low, model needs more training or data)")
+    print(f"  (If this is high but generation is bad, issue is compounding errors)")
+
+
 def run_rollout(state, initial_obs_tokens, action_sequence, debug=True, temperature=1.0, use_sampling=True):
     """
     Autoregressive generation.
@@ -519,8 +598,14 @@ def main():
     data = np.load(DATA_PATH)
     gt_pixels = data['obs'][test_idx:test_idx+1, test_start+1:test_start+1+test_len] # Next frames
     
+    # === TEACHER FORCING TEST ===
+    # This tests if the model can predict correctly given GROUND TRUTH context
+    print("\n--- Teacher Forcing Test (Model Quality Check) ---")
+    teacher_force_test(state, obs_tokens, actions, test_idx, test_start, test_len)
+    
     # Run Imagination with temperature sampling for diversity
     # Lower temperature (0.5-0.8) = more focused, Higher (1.0-1.5) = more diverse
+    print("\n--- Autoregressive Generation ---")
     imagined_tokens = run_rollout(state, jnp.array(start_obs_tokens), jnp.array(action_seq), 
                                   temperature=0.8, use_sampling=True)
     
