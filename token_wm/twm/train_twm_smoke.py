@@ -27,7 +27,7 @@ OUTPUT_DIR = "twm_results"
 # Paper Config
 BATCH_SIZE = 32          # Smaller for smoke test
 SEQ_LEN = 20             # T_WM = 20 steps
-EPOCHS = 50               # Fast training to verify logic
+EPOCHS = 1000               # Fast training to verify logic
 LR = 1e-3
 TOKENS_PER_BLOCK = 65    # 64 patches + 1 action
 MAX_BLOCKS = SEQ_LEN     # 20 steps
