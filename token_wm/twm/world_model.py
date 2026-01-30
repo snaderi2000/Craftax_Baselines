@@ -82,6 +82,9 @@ class WorldModel(nn.Module):
         
         # Add Learned Positional Embeddings
         pos_indices = jnp.arange(T) + prev_steps
+        print("pos_indices.max():", pos_indices.max())
+        print("pos_emb.num_embeddings:", self.pos_emb.num_embeddings)
+
         x = x + self.pos_emb(pos_indices)
         
         # 2. Transformer Backbone
@@ -127,6 +130,10 @@ class WorldModel(nn.Module):
         B, T, _ = obs_tokens.shape
         tokens_block = jnp.concatenate([obs_tokens, act_tokens], axis=2)
         tokens_flat = tokens_block.reshape(B, -1) # [B, T*65]
+
+        print("tokens_flat.shape:", tokens_flat.shape)
+        print("config.max_tokens:", self.config.max_tokens)
+
         
         # 2. Forward Pass (using bound self)
         # We pass the flattened tokens.
