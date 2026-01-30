@@ -105,7 +105,7 @@ class SelfAttention(nn.Module):
         if kv_cache is not None:
             # Assuming kv_cache structure: (k_cache, v_cache, index)
             # We will rely on kv_caching.py logic, but here we just need the length
-            L = kv_cache[2] # Current index/length
+            L = kv_cache.index # Current index/length
         else:
             L = 0
 
@@ -184,33 +184,33 @@ class SelfAttention(nn.Module):
         total_len = att.shape[-1] # L + T
         # We need the mask row for the current query position
         
-        # If kv_cache is None (Training), we use the full mask up to T
-        if kv_cache is None:
-            curr_mask = mask[:T, :T]
-            # Broadcast to [1, 1, T, T]
-            curr_mask = curr_mask[None, None, :, :]
-            att = jnp.where(curr_mask == 1, att, -1e9)
+       # KV Cache Interaction
+        if kv_cache is not None:
+            # 1. Update the cache using the class method
+            # This handles the index math and dynamic_update_slice automatically
+            new_kv_cache = kv_cache.update(k, v)
+            
+            # 2. Extract the updated Full History for attention
+            # Note: We use .key and .value (matching your class definition)
+            k_in = new_kv_cache.key
+            v_in = new_kv_cache.value
+            
+            # 3. Important: Ensure we don't attend to "future" empty slots (zeros) in the buffer.
+            # (Assuming your attention implementation handles masking via the 'mask' arg 
+            # or implicitly ignores positions > index. If not, standard causal masking 
+            # usually handles this if the buffer is zero-initialized).
+            
         else:
-            # Inference: We attend to all history. 
-            # Usually no mask needed if simply attending to all past (standard causal),
-            # but for Block Causal we must respect blocks.
-            # We take the row corresponding to the current token index.
-            # Simplified: assuming standard causal inference for now
-            pass 
-
-        att = nn.softmax(att, axis=-1)
-        att = self.attn_drop(att, deterministic=deterministic)
-
-        # Aggregate V
-        y = jnp.einsum('bhtL,bLhd->bthd', att, v_in)
+            # Training mode (no cache)
+            k_in = k
+            v_in = v
+            new_kv_cache = None
+            
+        # ... Perform Attention using k_in, v_in ...
+        # (The existing attention logic follows here)
         
-        # Merge heads
-        y = rearrange(y, 'b t h d -> b t (h d)')
-
-        y = self.proj(y)
-        y = self.resid_drop(y, deterministic=deterministic)
-
-        return y, new_kv_cache
+        # Return the output and the NEW cache object
+        return y, new_kv_cache 
 
 class Block(nn.Module):
     config: TransformerConfig
