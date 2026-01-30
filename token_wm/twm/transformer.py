@@ -88,129 +88,132 @@ class SelfAttention(nn.Module):
 
         self.rope = RotaryEmbedding(self.head_dim)
 
-        # Create masks
+        # Create masks (unchanged)
         self.causal_mask = jnp.tril(jnp.ones((self.config.max_tokens, self.config.max_tokens)))
-        
-        # Create block causal mask logic
-        # 1. Create block diagonal mask
         ones_block = jnp.ones((self.config.tokens_per_block, self.config.tokens_per_block))
         block_diag = jax.scipy.linalg.block_diag(*[ones_block for _ in range(self.config.max_blocks)])
-        # 2. Combine with causal mask (max)
         self.block_causal_mask = jnp.maximum(self.causal_mask, block_diag)
 
     def __call__(self, x, kv_cache=None, deterministic=True):
         B, T, C = x.shape
         
-        # Determine L (length of past cache)
-        if kv_cache is not None:
-            # Assuming kv_cache structure: (k_cache, v_cache, index)
-            # We will rely on kv_caching.py logic, but here we just need the length
-            L = kv_cache.index # Current index/length
-        else:
-            L = 0
-
-        # Project Q, K, V
+        # 1. Project Q, K, V
         q = self.query(x)
         k = self.key(x)
         v = self.value(x)
 
-        # Reshape heads: [B, T, num_heads, head_dim]
+        # 2. Reshape heads: [B, T, num_heads, head_dim]
         q = rearrange(q, 'b t (h d) -> b t h d', h=self.config.num_heads)
         k = rearrange(k, 'b t (h d) -> b t h d', h=self.config.num_heads)
         v = rearrange(v, 'b t (h d) -> b t h d', h=self.config.num_heads)
 
-        # Apply RoPE (Rotary Positional Embeddings)
+        # 3. Apply RoPE
         q = self.rope(q)
         k = self.rope(k)
 
-        # KV Cache Interaction
+        # 4. KV Cache Interaction
         if kv_cache is not None:
-            # We assume a helper function 'update' exists on the cache object
-            # or we return the new k, v to be updated externally.
-            # In JAX/Flax, we typically return the new cache state.
-            k_cache, v_cache, update_idx = kv_cache
-            
-            # Update cache at correct indices
-            # This logic will be strictly defined in kv_caching.py, 
-            # here we perform the 'update' logically for the attention computation
-            
-            # For simplicity in this file, we assume we act on the FULL projected K, V
-            # effectively concatenating past + present for attention
-            
-            # NOTE: In JAX, we usually use dynamic_update_slice
-            # We will handle the explicit update in the kv_caching module return,
-            # but for *calculation*, we need the full sequence [Past, Current]
-            
-            # If doing inference (T=1), we concat with past
-            # If doing training (cache is usually None), we use just x
-            
-            # Simplified for now: assume x includes everything or cache is handled
-            # If using cache for AR generation:
-            start_idx = update_idx
-            
-            # Update the cache arrays (functional update)
-            k_cache = jax.lax.dynamic_update_slice(k_cache, k, (0, start_idx, 0, 0))
-            v_cache = jax.lax.dynamic_update_slice(v_cache, v, (0, start_idx, 0, 0))
-            
-            # Use the full cache for attention
-            k_in = k_cache
-            v_in = v_cache
-            
-            # Update the index for next time
-            new_idx = start_idx + T
-            new_kv_cache = (k_cache, v_cache, new_idx)
-        else:
-            k_in = k
-            v_in = v
-            new_kv_cache = None
-
-        # Compute Attention
-        # q: [B, T, h, d]
-        # k_in: [B, L+T, h, d]
-        # Attn: [B, h, T, L+T]
-        
-        scale = 1.0 / jnp.sqrt(self.head_dim)
-        att = jnp.einsum('bthd,bLhd->bhtL', q, k_in) * scale
-
-        # Masking
-        # Select correct mask based on config
-        mask = self.causal_mask if self.config.attention == 'causal' else self.block_causal_mask
-        
-        # Slice mask to current window [L:L+T, :L+T]
-        # Since JAX arrays are static, for training T is full context. 
-        # For inference, T=1, L grows.
-        
-        # We handle the mask slicing dynamically
-        total_len = att.shape[-1] # L + T
-        # We need the mask row for the current query position
-        
-       # KV Cache Interaction
-        if kv_cache is not None:
-            # 1. Update the cache using the class method
-            # This handles the index math and dynamic_update_slice automatically
+            # Update cache using the class method
             new_kv_cache = kv_cache.update(k, v)
             
-            # 2. Extract the updated Full History for attention
-            # Note: We use .key and .value (matching your class definition)
+            # Use full history for attention
             k_in = new_kv_cache.key
             v_in = new_kv_cache.value
             
-            # 3. Important: Ensure we don't attend to "future" empty slots (zeros) in the buffer.
-            # (Assuming your attention implementation handles masking via the 'mask' arg 
-            # or implicitly ignores positions > index. If not, standard causal masking 
-            # usually handles this if the buffer is zero-initialized).
-            
+            # Calculate start position for masking
+            start_pos = kv_cache.index
         else:
-            # Training mode (no cache)
             k_in = k
             v_in = v
             new_kv_cache = None
-            
-        # ... Perform Attention using k_in, v_in ...
-        # (The existing attention logic follows here)
+            start_pos = 0
+
+        # 5. Compute Attention
+        # q: [B, T, H, D]
+        # k_in: [B, L_total, H, D]
+        scale = 1.0 / jnp.sqrt(self.head_dim)
         
-        # Return the output and the NEW cache object
-        return y, new_kv_cache 
+        # Einstein Summation for Dot Product Attention
+        # b: batch, t: query_time, l: key_time, h: heads, d: head_dim
+        att = jnp.einsum('bthd,blhd->bhtl', q, k_in) * scale
+
+        # 6. Masking
+        # We need to slice the global mask to match the current [start_pos : start_pos+T] window
+        global_mask = self.causal_mask if self.config.attention == 'causal' else self.block_causal_mask
+        
+        # Slice the mask:
+        # Rows (Query): start_pos to start_pos + T
+        # Cols (Key):   0 to start_pos + T (assuming k_in is the full buffer or valid slice)
+        
+        # Note: If k_in is the FULL buffer (max_tokens), we just take the first L+T columns
+        key_len = k_in.shape[1]
+        
+        # Safe slicing for dynamic shapes (JAX prefers fixed, but we use limits)
+        # For training, start_pos=0, T=Max. For inference, T=1.
+        
+        # Create mask based on positions
+        # Query positions: range(start_pos, start_pos + T)
+        # Key positions:   range(0, key_len)
+        q_idx = jnp.arange(T) + start_pos
+        k_idx = jnp.arange(key_len)
+        
+        # Broadcast to create grid
+        # mask_val[i, j] is True if q_i can attend to k_j
+        # We assume global_mask is [Max, Max]. We gather relevant rows/cols.
+        
+        # Simple Logic: 
+        # Causal: q_idx >= k_idx
+        # We can just use the pre-computed global mask if we slice it correctly.
+        
+        # Extract the relevant sub-block from the global mask
+        # We use jnp.take to gather rows/cols
+        # (Batching this might be tricky, but usually masks are constant)
+        
+        # Efficient Masking:
+        # mask_slice = global_mask[start_pos : start_pos+T, :key_len]
+        # We use dynamic_slice for JIT compatibility if needed, or simple slicing if shapes are static enough.
+        
+        # Let's use simple logic valid for both Training and Inference:
+        # 1. Expand dims for broadcasting: (1, 1, T, L)
+        # 2. Use large negative number for masking
+        
+        # Construct mask dynamically to avoid slicing issues:
+        q_idx_b = q_idx[:, None] # (T, 1)
+        k_idx_b = k_idx[None, :] # (1, L)
+        
+        if self.config.attention == 'causal':
+             mask_bool = q_idx_b >= k_idx_b
+        else:
+             # Block Causal: (q_idx >= k_idx) OR (same_block)
+             # Same block means floor(q/block_size) == floor(k/block_size)
+             # This is expensive to recompute. Let's trust the global mask slice.
+             pass 
+
+        # Using the pre-computed mask is safest for Block Causal logic.
+        # We slice the global mask.
+        mask_slice = jax.lax.dynamic_slice(
+            global_mask,
+            (start_pos, 0),
+            (T, key_len)
+        )
+        
+        # Apply Mask (where mask is 0, set to -inf)
+        att = jnp.where(mask_slice[None, None, :, :] > 0, att, -1e9)
+
+        # 7. Softmax & Weighted Sum
+        att = nn.softmax(att, axis=-1)
+        att = self.attn_drop(att, deterministic=deterministic)
+        
+        # y = att @ v_in
+        # bhtl, blhd -> bthd
+        y = jnp.einsum('bhtl,blhd->bthd', att, v_in)
+        
+        # 8. Output Projection
+        y = rearrange(y, 'b t h d -> b t (h d)')
+        y = self.proj(y)
+        y = self.resid_drop(y, deterministic=deterministic)
+
+        return y, new_kv_cache
 
 class Block(nn.Module):
     config: TransformerConfig
