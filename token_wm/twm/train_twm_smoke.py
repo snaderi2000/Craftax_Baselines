@@ -128,7 +128,7 @@ def train_step(state, batch, dropout_rng):
         # CORRECT CALL: Use .apply()
         # This binds 'params' to the model and then runs the 'method'
         loss_output = model.apply(
-            {'params': params},             # The variables
+            params,             # The variables
             batch,                          # Arg 1 for compute_loss
             dropout_rng,                    # Arg 2 for compute_loss
             method=model.compute_loss,      # The function to run
