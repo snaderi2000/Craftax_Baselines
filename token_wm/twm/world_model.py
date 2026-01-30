@@ -119,9 +119,9 @@ class WorldModel(nn.Module):
         # 3. Heads
         # In JAX, we simply run the heads on the full sequence.
         # We will handle masking/selecting specific tokens during Loss computation.
-        logits_obs = self.head_observations(x_out)
-        logits_rew = self.head_rewards(x_out)
-        logits_ends = self.head_ends(x_out)
+        logits_obs = self.head_observations(x_out, num_steps=T, prev_steps=prev_steps)
+        logits_rew = self.head_rewards(x_out, num_steps=T, prev_steps=prev_steps)
+        logits_ends = self.head_ends(x_out, num_steps=T, prev_steps=prev_steps)
         
         output = WorldModelOutput(
             output_sequence=x_out,
@@ -223,12 +223,12 @@ class WorldModel(nn.Module):
 
 
         # ------------------------------------------------------------------
-        # 6. Get logits from masked heads
+        # 6. Get logits from the output (already computed in __call__)
         # ------------------------------------------------------------------
 
-        logits_obs  = self.head_observations(x_out, num_steps=T, prev_steps=prev_steps)
-        logits_rew  = self.head_rewards(x_out,      num_steps=T, prev_steps=prev_steps)
-        logits_ends = self.head_ends(x_out,         num_steps=T, prev_steps=prev_steps)
+        logits_obs  = output.logits_observations
+        logits_rew  = output.logits_rewards
+        logits_ends = output.logits_ends
 
         # ------------------------------------------------------------------
         # 7. Shift + flatten logits (autoregressive alignment)
