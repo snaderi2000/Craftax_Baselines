@@ -69,13 +69,19 @@ class Embedder(nn.Module):
 
         output = jnp.zeros((*tokens.shape, self.embed_dim), dtype=jnp.float32)
         
-        for i, (mask_pattern, table) in enumerate(zip(self.block_masks, self.tables)):
+        for i, (mask_pattern, table, vocab_size) in enumerate(zip(self.block_masks, self.tables, self.vocab_sizes)):
             valid_mask = Slicer.compute_mask(num_steps, prev_steps, mask_pattern)
             
             # Expand for broadcasting (1, T, 1) -> (B, T, E)
             m = valid_mask[None, :, None]
             
-            embeddings = table(tokens)
+            # CRITICAL FIX: Clamp tokens to valid range for THIS embedding table
+            # This prevents out-of-bounds lookups when e.g., action table (vocab=17) 
+            # encounters observation tokens (values up to 511).
+            # The invalid positions will be masked out anyway.
+            safe_tokens = jnp.clip(tokens, 0, vocab_size - 1)
+            
+            embeddings = table(safe_tokens)
             output = output + (embeddings * m)
             
         return output
