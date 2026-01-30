@@ -51,12 +51,12 @@ class WorldModel(nn.Module):
         
         self.embedder = Embedder(
             max_blocks=self.config.max_blocks,
-            tokens_per_block=self.config.tokens_per_block,
-            act_vocab_size=self.act_vocab_size,
-            obs_vocab_size=self.obs_vocab_size,
             embed_dim=self.config.embed_dim,
-            act_tokens_pattern=self.act_tokens_pattern
-        )
+            # List of patterns (Action mask, Obs mask)
+            block_masks=[act_pattern, obs_pattern],
+            # List of vocab sizes (Action vocab, Obs vocab)
+            vocab_sizes=[self.act_vocab_size, self.obs_vocab_size]
+        ) 
         
         # 3. Output Heads
         # Observation Head (Next token prediction)
