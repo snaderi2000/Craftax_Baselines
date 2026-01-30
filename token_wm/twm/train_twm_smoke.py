@@ -7,7 +7,10 @@ import optax
 from flax.training import train_state
 from tqdm import tqdm
 from PIL import Image
-import functools
+import functools    
+import sys
+current_dir = os.path.dirname(os.path.abspath(__file__))
+sys.path.append(os.path.join(current_dir, '../tokenizer'))    
 
 # --- Import your modules ---
 from vqvae import VQVAE
@@ -17,7 +20,7 @@ from kv_caching import KeysValues
 
 # --- Configuration ---
 DATA_PATH = "../../replay_data/my_buffer/replay_data.npz"
-VQVAE_PARAMS_PATH = "vqvae_params.pkl"
+VQVAE_PARAMS_PATH = "../tokenizer/vqvae_params.pkl"
 TWM_SAVE_PATH = "twm_params.pkl"
 OUTPUT_DIR = "twm_results"
 
