@@ -176,38 +176,29 @@ class WorldModel(nn.Module):
         labels_obs_flat = flat_obs[:, 1:].reshape(-1)
         labels_ends_flat = flat_ends[:, 1:].reshape(-1)
 
-        # 5. Calculate Cross Entropy with SAFE MASKING
+        # 5. Calculate Cross Entropy
         
+        # Helper (Definition remains the same as the safe version we just made)
         def compute_masked_loss(logits, labels):
-            # 1. Create a mask of valid data
             mask = (labels != -100)
-            
-            # 2. CRITICAL: Replace -100 with a safe dummy index (e.g., 0)
-            # This prevents JAX from calculating gradients for invalid indices
             safe_labels = jnp.where(mask, labels, 0)
-            
-            # 3. Compute loss using the safe labels
-            # Since all indices are now valid (>=0), no NaNs will be generated
             loss = optax.softmax_cross_entropy_with_integer_labels(logits, safe_labels)
-            
-            # 4. Zero out the loss for the dummy positions
-            # We only want to count loss where the original label was NOT -100
             loss = jnp.where(mask, loss, 0.0)
-            
-            # 5. Average only over the valid tokens
             return loss.sum() / (mask.sum() + 1e-9)
+
+        # --- THE FIX: Remove the 3rd argument (vocab_size) from these calls ---
 
         # Obs
         logits_obs = output.logits_observations[:, :-1].reshape(-1, self.obs_vocab_size)
-        loss_obs = compute_masked_loss(logits_obs, labels_obs_flat, self.obs_vocab_size)
+        loss_obs = compute_masked_loss(logits_obs, labels_obs_flat)  # <--- FIXED
 
         # Rewards
         logits_rew = output.logits_rewards[:, :-1].reshape(-1, 3)
-        loss_rew = compute_masked_loss(logits_rew, labels_rew_flat, 3)
+        loss_rew = compute_masked_loss(logits_rew, labels_rew_flat)  # <--- FIXED
 
         # Ends
         logits_ends = output.logits_ends[:, :-1].reshape(-1, 2)
-        loss_ends = compute_masked_loss(logits_ends, labels_ends_flat, 2)
+        loss_ends = compute_masked_loss(logits_ends, labels_ends_flat)  # <--- FIXED
 
         total_loss = loss_obs + loss_rew + loss_ends
         
