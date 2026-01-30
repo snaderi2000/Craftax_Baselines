@@ -57,9 +57,28 @@ class WorldModel(nn.Module):
         )
         
         # 3. Heads
-        self.head_observations = Head(self.config.embed_dim, self.obs_vocab_size)
-        self.head_rewards = Head(self.config.embed_dim, 3)
-        self.head_ends = Head(self.config.embed_dim, 2)
+        tpb = self.config.tokens_per_block  # 65
+
+        act_mask = jnp.zeros((tpb,), dtype=jnp.float32).at[-1].set(1.0)
+        all_but_last_obs = jnp.ones((tpb,), dtype=jnp.float32).at[-2].set(0.0)
+
+        self.head_observations = Head(
+            embed_dim=self.config.embed_dim,
+            output_dim=self.obs_vocab_size,
+            block_mask=all_but_last_obs,
+        )
+
+        self.head_rewards = Head(
+            embed_dim=self.config.embed_dim,
+            output_dim=3,
+            block_mask=act_mask,
+        )
+
+        self.head_ends = Head(
+            embed_dim=self.config.embed_dim,
+            output_dim=2,
+            block_mask=act_mask,
+        ) 
 
     def __call__(self, tokens, past_keys_values=None, deterministic=True):
         """
@@ -183,33 +202,60 @@ class WorldModel(nn.Module):
         labels_obs_flat = flat_obs[:, 1:].reshape(-1)
         labels_ends_flat = flat_ends[:, 1:].reshape(-1)
 
-        # 5. Calculate Cross Entropy
-        
-        # Helper (Definition remains the same as the safe version we just made)
-        def compute_masked_loss(logits, labels):
-            mask = (labels != -100)
-            safe_labels = jnp.where(mask, labels, 0)
-            loss = optax.softmax_cross_entropy_with_integer_labels(logits, safe_labels)
+        # ------------------------------------------------------------------
+        # 5. Calculate Cross Entropy (masked, stable)
+        # ------------------------------------------------------------------
+
+        def compute_masked_loss(logits_flat, labels_flat):
+            """
+            logits_flat: (N, C)
+            labels_flat: (N,)
+            """
+            mask = (labels_flat != -100)
+            safe_labels = jnp.where(mask, labels_flat, 0)
+
+            loss = optax.softmax_cross_entropy_with_integer_labels(
+                logits_flat, safe_labels
+            )
+
             loss = jnp.where(mask, loss, 0.0)
             return loss.sum() / (mask.sum() + 1e-9)
 
-        # --- THE FIX: Remove the 3rd argument (vocab_size) from these calls ---
 
-        # Obs
-        logits_obs = output.logits_observations[:, :-1].reshape(-1, self.obs_vocab_size)
-        loss_obs = compute_masked_loss(logits_obs, labels_obs_flat)  # <--- FIXED
+        # ------------------------------------------------------------------
+        # 6. Get logits from masked heads
+        # ------------------------------------------------------------------
 
-        # Rewards
-        logits_rew = output.logits_rewards[:, :-1].reshape(-1, 3)
-        loss_rew = compute_masked_loss(logits_rew, labels_rew_flat)  # <--- FIXED
+        logits_obs  = self.head_observations(x_out, num_steps=T, prev_steps=prev_steps)
+        logits_rew  = self.head_rewards(x_out,      num_steps=T, prev_steps=prev_steps)
+        logits_ends = self.head_ends(x_out,         num_steps=T, prev_steps=prev_steps)
 
-        # Ends
-        logits_ends = output.logits_ends[:, :-1].reshape(-1, 2)
-        loss_ends = compute_masked_loss(logits_ends, labels_ends_flat)  # <--- FIXED
+        # ------------------------------------------------------------------
+        # 7. Shift + flatten logits (autoregressive alignment)
+        #    Predict token t+1 from logits at t
+        # ------------------------------------------------------------------
+
+        logits_obs_flat = logits_obs[:, :-1, :].reshape(-1, self.obs_vocab_size)
+        logits_rew_flat = logits_rew[:, :-1, :].reshape(-1, 3)
+        logits_ends_flat = logits_ends[:, :-1, :].reshape(-1, 2)
+
+        # ------------------------------------------------------------------
+        # 8. Compute losses
+        # ------------------------------------------------------------------
+
+        loss_obs = compute_masked_loss(logits_obs_flat, labels_obs_flat)
+        loss_rew = compute_masked_loss(logits_rew_flat, labels_rew_flat)
+        loss_ends = compute_masked_loss(logits_ends_flat, labels_ends_flat)
 
         total_loss = loss_obs + loss_rew + loss_ends
+
+        return LossWithIntermediateLosses(
+            loss_obs=loss_obs,
+            loss_rewards=loss_rew,
+            loss_ends=loss_ends,
+            total_loss=total_loss,
+        )
         
-        return LossWithIntermediateLosses(loss_obs, loss_rew, loss_ends, total_loss)
 
     def compute_labels(self, obs_tokens, rewards, ends, mask_padding):
         # mask_padding: True = Padding (Ignore)

@@ -17,22 +17,34 @@ class Slicer:
 
 class Head(nn.Module):
     """
-    Projects hidden states to logits.
-    Applied to the full sequence; invalid steps are masked in the loss function.
+    Projects hidden states to logits, but ONLY at token positions selected by block_mask.
+    This matches the PyTorch intent: the head "fires" on a subset of tokens.
     """
     embed_dim: int
     output_dim: int
+    block_mask: jnp.ndarray            # (tokens_per_block,) float32 0/1
     hidden_dim: int = None
+    mask_before_mlp: bool = True       # stronger (recommended)
 
     @nn.compact
-    def __call__(self, x, num_steps=None, prev_steps=None):
-        # We ignore num_steps/prev_steps here because we map the whole sequence.
-        # This keeps shapes static for JIT compilation.
+    def __call__(self, x, num_steps: int, prev_steps: int):
+        # x: (B, T, E) where T == num_steps
         h_dim = self.hidden_dim if self.hidden_dim else self.embed_dim
-        
+
+        # valid_mask: (T,) in {0,1}
+        valid_mask = Slicer.compute_mask(num_steps=num_steps, prev_steps=prev_steps, block_mask=self.block_mask)
+        m = valid_mask[None, :, None].astype(x.dtype)  # (1, T, 1)
+
+        # Option A: mask hidden states BEFORE MLP (closest to PyTorch behavior)
+        if self.mask_before_mlp:
+            x = x * m
+
         y = nn.Dense(h_dim)(x)
         y = nn.relu(y)
         y = nn.Dense(self.output_dim)(y)
+
+        # Also mask logits (extra safety; ensures zero grads from invalid positions)
+        y = y * m
         return y
 
 class Embedder(nn.Module):
