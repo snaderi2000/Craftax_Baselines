@@ -115,20 +115,26 @@ def train_step(state, batch, dropout_rng):
     # It expects batch to contain: 'obs_tokens', 'actions', 'rewards', 'ends', 'mask_padding'
     
     def loss_fn(params):
-        # We need to bind the model to call compute_loss properly or just call apply
-        # Since compute_loss logic is mainly "prepare inputs -> apply -> cross_entropy",
-        # We can implement the high-level logic here or assume WorldModel has a statless helper.
-        
-        # Let's instantiate the model class logic
+        # We define the model blueprint
+        # Ensure 'config' is available here. If strictly needed, pass it into train_step 
+        # or access it from state.apply_fn.keywords if available.
+        # For simplicity in this script, we can recreate the config or pull from global.
         model = WorldModel(
             obs_vocab_size=VOCAB_SIZE, 
             act_vocab_size=ACT_VOCAB_SIZE, 
-            config=state.apply_fn.keywords['config'] if hasattr(state.apply_fn, 'keywords') else TransformerConfig(TOKENS_PER_BLOCK, MAX_BLOCKS, 'causal', NUM_LAYERS, NUM_HEADS, EMBED_DIM, 0.1, 0.1, 0.1)
+            config=TransformerConfig(TOKENS_PER_BLOCK, MAX_BLOCKS, 'causal', NUM_LAYERS, NUM_HEADS, EMBED_DIM, 0.1, 0.1, 0.1)
         )
         
-        # Note: In standard Flax, we usually call apply directly. 
-        # Using the compute_loss method we added to the class:
-        loss_output = model.compute_loss(batch, None, params, dropout_rng)
+        # CORRECT CALL: Use .apply()
+        # This binds 'params' to the model and then runs the 'method'
+        loss_output = model.apply(
+            {'params': params},             # The variables
+            batch,                          # Arg 1 for compute_loss
+            dropout_rng,                    # Arg 2 for compute_loss
+            method=model.compute_loss,      # The function to run
+            rngs={'dropout': dropout_rng}   # RNGs needed for Dropout
+        )
+        
         return loss_output.total_loss, loss_output
 
     grad_fn = jax.value_and_grad(loss_fn, has_aux=True)
