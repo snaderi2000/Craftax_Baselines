@@ -178,20 +178,24 @@ class WorldModel(nn.Module):
 
         # 5. Calculate Cross Entropy with SAFE MASKING
         
-        def compute_masked_loss(logits, labels, vocab_size):
-            # 1. Create a Mask
+        def compute_masked_loss(logits, labels):
+            # 1. Create a mask of valid data
             mask = (labels != -100)
             
-            # 2. Replace -100 with 0 (Safe Dummy Label)
-            # This prevents JAX from exploding when indexing logits with -100
+            # 2. CRITICAL: Replace -100 with a safe dummy index (e.g., 0)
+            # This prevents JAX from calculating gradients for invalid indices
             safe_labels = jnp.where(mask, labels, 0)
             
-            # 3. Compute Loss on Safe Labels
+            # 3. Compute loss using the safe labels
+            # Since all indices are now valid (>=0), no NaNs will be generated
             loss = optax.softmax_cross_entropy_with_integer_labels(logits, safe_labels)
             
-            # 4. Zero out loss for dummy positions
-            loss = (loss * mask).sum() / (mask.sum() + 1e-9)
-            return loss
+            # 4. Zero out the loss for the dummy positions
+            # We only want to count loss where the original label was NOT -100
+            loss = jnp.where(mask, loss, 0.0)
+            
+            # 5. Average only over the valid tokens
+            return loss.sum() / (mask.sum() + 1e-9)
 
         # Obs
         logits_obs = output.logits_observations[:, :-1].reshape(-1, self.obs_vocab_size)
