@@ -24,18 +24,26 @@ VQVAE_PARAMS_PATH = "../tokenizer/vqvae_params.pkl"
 TWM_SAVE_PATH = "twm_params.pkl"
 OUTPUT_DIR = "twm_results"
 
-# Paper Config
-BATCH_SIZE = 32          # Smaller for smoke test
+# ============= TRAINING CONFIG =============
+# Smoke test settings (fast, low quality):
+BATCH_SIZE = 32          
 SEQ_LEN = 20             # T_WM = 20 steps
-EPOCHS = 200               # Fast training to verify logic
-LR = 1e-3
+EPOCHS = 200             # For smoke test. Production: 1000+
+LR = 1e-4                # Lower LR for stability (was 1e-3)
+
+# Model architecture
 TOKENS_PER_BLOCK = 65    # 64 patches + 1 action
 MAX_BLOCKS = SEQ_LEN     # 20 steps
-EMBED_DIM = 128
-NUM_LAYERS = 3
+EMBED_DIM = 256          # Increased from 128 for better capacity
+NUM_LAYERS = 6           # Increased from 3
 NUM_HEADS = 8
 VOCAB_SIZE = 512
 ACT_VOCAB_SIZE = 17      # Craftax actions
+
+# For production training, consider:
+# - EMBED_DIM = 512, NUM_LAYERS = 12 (paper-scale)
+# - EPOCHS = 2000+
+# - LR = 1e-4 with warmup + cosine decay
 
 # --- 1. Data Loading & Tokenization ---
 
@@ -223,18 +231,23 @@ def get_batch(obs_tokens, actions, rewards, dones, ep_lengths, batch_size, seq_l
 
 # --- 3. Rollout & Viz ---
 
-def run_rollout(state, initial_obs_tokens, action_sequence, debug=True):
+def run_rollout(state, initial_obs_tokens, action_sequence, debug=True, temperature=1.0, use_sampling=True):
     """
     Autoregressive generation.
     initial_obs_tokens: (1, 64) - The starting frame
     action_sequence: (1, T) - The actions to take
+    temperature: Temperature for sampling (higher = more diverse, lower = more deterministic)
+    use_sampling: If True, sample from distribution. If False, use argmax.
     """
-    print("Running TWM Rollout (Imagination)...")
+    print(f"Running TWM Rollout (Imagination)... [temp={temperature}, sampling={use_sampling}]")
     model = WorldModel(
         obs_vocab_size=VOCAB_SIZE, 
         act_vocab_size=ACT_VOCAB_SIZE, 
         config=TransformerConfig(TOKENS_PER_BLOCK, MAX_BLOCKS, 'causal', NUM_LAYERS, NUM_HEADS, EMBED_DIM, 0.1, 0.1, 0.1)
     )
+    
+    # RNG for sampling
+    sample_rng = jax.random.PRNGKey(42)
     
     # 1. Setup KV Cache
     cache = KeysValues.init(n=1, num_heads=NUM_HEADS, max_tokens=SEQ_LEN*TOKENS_PER_BLOCK, 
@@ -274,12 +287,28 @@ def run_rollout(state, initial_obs_tokens, action_sequence, debug=True):
         # C. Auto-regressive generation of the NEXT 64 observation tokens
         next_frame_tokens = []
         
+        def sample_token(logits, rng):
+            """Sample a token from logits with temperature."""
+            if use_sampling and temperature > 0:
+                # Apply temperature
+                scaled_logits = logits / temperature
+                # Sample from the distribution
+                return jax.random.categorical(rng, scaled_logits, axis=-1).reshape(1, 1)
+            else:
+                # Greedy decoding
+                return jnp.argmax(logits, axis=-1).reshape(1, 1)
+        
         # Get first token prediction from action output
         logits = output.logits_observations[:, -1, :] # (1, 512)
-        next_token = jnp.argmax(logits, axis=-1).reshape(1, 1)
+        sample_rng, rng = jax.random.split(sample_rng)
+        next_token = sample_token(logits, rng)
         next_frame_tokens.append(next_token)
         
         if debug and t == 0:
+            # Show top-5 predictions
+            top5_idx = jnp.argsort(logits[0])[-5:][::-1]
+            top5_probs = jax.nn.softmax(logits[0])[top5_idx]
+            print(f"  First token - top5: {list(zip(np.array(top5_idx), np.array(top5_probs).round(3)))}")
             print(f"  First generated token: {int(next_token[0, 0])}")
         
         # Generate remaining 63 tokens
@@ -291,7 +320,8 @@ def run_rollout(state, initial_obs_tokens, action_sequence, debug=True):
             if debug and t == 0 and i < 3:
                 print(f"    Token {i+1}: logits sum={float(logits.sum()):.2f}, max={float(logits.max()):.2f}")
             
-            next_token = jnp.argmax(logits, axis=-1).reshape(1, 1)
+            sample_rng, rng = jax.random.split(sample_rng)
+            next_token = sample_token(logits, rng)
             next_frame_tokens.append(next_token)
             
         # Stack this frame
@@ -487,8 +517,10 @@ def main():
     data = np.load(DATA_PATH)
     gt_pixels = data['obs'][test_idx:test_idx+1, test_start+1:test_start+1+test_len] # Next frames
     
-    # Run Imagination
-    imagined_tokens = run_rollout(state, jnp.array(start_obs_tokens), jnp.array(action_seq))
+    # Run Imagination with temperature sampling for diversity
+    # Lower temperature (0.5-0.8) = more focused, Higher (1.0-1.5) = more diverse
+    imagined_tokens = run_rollout(state, jnp.array(start_obs_tokens), jnp.array(action_seq), 
+                                  temperature=0.8, use_sampling=True)
     
     # Compare tokens
     imagined_np = np.array(imagined_tokens[0])  # (10, 64)
