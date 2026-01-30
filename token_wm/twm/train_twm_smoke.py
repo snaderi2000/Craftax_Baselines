@@ -63,7 +63,7 @@ def load_and_tokenize():
     # Jitted encoder
     @jax.jit
     def encode_batch(x):
-        return vqvae.encode_indices({'params': vqvae_params}, x)
+        return vqvae.apply({'params': vqvae_params}, x, method=vqvae.encode_indices)
 
     # Tokenize in chunks to save VRAM
     num_eps, ep_len, h, w, c = obs.shape
@@ -270,7 +270,7 @@ def decode_and_viz(tokens, original_pixels, save_name):
         z_q = codebook[idxs] # (T, 8, 8, 128)
         
         # Decode
-        return vqvae.apply({'params': vqvae_params}, z_q, method=vqvae.decoder)
+        return vqvae.apply({'params': vqvae_params}, z_q, method=lambda m, x: m.decoder(x, training=False))
 
     recon_pixels = decode_batch(indices) # (T, 63, 63, 3)
     
