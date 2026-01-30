@@ -156,8 +156,8 @@ class WorldModel(nn.Module):
         target_ends_grid = target_ends_grid.at[:, :, -1].set(labels_ends_reshaped.squeeze(-1))
         
         # Flatten to match logits (B * T * 65)
-        labels_rew_flat = target_rew_grid.reshape(-1)
-        labels_ends_flat = target_ends_grid.reshape(-1)
+        labels_rew_flat = target_rew_grid[:, 1:].reshape(-1)
+        labels_ends_flat = target_ends_grid[:, 1:].reshape(-1)
         
         # --- B. Prepare Observations (Located at Indices 0..63) ---
         # labels_obs came in from compute_labels. 
@@ -194,18 +194,20 @@ class WorldModel(nn.Module):
 
         # 5. Calculate Cross Entropy (Using the new flat labels)
 
-        # Obs
+        # 5. Calculate Cross Entropy
+        
+        # Obs: Slice Logits to remove last step
         logits_obs = output.logits_observations[:, :-1].reshape(-1, self.obs_vocab_size)
         loss_obs = optax.softmax_cross_entropy_with_integer_labels(logits_obs, labels_obs_flat)
         loss_obs = (loss_obs * (labels_obs_flat != -100)).sum() / ((labels_obs_flat != -100).sum() + 1e-9)
 
-        # Rewards
-        logits_rew = output.logits_rewards.reshape(-1, 3)
+        # Rewards: Slice Logits to remove last step
+        logits_rew = output.logits_rewards[:, :-1].reshape(-1, 3)  # <--- CHANGED
         loss_rew = optax.softmax_cross_entropy_with_integer_labels(logits_rew, labels_rew_flat)
         loss_rew = (loss_rew * (labels_rew_flat != -100)).sum() / ((labels_rew_flat != -100).sum() + 1e-9)
 
-        # Ends
-        logits_ends = output.logits_ends.reshape(-1, 2)
+        # Ends: Slice Logits to remove last step
+        logits_ends = output.logits_ends[:, :-1].reshape(-1, 2)    # <--- CHANGED
         loss_ends = optax.softmax_cross_entropy_with_integer_labels(logits_ends, labels_ends_flat)
         loss_ends = (loss_ends * (labels_ends_flat != -100)).sum() / ((labels_ends_flat != -100).sum() + 1e-9)
 
