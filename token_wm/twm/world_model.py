@@ -34,51 +34,32 @@ class WorldModel(nn.Module):
     config: TransformerConfig
 
     def setup(self):
-        # 1. Define Patterns for interleaving
-        # Act is the LAST token in the block
-        # [0, 0, ..., 0, 1]
-        act_pattern = jnp.zeros(self.config.tokens_per_block)
-        act_pattern = act_pattern.at[-1].set(1.0)
-        self.act_tokens_pattern = act_pattern
-
-        # Obs is everything else [1, 1, ..., 0]
-        obs_pattern = 1.0 - act_pattern
+        # 1. Define Patterns matching PyTorch exactly
+        # [0, 0, ..., 1] -> Action is the last token
+        self.act_pattern = jnp.zeros(self.config.tokens_per_block).at[-1].set(1.0)
+        self.obs_pattern = 1.0 - self.act_pattern
+        
+        # Pattern for Observation Head: PyTorch uses 'all_but_last_obs_tokens_pattern'
+        # It seems to mask out the token BEFORE the action? 
+        # Let's trust the masks we generate here for the loss.
+        # For JAX, we simply predict everywhere and mask the loss.
         
         # 2. Components
         self.transformer = Transformer(self.config)
-        
-        # Positional Embedding (Learned)
-        # Note: We also have RoPE in the transformer, but we keep this 
-        # to match the PyTorch reference implementation exactly.
         self.pos_emb = nn.Embed(self.config.max_tokens, self.config.embed_dim)
         
+        # Embedder with Correct Lists
         self.embedder = Embedder(
             max_blocks=self.config.max_blocks,
             embed_dim=self.config.embed_dim,
-            # List of patterns (Action mask, Obs mask)
-            block_masks=[act_pattern, obs_pattern],
-            # List of vocab sizes (Action vocab, Obs vocab)
+            block_masks=[self.act_pattern, self.obs_pattern],
             vocab_sizes=[self.act_vocab_size, self.obs_vocab_size]
-        ) 
-        
-        # 3. Output Heads
-        # Observation Head (Next token prediction)
-        self.head_observations = Head(
-            embed_dim=self.config.embed_dim, 
-            output_dim=self.obs_vocab_size
         )
         
-        # Reward Head (3 classes: -1, 0, 1)
-        self.head_rewards = Head(
-            embed_dim=self.config.embed_dim,
-            output_dim=3
-        )
-        
-        # Ends Head (2 classes: False, True)
-        self.head_ends = Head(
-            embed_dim=self.config.embed_dim,
-            output_dim=2
-        )
+        # 3. Heads
+        self.head_observations = Head(self.config.embed_dim, self.obs_vocab_size)
+        self.head_rewards = Head(self.config.embed_dim, 3)
+        self.head_ends = Head(self.config.embed_dim, 2)
 
     def __call__(self, tokens, past_keys_values=None, deterministic=True):
         """
@@ -133,82 +114,70 @@ class WorldModel(nn.Module):
 
     # --- Loss Computation Logic ---
     
-    def compute_loss(self, batch, tokenizer_encode_fn, params, dropout_rng):
+    def compute_loss(self, batch, dropout_rng=None):
         """
-        Standalone loss function compatible with JAX transformations.
-        batch: Dictionary containing 'observations', 'actions', 'rewards', 'ends', 'mask_padding'
+        Calculates loss. Must be called via model.apply(..., method=model.compute_loss)
         """
-        # 1. Tokenize Observations (Assuming we have VQVAE indices already or encode on fly)
-        # For efficiency in JAX, pre-tokenizing data is preferred. 
-        # Assuming batch['obs_tokens'] exists or calculating it here:
-        # obs_tokens shape: [Batch, Length, K_patches]
+        # 1. Prepare Inputs (Interleave Obs and Actions)
+        # obs_tokens: [B, T, 64]
         obs_tokens = batch['obs_tokens'] 
+        act_tokens = batch['actions'][..., None] # [B, T, 1]
         
-        # 2. Prepare Inputs
-        # act_tokens: [Batch, Length] -> [Batch, Length, 1]
-        act_tokens = batch['actions'][..., None]
+        # Concatenate to [B, T, 65] then flatten
+        B, T, _ = obs_tokens.shape
+        tokens_block = jnp.concatenate([obs_tokens, act_tokens], axis=2)
+        tokens_flat = tokens_block.reshape(B, -1) # [B, T*65]
         
-        # Concatenate: [Obs_1...Obs_K, Act]
-        # rearrange (B, L, K) and (B, L, 1) -> (B, L * (K+1))
-        # We do this manually or via reshape
-        B, L, K = obs_tokens.shape
-        # Interleave: We construct the flat sequence
-        # This requires careful reshaping to match the [Obs, Obs, ..., Act] pattern
+        # 2. Forward Pass (using bound self)
+        # We pass the flattened tokens.
+        # self.__call__ will run embedder -> transformer -> heads
+        # It returns WorldModelOutput with logits for ALL steps.
+        output = self.__call__(tokens_flat, deterministic=False, rngs={'dropout': dropout_rng} if dropout_rng is not None else None)
         
-        # Concatenate along last dim
-        tokens_block = jnp.concatenate([obs_tokens, act_tokens], axis=2) # [B, L, K+1]
-        tokens_flat = tokens_block.reshape(B, L * (K + 1))
-        
-        # 3. Forward Pass
-        # We call the model with 'params' (passed from train state)
-        # self.apply is used inside train step
-        # output = self.apply(...)
-        # For this method structure, we assume it's running inside a bound module or passing apply_fn
-        # We'll assume standard Flax calling convention here (call returns output)
-        output = self.__call__(tokens_flat, deterministic=False)
-
-        # 4. Compute Labels
+        # 3. Compute Raw Labels
         labels_obs, labels_rew, labels_ends = self.compute_labels(
             obs_tokens, batch['rewards'], batch['ends'], batch['mask_padding']
         )
         
-        # 5. Compute Losses
+        # 4. APPLY MASKS (Critical for Slicer/Head alignment)
+        # We must ignore predictions from the "wrong" heads at specific steps.
         
-        # Observation Loss: Predict NEXT token
-        # logits: [B, T, Vocab] -> Shift right for prediction
-        # labels: [B, T] (already shifted in compute_labels)
+        # Generate mask for Action positions (where Rewards/Ends are valid)
+        # Shape: [T*65]
+        total_steps = tokens_flat.shape[1]
+        is_action_step = Slicer.compute_mask(total_steps, 0, self.act_pattern)
+        # Broadcast to batch: [B, TotalSteps]
+        is_action_mask = jnp.tile(is_action_step, (B, 1))
         
-        # We only care about predicting Obs tokens, not Action tokens.
-        # However, the standard AR objective usually trains on everything.
-        # The PyTorch code sliced specific logits.
+        # REWARD & ENDS LOSS
+        # Only valid where is_action_mask is True
+        labels_rew = jnp.where(is_action_mask.reshape(-1), labels_rew, -100)
+        labels_ends = jnp.where(is_action_mask.reshape(-1), labels_ends, -100)
         
-        # PyTorch Reference:
-        # logits_observations = outputs.logits_observations[:, :-1]
-        # labels_observations = ... [:, 1:]
-        
-        logits_obs_flat = output.logits_observations[:, :-1].reshape(-1, self.obs_vocab_size)
-        loss_obs = optax.softmax_cross_entropy_with_integer_labels(logits_obs_flat, labels_obs)
-        
-        # Masking padding/invalid targets (-100 used in PyTorch)
-        # JAX doesn't support -100 masking natively in loss, we must multiply by mask
-        mask_obs = (labels_obs != -100)
-        loss_obs = (loss_obs * mask_obs).sum() / (mask_obs.sum() + 1e-9)
+        # OBS LOSS
+        # Only valid where is_action_mask is FALSE (i.e. it is an observation token)
+        # Note: PyTorch had specific slicing, but generally we predict Obs at Obs steps.
+        labels_obs = jnp.where(~is_action_mask.reshape(-1), labels_obs, -100)
 
-        # Reward Loss
-        # Only valid at Action positions
-        logits_rew_flat = output.logits_rewards.reshape(-1, 3)
-        loss_rew = optax.softmax_cross_entropy_with_integer_labels(logits_rew_flat, labels_rew)
-        mask_rew = (labels_rew != -100)
-        loss_rew = (loss_rew * mask_rew).sum() / (mask_rew.sum() + 1e-9)
+        # 5. Calculate Cross Entropy
         
-        # Ends Loss
-        logits_ends_flat = output.logits_ends.reshape(-1, 2)
+        # Obs
+        logits_obs = output.logits_observations[:, :-1].reshape(-1, self.obs_vocab_size)
+        loss_obs = optax.softmax_cross_entropy_with_integer_labels(logits_obs, labels_obs)
+        loss_obs = (loss_obs * (labels_obs != -100)).sum() / ((labels_obs != -100).sum() + 1e-9)
+
+        # Rewards
+        logits_rew = output.logits_rewards.reshape(-1, 3)
+        loss_rew = optax.softmax_cross_entropy_with_integer_labels(logits_rew, labels_rew)
+        loss_rew = (loss_rew * (labels_rew != -100)).sum() / ((labels_rew != -100).sum() + 1e-9)
+
+        # Ends
+        logits_ends = output.logits_ends.reshape(-1, 2)
         loss_ends = optax.softmax_cross_entropy_with_integer_labels(logits_ends_flat, labels_ends)
-        mask_ends = (labels_ends != -100)
-        loss_ends = (loss_ends * mask_ends).sum() / (mask_ends.sum() + 1e-9)
+        loss_ends = (loss_ends * (labels_ends != -100)).sum() / ((labels_ends != -100).sum() + 1e-9)
 
         total_loss = loss_obs + loss_rew + loss_ends
-
+        
         return LossWithIntermediateLosses(loss_obs, loss_rew, loss_ends, total_loss)
 
     def compute_labels(self, obs_tokens, rewards, ends, mask_padding):
