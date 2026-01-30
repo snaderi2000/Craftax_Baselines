@@ -27,7 +27,7 @@ OUTPUT_DIR = "twm_results"
 # Paper Config
 BATCH_SIZE = 32          # Smaller for smoke test
 SEQ_LEN = 20             # T_WM = 20 steps
-EPOCHS = 1000               # Fast training to verify logic
+EPOCHS = 200               # Fast training to verify logic
 LR = 1e-3
 TOKENS_PER_BLOCK = 65    # 64 patches + 1 action
 MAX_BLOCKS = SEQ_LEN     # 20 steps
@@ -223,7 +223,7 @@ def get_batch(obs_tokens, actions, rewards, dones, ep_lengths, batch_size, seq_l
 
 # --- 3. Rollout & Viz ---
 
-def run_rollout(state, initial_obs_tokens, action_sequence):
+def run_rollout(state, initial_obs_tokens, action_sequence, debug=True):
     """
     Autoregressive generation.
     initial_obs_tokens: (1, 64) - The starting frame
@@ -241,48 +241,56 @@ def run_rollout(state, initial_obs_tokens, action_sequence):
                             embed_dim=EMBED_DIM, num_layers=NUM_LAYERS)
     
     # 2. Feed Initial Frame (Context)
-    # Flat format: [O_1..O_64]
-    # We feed these one by one or as a chunk to prime the cache
     curr_tokens = initial_obs_tokens.reshape(1, -1) # (1, 64)
     
-    # To prime properly, we pass these through. 
-    # BUT, we also need to append the first action to generate the NEXT frame.
-    
     generated_frames_tokens = []
-    
-    # We will loop for the length of action_sequence
     T_rollout = action_sequence.shape[1]
     
     # Current input to model starts as the initial observation patches
     current_input_ids = curr_tokens # (1, 64)
     
+    if debug:
+        print(f"  Initial obs tokens sample (first 5): {curr_tokens[0, :5]}")
+        print(f"  Action sequence: {action_sequence[0]}")
+    
     for t in range(T_rollout):
-        # A. Process Observation Patches
-        # This updates cache and lets model "see" the current state
-        # In a real efficient loop we might do this differently, but for smoke test:
-        # Pass obs tokens
+        # A. Process Observation Patches (64 tokens)
         output, cache = model.apply(state.params, current_input_ids, past_keys_values=cache, deterministic=True)
         
-        # B. Process Action
-        # Now we feed the action token. The model output after this token 
-        # is the prediction for the FIRST token of the NEXT observation.
+        if debug and t == 0:
+            print(f"  After obs, cache index: {cache[0].index}")
+        
+        # B. Process Action (1 token)
         act_token = action_sequence[:, t:t+1] # (1, 1)
         output, cache = model.apply(state.params, act_token, past_keys_values=cache, deterministic=True)
         
+        if debug and t == 0:
+            print(f"  After action, cache index: {cache[0].index}")
+            # Check the logits at action position
+            action_logits = output.logits_observations[:, -1, :]
+            print(f"  Logits stats: min={float(action_logits.min()):.2f}, max={float(action_logits.max()):.2f}")
+            print(f"  Logits sum: {float(action_logits.sum()):.2f} (should be non-zero)")
+        
         # C. Auto-regressive generation of the NEXT 64 observation tokens
-        # The output from the action step contains the logit for the 1st patch of next frame
         next_frame_tokens = []
         
-        # Get last logit (next token prediction)
+        # Get first token prediction from action output
         logits = output.logits_observations[:, -1, :] # (1, 512)
         next_token = jnp.argmax(logits, axis=-1).reshape(1, 1)
         next_frame_tokens.append(next_token)
         
+        if debug and t == 0:
+            print(f"  First generated token: {int(next_token[0, 0])}")
+        
         # Generate remaining 63 tokens
-        for _ in range(63):
-            # Feed the last generated token to get the next one
+        for i in range(63):
             output, cache = model.apply(state.params, next_token, past_keys_values=cache, deterministic=True)
             logits = output.logits_observations[:, -1, :]
+            
+            # Check if logits are all zeros (masked out)
+            if debug and t == 0 and i < 3:
+                print(f"    Token {i+1}: logits sum={float(logits.sum()):.2f}, max={float(logits.max()):.2f}")
+            
             next_token = jnp.argmax(logits, axis=-1).reshape(1, 1)
             next_frame_tokens.append(next_token)
             
@@ -290,10 +298,22 @@ def run_rollout(state, initial_obs_tokens, action_sequence):
         full_frame = jnp.concatenate(next_frame_tokens, axis=1) # (1, 64)
         generated_frames_tokens.append(full_frame)
         
-        # This generated frame becomes the input for the next step (before the next action)
+        if debug and t == 0:
+            print(f"  Generated frame {t} tokens (first 10): {full_frame[0, :10]}")
+            print(f"  Generated frame {t} unique values: {len(np.unique(np.array(full_frame)))}")
+        
+        # This generated frame becomes the input for the next step
         current_input_ids = full_frame
 
-    return jnp.stack(generated_frames_tokens, axis=1) # (1, T, 64)
+    result = jnp.stack(generated_frames_tokens, axis=1) # (1, T, 64)
+    
+    if debug:
+        print(f"  Final generated shape: {result.shape}")
+        # Check token diversity across all frames
+        all_tokens = np.array(result).flatten()
+        print(f"  Token diversity: {len(np.unique(all_tokens))} unique values out of {len(all_tokens)}")
+    
+    return result
 
 def decode_and_viz(tokens, original_pixels, save_name):
     """
@@ -457,19 +477,38 @@ def main():
     start_obs_tokens = obs_tokens[test_idx, test_start] # (64,)
     action_seq = actions[test_idx, test_start:test_start+test_len].reshape(1, -1) # (1, 10)
     
-    # Ground Truth Pixels (Need to load raw again? Or just trust tokenizer reconstruction? 
-    # Better to compare against RECONSTRUCTED ground truth to ignore VQVAE loss, 
-    # OR real ground truth. Let's load a tiny slice of real data for viz)
+    # Ground truth tokens for comparison
+    gt_obs_tokens = obs_tokens[test_idx, test_start+1:test_start+1+test_len]  # (10, 64)
+    
+    print(f"  Ground truth obs tokens (frame 0, first 10): {gt_obs_tokens[0, :10]}")
+    print(f"  Ground truth token range: [{gt_obs_tokens.min()}, {gt_obs_tokens.max()}]")
+    
+    # Ground Truth Pixels
     data = np.load(DATA_PATH)
     gt_pixels = data['obs'][test_idx:test_idx+1, test_start+1:test_start+1+test_len] # Next frames
     
     # Run Imagination
     imagined_tokens = run_rollout(state, jnp.array(start_obs_tokens), jnp.array(action_seq))
     
+    # Compare tokens
+    imagined_np = np.array(imagined_tokens[0])  # (10, 64)
+    print(f"\n--- Token Comparison ---")
+    print(f"  Imagined token range: [{imagined_np.min()}, {imagined_np.max()}]")
+    print(f"  Imagined frame 0 (first 10): {imagined_np[0, :10]}")
+    print(f"  Ground truth frame 0 (first 10): {gt_obs_tokens[0, :10]}")
+    
+    # Token accuracy (how many match exactly)
+    matches = (imagined_np == gt_obs_tokens).sum()
+    total = gt_obs_tokens.size
+    print(f"  Token accuracy: {matches}/{total} = {100*matches/total:.1f}%")
+    print(f"  (Random would be ~0.2% with vocab size 512)")
+    
     # Visualize
     decode_and_viz(imagined_tokens, gt_pixels, "smoke_test_rollout.png")
     
-    print("Smoke Test Complete!")
+    print("\nSmoke Test Complete!")
+    print("NOTE: With only 15 gradient steps, the model is essentially random.")
+    print("      For meaningful generation, train for many more epochs.")
 
 if __name__ == "__main__":
     main()

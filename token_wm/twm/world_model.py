@@ -112,7 +112,10 @@ class WorldModel(nn.Module):
         trans_out = self.transformer(x, past_keys_values, deterministic=deterministic)
         
         if past_keys_values is not None:
-            x_out, new_cache = trans_out
+            x_out, new_cache_list = trans_out
+            # Wrap the list back into a KeysValues object for consistent interface
+            from kv_caching import KeysValues
+            new_cache = KeysValues(layers=new_cache_list)
         else:
             x_out = trans_out
             new_cache = None
