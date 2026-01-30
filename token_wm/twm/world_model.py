@@ -101,8 +101,9 @@ class WorldModel(nn.Module):
         
         # Add Learned Positional Embeddings
         pos_indices = jnp.arange(T) + prev_steps
-        print("pos_indices.max():", pos_indices.max())
-        print("pos_emb.num_embeddings:", self.pos_emb.num_embeddings)
+        # Debug prints (comment out for cleaner output)
+        # print("pos_indices.max():", pos_indices.max())
+        # print("pos_emb.num_embeddings:", self.pos_emb.num_embeddings)
 
         x = x + self.pos_emb(pos_indices)
         
@@ -150,8 +151,9 @@ class WorldModel(nn.Module):
         tokens_block = jnp.concatenate([obs_tokens, act_tokens], axis=2)
         tokens_flat = tokens_block.reshape(B, -1) # [B, T*65]
 
-        print("tokens_flat.shape:", tokens_flat.shape)
-        print("config.max_tokens:", self.config.max_tokens)
+        # Debug prints (comment out for cleaner output)
+        # print("tokens_flat.shape:", tokens_flat.shape)
+        # print("config.max_tokens:", self.config.max_tokens)
 
         
         # 2. Forward Pass (using bound self)
@@ -206,20 +208,39 @@ class WorldModel(nn.Module):
         # 5. Calculate Cross Entropy (masked, stable)
         # ------------------------------------------------------------------
 
-        def compute_masked_loss(logits_flat, labels_flat):
+        def compute_masked_loss(logits_flat, labels_flat, vocab_size, name=""):
             """
             logits_flat: (N, C)
             labels_flat: (N,)
             """
             mask = (labels_flat != -100)
+            
+            # Clamp labels to valid range to prevent indexing errors
             safe_labels = jnp.where(mask, labels_flat, 0)
-
+            safe_labels = jnp.clip(safe_labels, 0, vocab_size - 1)
+            
+            # Check for NaN in logits
+            has_nan_logits = jnp.any(jnp.isnan(logits_flat))
+            has_inf_logits = jnp.any(jnp.isinf(logits_flat))
+            
+            # Numerically stable cross-entropy
+            # Clip logits to prevent overflow
+            logits_clipped = jnp.clip(logits_flat, -50.0, 50.0)
+            
             loss = optax.softmax_cross_entropy_with_integer_labels(
-                logits_flat, safe_labels
+                logits_clipped, safe_labels
             )
 
             loss = jnp.where(mask, loss, 0.0)
-            return loss.sum() / (mask.sum() + 1e-9)
+            
+            num_valid = mask.sum()
+            avg_loss = jnp.where(num_valid > 0, loss.sum() / (num_valid + 1e-9), 0.0)
+            
+            # Debug: print if NaN detected (only during tracing, not during JIT)
+            # jax.debug.print("{name} - nan_logits: {nan}, inf_logits: {inf}, valid: {v}, loss: {l}", 
+            #                 name=name, nan=has_nan_logits, inf=has_inf_logits, v=num_valid, l=avg_loss)
+            
+            return avg_loss
 
 
         # ------------------------------------------------------------------
@@ -243,9 +264,9 @@ class WorldModel(nn.Module):
         # 8. Compute losses
         # ------------------------------------------------------------------
 
-        loss_obs = compute_masked_loss(logits_obs_flat, labels_obs_flat)
-        loss_rew = compute_masked_loss(logits_rew_flat, labels_rew_flat)
-        loss_ends = compute_masked_loss(logits_ends_flat, labels_ends_flat)
+        loss_obs = compute_masked_loss(logits_obs_flat, labels_obs_flat, self.obs_vocab_size, "obs")
+        loss_rew = compute_masked_loss(logits_rew_flat, labels_rew_flat, 3, "rew")
+        loss_ends = compute_masked_loss(logits_ends_flat, labels_ends_flat, 2, "ends")
 
         total_loss = loss_obs + loss_rew + loss_ends
 
@@ -258,44 +279,36 @@ class WorldModel(nn.Module):
         
 
     def compute_labels(self, obs_tokens, rewards, ends, mask_padding):
+        """
+        Compute labels for the world model training.
+        
+        Args:
+            obs_tokens: (B, L, K) observation tokens where K=64
+            rewards: (B, L) reward values
+            ends: (B, L) episode end flags (0 or 1)
+            mask_padding: (B, L) boolean mask, True = padding (ignore)
+        
+        Returns:
+            labels_obs: (B*L*K,) flattened observation labels, -100 for ignored
+            labels_rew: (B*L,) flattened reward labels (0,1,2), -100 for ignored
+            labels_ends: (B*L,) flattened end labels (0,1), -100 for ignored
+        """
         # mask_padding: True = Padding (Ignore)
-        mask_valid = ~mask_padding
+        mask_valid = ~mask_padding  # True = valid data
         B, L, K = obs_tokens.shape
         
-        # 1. Obs Labels
-        # Flatten obs tokens: [B, L*K]
-        # We shift by 1 (Predict Next)
-        # We need to insert -100 (ignore) for Action positions in the stream?
-        # The PyTorch code:
-        # labels_observations = rearrange(obs_tokens, 'b t k -> b (t k)')[:, 1:]
-        # It essentially trains on Obs->Obs and Obs->Act? 
-        # Actually PyTorch code uses obs_tokens only.
-        
+        # 1. Obs Labels - expand mask to match obs shape
         flat_obs = obs_tokens.reshape(B, L * K)
-        # Apply padding mask
-        # Expand mask [B, L] -> [B, L, K] -> [B, L*K]
+        # Expand mask [B, L] -> [B, L*K] by repeating each position K times
         mask_flat = jnp.repeat(mask_valid, K, axis=1)
-        
-        labels_obs = jnp.where(mask_flat, flat_obs, -100)
-        
-        # The stream we fed in was [Obs...Act]. The output size is L*(K+1).
-        # We need to map labels to that stream. 
-        # This part requires distinct alignment with the PyTorch logic 
-        # which separates logits_observations logic.
-        
-        # For simplicity in translation:
-        # We construct the full target sequence [Obs_2..Act_1..Obs_Next]
-        # But let's stick to the PyTorch return values:
-        # It returns flattened labels.
-        
         labels_obs = jnp.where(mask_flat, flat_obs, -100).reshape(-1)
         
-        # 2. Reward Labels
-        # Rewards are {-1, 0, 1} -> shift to {0, 1, 2}
+        # 2. Reward Labels: {-1, 0, 1} -> {0, 1, 2}
         rewards_cls = jnp.sign(rewards).astype(jnp.int32) + 1
         labels_rew = jnp.where(mask_valid, rewards_cls, -100).reshape(-1)
         
-        # 3. Ends Labels
-        labels_ends = jnp.where(mask_valid, ends, -100).astype(jnp.int32).reshape(-1)
+        # 3. Ends Labels: ensure integer type
+        ends_int = ends.astype(jnp.int32)
+        labels_ends = jnp.where(mask_valid, ends_int, -100).reshape(-1)
         
         return labels_obs, labels_rew, labels_ends

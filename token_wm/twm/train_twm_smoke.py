@@ -83,6 +83,10 @@ def load_and_tokenize():
     obs_tokens = obs_tokens.reshape(num_eps, ep_len, 64) # (N, T, 64)
     
     print(f"Tokenization complete. Shape: {obs_tokens.shape}")
+    print(f"Token value range: [{obs_tokens.min()}, {obs_tokens.max()}]")
+    if obs_tokens.max() >= VOCAB_SIZE:
+        print(f"ERROR: Token values exceed VOCAB_SIZE={VOCAB_SIZE}! Clipping...")
+        obs_tokens = np.clip(obs_tokens, 0, VOCAB_SIZE - 1)
     
     # CLEANUP: Free VQ-VAE memory!
     del vqvae
@@ -106,7 +110,11 @@ def create_train_state(rng, config):
     dummy_input = jnp.zeros((1, SEQ_LEN * TOKENS_PER_BLOCK), dtype=jnp.int32)
     params = model.init(rng, dummy_input)
     
-    tx = optax.adam(LR)
+    # Use gradient clipping for stability
+    tx = optax.chain(
+        optax.clip_by_global_norm(1.0),
+        optax.adam(LR)
+    )
     return train_state.TrainState.create(apply_fn=model.apply, params=params, tx=tx)
 
 @jax.jit
@@ -142,34 +150,75 @@ def train_step(state, batch, dropout_rng):
     state = state.apply_gradients(grads=grads)
     return state, metrics
 
-def get_batch(obs_tokens, actions, rewards, dones, batch_size, seq_len):
-    # Randomly sample trajectories and start indices
-    num_eps, ep_len, _ = obs_tokens.shape
+def get_batch(obs_tokens, actions, rewards, dones, ep_lengths, batch_size, seq_len):
+    """
+    Sample a batch of sequences from the dataset.
     
-    # Valid start indices (must have room for seq_len)
-    max_start = ep_len - seq_len
-    
-    ep_idxs = np.random.randint(0, num_eps, size=batch_size)
-    start_idxs = np.random.randint(0, max_start, size=batch_size)
+    Args:
+        obs_tokens: (N, T, 64) tokenized observations
+        actions: (N, T) action indices
+        rewards: (N, T) reward values  
+        dones: (N, T) episode end flags
+        ep_lengths: (N,) precomputed valid lengths for each episode
+        batch_size: number of sequences to sample
+        seq_len: length of each sequence
+    """
+    num_eps = obs_tokens.shape[0]
     
     batch_obs = []
     batch_act = []
     batch_rew = []
     batch_end = []
+    batch_mask = []
     
-    for i, start in zip(ep_idxs, start_idxs):
-        end = start + seq_len
-        batch_obs.append(obs_tokens[i, start:end])
-        batch_act.append(actions[i, start:end])
-        batch_rew.append(rewards[i, start:end])
-        batch_end.append(dones[i, start:end])
+    for _ in range(batch_size):
+        # Sample an episode
+        ep_idx = np.random.randint(0, num_eps)
+        valid_len = ep_lengths[ep_idx]
         
+        # Make sure we have at least seq_len valid steps
+        if valid_len < seq_len:
+            # Pad this trajectory - start from 0
+            start = 0
+        else:
+            # Random start that fits within valid data
+            max_start = valid_len - seq_len
+            start = np.random.randint(0, max_start + 1)
+        
+        end = start + seq_len
+        
+        batch_obs.append(obs_tokens[ep_idx, start:end])
+        batch_act.append(actions[ep_idx, start:end])
+        batch_rew.append(rewards[ep_idx, start:end])
+        batch_end.append(dones[ep_idx, start:end])
+        
+        # Create padding mask: True = padding (to be ignored)
+        # If end > valid_len, mark those positions as padding
+        mask = np.zeros(seq_len, dtype=bool)
+        if end > valid_len:
+            # Positions from (valid_len - start) onwards are padding
+            pad_start = max(0, valid_len - start)
+            mask[pad_start:] = True
+        batch_mask.append(mask)
+    
+    obs_array = jnp.array(np.stack(batch_obs))
+    act_array = jnp.array(np.stack(batch_act))
+    rew_array = jnp.array(np.stack(batch_rew))
+    end_array = jnp.array(np.stack(batch_end))
+    mask_array = jnp.array(np.stack(batch_mask))
+    
+    # Debug: Check for invalid token values
+    if obs_array.max() >= VOCAB_SIZE:
+        print(f"WARNING: obs_tokens max {obs_array.max()} >= VOCAB_SIZE {VOCAB_SIZE}")
+    if obs_array.min() < 0:
+        print(f"WARNING: obs_tokens min {obs_array.min()} < 0")
+    
     return {
-        'obs_tokens': jnp.array(np.stack(batch_obs)),   # (B, 20, 64)
-        'actions': jnp.array(np.stack(batch_act)),      # (B, 20)
-        'rewards': jnp.array(np.stack(batch_rew)),
-        'ends': jnp.array(np.stack(batch_end)),
-        'mask_padding': jnp.zeros((batch_size, seq_len), dtype=bool) # No padding for now
+        'obs_tokens': obs_array,   # (B, 20, 64)
+        'actions': act_array,      # (B, 20)
+        'rewards': rew_array,
+        'ends': end_array,
+        'mask_padding': mask_array  # (B, 20) - True = padding
     }
 
 # --- 3. Rollout & Viz ---
@@ -306,6 +355,41 @@ def main():
     # 1. Prepare Data
     obs_tokens, actions, rewards, dones = load_and_tokenize()
     
+    # Debug: Check data statistics
+    print("--- Data Statistics ---")
+    print(f"  obs_tokens shape: {obs_tokens.shape}")
+    print(f"  obs_tokens dtype: {obs_tokens.dtype}")
+    print(f"  obs_tokens range: [{obs_tokens.min()}, {obs_tokens.max()}]")
+    print(f"  actions shape: {actions.shape}, dtype: {actions.dtype}")
+    print(f"  actions range: [{actions.min()}, {actions.max()}]")
+    print(f"  rewards range: [{rewards.min()}, {rewards.max()}]")
+    print(f"  dones unique values: {np.unique(dones)}")
+    
+    # Check for NaN in input data
+    if np.any(np.isnan(rewards)):
+        print("  WARNING: NaN in rewards!")
+        rewards = np.nan_to_num(rewards, nan=0.0)
+    if np.any(np.isnan(dones)):
+        print("  WARNING: NaN in dones!")
+        dones = np.nan_to_num(dones, nan=0.0)
+    if actions.max() >= ACT_VOCAB_SIZE:
+        print(f"  WARNING: actions max {actions.max()} >= ACT_VOCAB_SIZE {ACT_VOCAB_SIZE}!")
+        actions = np.clip(actions, 0, ACT_VOCAB_SIZE - 1)
+    
+    # Ensure dones is boolean-like (0 or 1)
+    dones = (dones > 0.5).astype(np.float32)
+    
+    # Pre-compute episode lengths for efficient batch sampling
+    num_eps, ep_len, _ = obs_tokens.shape
+    ep_lengths = np.zeros(num_eps, dtype=np.int32)
+    for i in range(num_eps):
+        done_idx = np.where(dones[i] > 0.5)[0]
+        if len(done_idx) > 0:
+            ep_lengths[i] = done_idx[0] + 1
+        else:
+            ep_lengths[i] = ep_len
+    print(f"  Episode lengths: min={ep_lengths.min()}, max={ep_lengths.max()}, mean={ep_lengths.mean():.1f}")
+    
     # 2. Train TWM
     print("--- Phase 2: Training TWM ---")
     config = TransformerConfig(
@@ -328,15 +412,31 @@ def main():
         epoch_losses = []
         pbar = tqdm(range(steps_per_epoch), desc=f"Epoch {epoch+1}")
         
-        for _ in pbar:
-            batch = get_batch(obs_tokens, actions, rewards, dones, BATCH_SIZE, SEQ_LEN)
+        for step in pbar:
+            batch = get_batch(obs_tokens, actions, rewards, dones, ep_lengths, BATCH_SIZE, SEQ_LEN)
             rng, drop_rng = jax.random.split(rng)
             
             state, metrics = train_step(state, batch, drop_rng)
             
-            loss_val = metrics.total_loss
+            loss_val = float(metrics.total_loss)
             epoch_losses.append(loss_val)
             pbar.set_postfix(loss=f"{loss_val:.4f}")
+            
+            # Early NaN detection
+            if np.isnan(loss_val):
+                print(f"\nNaN detected at epoch {epoch+1}, step {step}")
+                print(f"  loss_obs: {float(metrics.loss_obs)}")
+                print(f"  loss_rew: {float(metrics.loss_rewards)}")
+                print(f"  loss_ends: {float(metrics.loss_ends)}")
+                print(f"  Batch stats:")
+                print(f"    obs_tokens range: [{batch['obs_tokens'].min()}, {batch['obs_tokens'].max()}]")
+                print(f"    actions range: [{batch['actions'].min()}, {batch['actions'].max()}]")
+                print(f"    mask_padding sum: {batch['mask_padding'].sum()}")
+                break
+        
+        if np.isnan(loss_val):
+            print("Stopping training due to NaN")
+            break
             
         print(f"Epoch {epoch+1} Avg Loss: {np.mean(epoch_losses):.4f}")
 
