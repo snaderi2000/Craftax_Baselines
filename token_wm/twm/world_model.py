@@ -40,6 +40,9 @@ class WorldModel(nn.Module):
         act_pattern = jnp.zeros(self.config.tokens_per_block)
         act_pattern = act_pattern.at[-1].set(1.0)
         self.act_tokens_pattern = act_pattern
+
+        # Obs is everything else [1, 1, ..., 0]
+        obs_pattern = 1.0 - act_pattern
         
         # 2. Components
         self.transformer = Transformer(self.config)
