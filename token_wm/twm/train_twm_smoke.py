@@ -279,6 +279,7 @@ def decode_and_viz(tokens, original_pixels, save_name):
         return vqvae.apply(vqvae_params, z_q, method=lambda m, x: m.decoder(x, training=False))
 
     recon_pixels = decode_batch(indices) # (T, 63, 63, 3)
+    recon_pixels = recon_pixels[:, :63, :63, :]
     
     # Visualization Grid
     # Top: Real, Bottom: Imagined
