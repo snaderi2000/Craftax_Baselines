@@ -25,25 +25,25 @@ TWM_SAVE_PATH = "twm_params.pkl"
 OUTPUT_DIR = "twm_results"
 
 # ============= TRAINING CONFIG =============
-# Smoke test settings (fast, low quality):
-BATCH_SIZE = 32          
-SEQ_LEN = 20             # T_WM = 20 steps
-EPOCHS = 200             # For smoke test. Production: 1000+
-LR = 1e-4                # Lower LR for stability (was 1e-3)
+# Paper settings (Table 4 from the paper)
+BATCH_SIZE = 16          # Reduced for 20GB GPU (paper uses larger with 8xH100)
+SEQ_LEN = 20             # T_WM = 20 steps (paper: "largest that fits in memory")
+EPOCHS = 500             # More epochs for better convergence
+LR = 0.001               # Paper: 0.001
 
-# Model architecture
+# Model architecture (EXACTLY from paper Table 4)
 TOKENS_PER_BLOCK = 65    # 64 patches + 1 action
 MAX_BLOCKS = SEQ_LEN     # 20 steps
-EMBED_DIM = 256          # Increased from 128 for better capacity
-NUM_LAYERS = 6           # Increased from 3
-NUM_HEADS = 8
+EMBED_DIM = 128          # Paper: 128
+NUM_LAYERS = 3           # Paper: 3
+NUM_HEADS = 8            # Paper: 8
 VOCAB_SIZE = 512
 ACT_VOCAB_SIZE = 17      # Craftax actions
 
-# For production training, consider:
-# - EMBED_DIM = 512, NUM_LAYERS = 12 (paper-scale)
-# - EPOCHS = 2000+
-# - LR = 1e-4 with warmup + cosine decay
+# Dropout rates (Paper Table 4)
+EMBED_PDROP = 0.1
+ATTN_PDROP = 0.1
+RESID_PDROP = 0.1
 
 # --- 1. Data Loading & Tokenization ---
 
@@ -118,9 +118,9 @@ def create_train_state(rng, config):
     dummy_input = jnp.zeros((1, SEQ_LEN * TOKENS_PER_BLOCK), dtype=jnp.int32)
     params = model.init(rng, dummy_input)
     
-    # Use gradient clipping for stability
+    # Use gradient clipping for stability (Paper: max gradient norm 0.5)
     tx = optax.chain(
-        optax.clip_by_global_norm(1.0),
+        optax.clip_by_global_norm(0.5),
         optax.adam(LR)
     )
     return train_state.TrainState.create(apply_fn=model.apply, params=params, tx=tx)
@@ -138,7 +138,7 @@ def train_step(state, batch, dropout_rng):
         model = WorldModel(
             obs_vocab_size=VOCAB_SIZE, 
             act_vocab_size=ACT_VOCAB_SIZE, 
-            config=TransformerConfig(TOKENS_PER_BLOCK, MAX_BLOCKS, 'causal', NUM_LAYERS, NUM_HEADS, EMBED_DIM, 0.1, 0.1, 0.1)
+            config=TransformerConfig(TOKENS_PER_BLOCK, MAX_BLOCKS, 'causal', NUM_LAYERS, NUM_HEADS, EMBED_DIM, EMBED_PDROP, RESID_PDROP, ATTN_PDROP)
         )
         
         # CORRECT CALL: Use .apply()
@@ -243,7 +243,7 @@ def run_rollout(state, initial_obs_tokens, action_sequence, debug=True, temperat
     model = WorldModel(
         obs_vocab_size=VOCAB_SIZE, 
         act_vocab_size=ACT_VOCAB_SIZE, 
-        config=TransformerConfig(TOKENS_PER_BLOCK, MAX_BLOCKS, 'causal', NUM_LAYERS, NUM_HEADS, EMBED_DIM, 0.1, 0.1, 0.1)
+        config=TransformerConfig(TOKENS_PER_BLOCK, MAX_BLOCKS, 'causal', NUM_LAYERS, NUM_HEADS, EMBED_DIM, EMBED_PDROP, RESID_PDROP, ATTN_PDROP)
     )
     
     # RNG for sampling
@@ -449,7 +449,9 @@ def main():
         num_layers=NUM_LAYERS,
         num_heads=NUM_HEADS,
         embed_dim=EMBED_DIM,
-        embed_pdrop=0.1, resid_pdrop=0.1, attn_pdrop=0.1
+        embed_pdrop=EMBED_PDROP, 
+        resid_pdrop=RESID_PDROP, 
+        attn_pdrop=ATTN_PDROP
     )
     
     rng = jax.random.PRNGKey(42)
