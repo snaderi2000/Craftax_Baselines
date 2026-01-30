@@ -132,7 +132,7 @@ class WorldModel(nn.Module):
         # We pass the flattened tokens.
         # self.__call__ will run embedder -> transformer -> heads
         # It returns WorldModelOutput with logits for ALL steps.
-        output = self.__call__(tokens_flat, deterministic=False, rngs={'dropout': dropout_rng} if dropout_rng is not None else None)
+        output = self.__call__(tokens_flat, deterministic=False)
         
         # 3. Compute Raw Labels
         labels_obs, labels_rew, labels_ends = self.compute_labels(
