@@ -6,7 +6,7 @@ import numpy as np
 from flax.training import train_state
 from PIL import Image
 from tqdm import tqdm
-
+import pickle
 # Import your model
 from vqvae import VQVAE
 
@@ -14,7 +14,7 @@ from vqvae import VQVAE
 DATA_PATH = "../../replay_data/my_buffer/replay_data.npz"
 BATCH_SIZE = 128
 LEARNING_RATE = 1e-3  # Paper uses 0.001 (Source 694)
-EPOCHS = 5            # Adjust as needed (5 is good for a quick test)
+EPOCHS = 15            # Adjust as needed (5 is good for a quick test)
 SEED = 42
 OUTPUT_DIR = "vqvae_results"
 
@@ -144,6 +144,11 @@ def main():
     test_batch = jnp.array(all_obs[:16])
     recon, _, _, _ = state.apply_fn(state.params, test_batch, training=False)
     save_reconstruction_grid(test_batch, recon, "final", OUTPUT_DIR)
+
+    # After your training loop in train_vqvae.py
+    with open("vqvae_params.pkl", "wb") as f:
+        pickle.dump(state.params, f)
+    print("VQ-VAE weights saved to vqvae_params.pkl")
     
     print(f"Training complete. Check results in ./{OUTPUT_DIR}")
 
