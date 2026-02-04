@@ -603,27 +603,31 @@ def main():
     print("\n--- Teacher Forcing Test (Model Quality Check) ---")
     teacher_force_test(state, obs_tokens, actions, test_idx, test_start, test_len)
     
-    # Run Imagination with temperature sampling for diversity
-    # Lower temperature (0.5-0.8) = more focused, Higher (1.0-1.5) = more diverse
-    print("\n--- Autoregressive Generation ---")
+    # Try both greedy and sampling to compare
+    print("\n--- Autoregressive Generation (Greedy/Argmax) ---")
+    imagined_tokens_greedy = run_rollout(state, jnp.array(start_obs_tokens), jnp.array(action_seq), 
+                                         temperature=1.0, use_sampling=False)
+    
+    print("\n--- Autoregressive Generation (Temperature=0.5) ---")
     imagined_tokens = run_rollout(state, jnp.array(start_obs_tokens), jnp.array(action_seq), 
-                                  temperature=0.8, use_sampling=True)
+                                  temperature=0.5, use_sampling=True)
     
-    # Compare tokens
-    imagined_np = np.array(imagined_tokens[0])  # (10, 64)
-    print(f"\n--- Token Comparison ---")
-    print(f"  Imagined token range: [{imagined_np.min()}, {imagined_np.max()}]")
-    print(f"  Imagined frame 0 (first 10): {imagined_np[0, :10]}")
-    print(f"  Ground truth frame 0 (first 10): {gt_obs_tokens[0, :10]}")
+    # Compare tokens for both methods
+    for name, tokens in [("Greedy", imagined_tokens_greedy), ("Temp0.5", imagined_tokens)]:
+        imagined_np = np.array(tokens[0])  # (10, 64)
+        print(f"\n--- Token Comparison ({name}) ---")
+        print(f"  Imagined token range: [{imagined_np.min()}, {imagined_np.max()}]")
+        print(f"  Imagined frame 0 (first 10): {imagined_np[0, :10]}")
+        print(f"  Ground truth frame 0 (first 10): {gt_obs_tokens[0, :10]}")
+        
+        # Token accuracy (how many match exactly)
+        matches = (imagined_np == gt_obs_tokens).sum()
+        total = gt_obs_tokens.size
+        print(f"  Token accuracy: {matches}/{total} = {100*matches/total:.1f}%")
     
-    # Token accuracy (how many match exactly)
-    matches = (imagined_np == gt_obs_tokens).sum()
-    total = gt_obs_tokens.size
-    print(f"  Token accuracy: {matches}/{total} = {100*matches/total:.1f}%")
-    print(f"  (Random would be ~0.2% with vocab size 512)")
-    
-    # Visualize
-    decode_and_viz(imagined_tokens, gt_pixels, "smoke_test_rollout.png")
+    # Visualize both
+    decode_and_viz(imagined_tokens_greedy, gt_pixels, "smoke_test_greedy.png")
+    decode_and_viz(imagined_tokens, gt_pixels, "smoke_test_temp05.png")
     
     print("\nSmoke Test Complete!")
     print("NOTE: With only 15 gradient steps, the model is essentially random.")
