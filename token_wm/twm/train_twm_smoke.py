@@ -340,8 +340,11 @@ def run_rollout_with_context(state, context_obs_tokens, context_actions, future_
     cache = KeysValues.init(n=1, num_heads=NUM_HEADS, max_tokens=SEQ_LEN*TOKENS_PER_BLOCK, 
                             embed_dim=EMBED_DIM, num_layers=NUM_LAYERS)
     
-    M = len(context_actions)  # Number of context steps
+    M = len(context_actions)  # Number of burn-in steps (obs+action pairs)
     T_rollout = len(future_actions)
+    
+    # context_obs_tokens should have M+1 frames: M for burn-in + 1 starting frame
+    assert len(context_obs_tokens) == M + 1, f"Expected {M+1} obs frames, got {len(context_obs_tokens)}"
     
     if debug:
         print(f"  Context length (burn-in): {M} steps")
@@ -350,12 +353,11 @@ def run_rollout_with_context(state, context_obs_tokens, context_actions, future_
         print(f"  Context actions: {context_actions}")
         print(f"  Future actions: {future_actions}")
     
-    # 2. Feed ALL context frames and actions (burn-in)
-    # This gives the model the same context it sees during training
+    # 2. Feed burn-in context: M (obs, action) pairs
     for m in range(M):
         # Feed observation frame
-        obs_tokens = jnp.array(context_obs_tokens[m]).reshape(1, -1)  # (1, 64)
-        output, cache = model.apply(state.params, obs_tokens, past_keys_values=cache, deterministic=True)
+        obs_frame = jnp.array(context_obs_tokens[m]).reshape(1, -1)  # (1, 64)
+        output, cache = model.apply(state.params, obs_frame, past_keys_values=cache, deterministic=True)
         
         # Feed action
         act_token = jnp.array([[context_actions[m]]])  # (1, 1)
@@ -364,9 +366,12 @@ def run_rollout_with_context(state, context_obs_tokens, context_actions, future_
     if debug:
         print(f"  After burn-in, cache index: {cache[0].index}")
     
-    # 3. Now we're at the point where we start imagining
-    # Feed the last context observation (the starting point for imagination)
+    # 3. Now we're at the starting point for imagination
+    # The last context observation (index M) is our starting frame
     current_obs = jnp.array(context_obs_tokens[M]).reshape(1, -1)  # (1, 64)
+    
+    if debug:
+        print(f"  Starting frame (context_obs[{M}], first 5): {context_obs_tokens[M, :5]}")
     
     generated_frames_tokens = []
     
@@ -664,26 +669,35 @@ def main():
     total_needed = BURNIN_M + 1 + ROLLOUT_LEN  # context + starting frame + rollout
     assert test_start + total_needed < obs_tokens.shape[1], "Not enough data for test"
     
-    # Context for burn-in (M frames + actions)
-    context_obs = obs_tokens[test_idx, test_start:test_start + BURNIN_M + 1]  # (M+1, 64)
-    context_act = actions[test_idx, test_start:test_start + BURNIN_M + 1]     # (M+1,)
+    # Context for burn-in (M frames with M actions, then 1 starting frame)
+    # We need M+1 obs frames but only M actions for burn-in
+    context_obs = obs_tokens[test_idx, test_start:test_start + BURNIN_M + 1]  # (M+1, 64) - includes starting frame
+    context_act = actions[test_idx, test_start:test_start + BURNIN_M]         # (M,) - only M actions for burn-in
     
     # Future actions for rollout
-    future_start = test_start + BURNIN_M + 1
-    future_act = actions[test_idx, future_start:future_start + ROLLOUT_LEN]   # (ROLLOUT_LEN,)
+    # Starting frame is at index (test_start + BURNIN_M)
+    # Action at that index transitions to the next frame
+    # So future_act starts at the same index as the starting frame
+    future_act_start = test_start + BURNIN_M  # Action that takes us from starting frame to first generated frame
+    future_act = actions[test_idx, future_act_start:future_act_start + ROLLOUT_LEN]   # (ROLLOUT_LEN,)
     
-    # Ground truth for comparison
-    gt_obs_tokens = obs_tokens[test_idx, future_start:future_start + ROLLOUT_LEN]  # (ROLLOUT_LEN, 64)
+    # Ground truth: frames AFTER the starting frame (what we're trying to predict)
+    gt_start = test_start + BURNIN_M + 1  # First frame to predict
+    gt_obs_tokens = obs_tokens[test_idx, gt_start:gt_start + ROLLOUT_LEN]  # (ROLLOUT_LEN, 64)
     
     print(f"  Burn-in context: {BURNIN_M} steps (paper recommends M=5)")
     print(f"  Rollout length: {ROLLOUT_LEN} steps")
-    print(f"  Context obs shape: {context_obs.shape}")
+    print(f"  Context obs shape: {context_obs.shape} (M+1 frames)")
+    print(f"  Context act shape: {context_act.shape} (M actions)")
+    print(f"  Future act shape: {future_act.shape}")
+    print(f"  Starting frame index: {test_start + BURNIN_M}")
+    print(f"  Ground truth frames indices: {gt_start} to {gt_start + ROLLOUT_LEN - 1}")
     print(f"  Ground truth obs tokens (frame 0, first 10): {gt_obs_tokens[0, :10]}")
     print(f"  Ground truth token range: [{gt_obs_tokens.min()}, {gt_obs_tokens.max()}]")
     
     # Ground Truth Pixels
     data = np.load(DATA_PATH)
-    gt_pixels = data['obs'][test_idx:test_idx+1, future_start:future_start + ROLLOUT_LEN]
+    gt_pixels = data['obs'][test_idx:test_idx+1, gt_start:gt_start + ROLLOUT_LEN]
     
     # === TEACHER FORCING TEST ===
     print("\n--- Teacher Forcing Test (Model Quality Check) ---")
