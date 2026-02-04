@@ -310,84 +310,103 @@ def teacher_force_test(state, obs_tokens, actions, test_idx, test_start, test_le
     print(f"  (If this is high but generation is bad, issue is compounding errors)")
 
 
-def run_rollout(state, initial_obs_tokens, action_sequence, debug=True, temperature=1.0, use_sampling=True):
+def run_rollout_with_context(state, context_obs_tokens, context_actions, future_actions, 
+                              debug=True, temperature=1.0, use_sampling=True):
     """
-    Autoregressive generation.
-    initial_obs_tokens: (1, 64) - The starting frame
-    action_sequence: (1, T) - The actions to take
-    temperature: Temperature for sampling (higher = more diverse, lower = more deterministic)
-    use_sampling: If True, sample from distribution. If False, use argmax.
+    Autoregressive generation WITH burn-in context (matches paper Algorithm 4).
+    
+    Paper quote: "we use burn-in to refresh the hidden state before rolling out the policy"
+    
+    Args:
+        context_obs_tokens: (M+1, 64) - M burn-in frames + 1 starting frame
+        context_actions: (M+1,) - Actions taken during context (including the last one before imagination)
+        future_actions: (T,) - Actions to use for imagination rollout
+        temperature: Sampling temperature
+        use_sampling: Whether to sample or use argmax
+    
+    Returns:
+        Generated observation tokens for T future timesteps
     """
-    print(f"Running TWM Rollout (Imagination)... [temp={temperature}, sampling={use_sampling}]")
+    print(f"Running TWM Rollout with Context... [temp={temperature}, sampling={use_sampling}]")
     model = WorldModel(
         obs_vocab_size=VOCAB_SIZE, 
         act_vocab_size=ACT_VOCAB_SIZE, 
         config=TransformerConfig(TOKENS_PER_BLOCK, MAX_BLOCKS, 'causal', NUM_LAYERS, NUM_HEADS, EMBED_DIM, EMBED_PDROP, RESID_PDROP, ATTN_PDROP)
     )
     
-    # RNG for sampling
     sample_rng = jax.random.PRNGKey(42)
     
     # 1. Setup KV Cache
     cache = KeysValues.init(n=1, num_heads=NUM_HEADS, max_tokens=SEQ_LEN*TOKENS_PER_BLOCK, 
                             embed_dim=EMBED_DIM, num_layers=NUM_LAYERS)
     
-    # 2. Feed Initial Frame (Context)
-    curr_tokens = initial_obs_tokens.reshape(1, -1) # (1, 64)
-    
-    generated_frames_tokens = []
-    T_rollout = action_sequence.shape[1]
-    
-    # Current input to model starts as the initial observation patches
-    current_input_ids = curr_tokens # (1, 64)
+    M = len(context_actions)  # Number of context steps
+    T_rollout = len(future_actions)
     
     if debug:
-        print(f"  Initial obs tokens sample (first 5): {curr_tokens[0, :5]}")
-        print(f"  Action sequence: {action_sequence[0]}")
+        print(f"  Context length (burn-in): {M} steps")
+        print(f"  Rollout length: {T_rollout} steps")
+        print(f"  Context obs tokens sample (first frame, first 5): {context_obs_tokens[0, :5]}")
+        print(f"  Context actions: {context_actions}")
+        print(f"  Future actions: {future_actions}")
+    
+    # 2. Feed ALL context frames and actions (burn-in)
+    # This gives the model the same context it sees during training
+    for m in range(M):
+        # Feed observation frame
+        obs_tokens = jnp.array(context_obs_tokens[m]).reshape(1, -1)  # (1, 64)
+        output, cache = model.apply(state.params, obs_tokens, past_keys_values=cache, deterministic=True)
+        
+        # Feed action
+        act_token = jnp.array([[context_actions[m]]])  # (1, 1)
+        output, cache = model.apply(state.params, act_token, past_keys_values=cache, deterministic=True)
+    
+    if debug:
+        print(f"  After burn-in, cache index: {cache[0].index}")
+    
+    # 3. Now we're at the point where we start imagining
+    # Feed the last context observation (the starting point for imagination)
+    current_obs = jnp.array(context_obs_tokens[M]).reshape(1, -1)  # (1, 64)
+    
+    generated_frames_tokens = []
+    
+    def sample_token(logits, rng):
+        """Sample a token from logits with temperature."""
+        if use_sampling and temperature > 0:
+            scaled_logits = logits / temperature
+            return jax.random.categorical(rng, scaled_logits, axis=-1).reshape(1, 1)
+        else:
+            return jnp.argmax(logits, axis=-1).reshape(1, 1)
     
     for t in range(T_rollout):
-        # A. Process Observation Patches (64 tokens)
-        output, cache = model.apply(state.params, current_input_ids, past_keys_values=cache, deterministic=True)
+        # A. Process current observation (64 tokens)
+        output, cache = model.apply(state.params, current_obs, past_keys_values=cache, deterministic=True)
         
         if debug and t == 0:
-            print(f"  After obs, cache index: {cache[0].index}")
+            print(f"  After first imagination obs, cache index: {cache[0].index}")
         
-        # B. Process Action (1 token)
-        act_token = action_sequence[:, t:t+1] # (1, 1)
+        # B. Process action (1 token)
+        act_token = jnp.array([[future_actions[t]]])  # (1, 1)
         output, cache = model.apply(state.params, act_token, past_keys_values=cache, deterministic=True)
         
         if debug and t == 0:
             print(f"  After action, cache index: {cache[0].index}")
-            # Check the logits at action position
             action_logits = output.logits_observations[:, -1, :]
             print(f"  Logits stats: min={float(action_logits.min()):.2f}, max={float(action_logits.max()):.2f}")
-            print(f"  Logits sum: {float(action_logits.sum()):.2f} (should be non-zero)")
+            top5_idx = jnp.argsort(action_logits[0])[-5:][::-1]
+            top5_probs = jax.nn.softmax(action_logits[0])[top5_idx]
+            print(f"  First token - top5: {list(zip(np.array(top5_idx), np.array(top5_probs).round(3)))}")
         
         # C. Auto-regressive generation of the NEXT 64 observation tokens
         next_frame_tokens = []
         
-        def sample_token(logits, rng):
-            """Sample a token from logits with temperature."""
-            if use_sampling and temperature > 0:
-                # Apply temperature
-                scaled_logits = logits / temperature
-                # Sample from the distribution
-                return jax.random.categorical(rng, scaled_logits, axis=-1).reshape(1, 1)
-            else:
-                # Greedy decoding
-                return jnp.argmax(logits, axis=-1).reshape(1, 1)
-        
         # Get first token prediction from action output
-        logits = output.logits_observations[:, -1, :] # (1, 512)
+        logits = output.logits_observations[:, -1, :]
         sample_rng, rng = jax.random.split(sample_rng)
         next_token = sample_token(logits, rng)
         next_frame_tokens.append(next_token)
         
         if debug and t == 0:
-            # Show top-5 predictions
-            top5_idx = jnp.argsort(logits[0])[-5:][::-1]
-            top5_probs = jax.nn.softmax(logits[0])[top5_idx]
-            print(f"  First token - top5: {list(zip(np.array(top5_idx), np.array(top5_probs).round(3)))}")
             print(f"  First generated token: {int(next_token[0, 0])}")
         
         # Generate remaining 63 tokens
@@ -395,34 +414,87 @@ def run_rollout(state, initial_obs_tokens, action_sequence, debug=True, temperat
             output, cache = model.apply(state.params, next_token, past_keys_values=cache, deterministic=True)
             logits = output.logits_observations[:, -1, :]
             
-            # Check if logits are all zeros (masked out)
             if debug and t == 0 and i < 3:
                 print(f"    Token {i+1}: logits sum={float(logits.sum()):.2f}, max={float(logits.max()):.2f}")
             
             sample_rng, rng = jax.random.split(sample_rng)
             next_token = sample_token(logits, rng)
             next_frame_tokens.append(next_token)
-            
+        
         # Stack this frame
-        full_frame = jnp.concatenate(next_frame_tokens, axis=1) # (1, 64)
+        full_frame = jnp.concatenate(next_frame_tokens, axis=1)  # (1, 64)
         generated_frames_tokens.append(full_frame)
         
         if debug and t == 0:
             print(f"  Generated frame {t} tokens (first 10): {full_frame[0, :10]}")
             print(f"  Generated frame {t} unique values: {len(np.unique(np.array(full_frame)))}")
         
-        # This generated frame becomes the input for the next step
-        current_input_ids = full_frame
+        # This generated frame becomes the current observation for the next step
+        current_obs = full_frame
 
-    result = jnp.stack(generated_frames_tokens, axis=1) # (1, T, 64)
+    result = jnp.stack(generated_frames_tokens, axis=1)  # (1, T, 64)
     
     if debug:
         print(f"  Final generated shape: {result.shape}")
-        # Check token diversity across all frames
         all_tokens = np.array(result).flatten()
         print(f"  Token diversity: {len(np.unique(all_tokens))} unique values out of {len(all_tokens)}")
     
     return result
+
+
+# Keep old function for backwards compatibility but mark as deprecated
+def run_rollout(state, initial_obs_tokens, action_sequence, debug=True, temperature=1.0, use_sampling=True):
+    """DEPRECATED: Use run_rollout_with_context for paper-matching behavior."""
+    print("WARNING: Using old rollout without burn-in context. Results may be poor.")
+    # Convert to new format with no burn-in
+    context_obs = initial_obs_tokens.reshape(1, 64)  # Just the initial frame
+    context_actions = np.array([])  # No context actions
+    future_actions = np.array(action_sequence).flatten()
+    
+    # Can't use the new function directly without context, so use simplified version
+    print(f"Running TWM Rollout (No Context)... [temp={temperature}, sampling={use_sampling}]")
+    model = WorldModel(
+        obs_vocab_size=VOCAB_SIZE, 
+        act_vocab_size=ACT_VOCAB_SIZE, 
+        config=TransformerConfig(TOKENS_PER_BLOCK, MAX_BLOCKS, 'causal', NUM_LAYERS, NUM_HEADS, EMBED_DIM, EMBED_PDROP, RESID_PDROP, ATTN_PDROP)
+    )
+    
+    sample_rng = jax.random.PRNGKey(42)
+    cache = KeysValues.init(n=1, num_heads=NUM_HEADS, max_tokens=SEQ_LEN*TOKENS_PER_BLOCK, 
+                            embed_dim=EMBED_DIM, num_layers=NUM_LAYERS)
+    
+    current_obs = initial_obs_tokens.reshape(1, -1)
+    generated_frames_tokens = []
+    T_rollout = len(future_actions)
+    
+    def sample_token(logits, rng):
+        if use_sampling and temperature > 0:
+            return jax.random.categorical(rng, logits / temperature, axis=-1).reshape(1, 1)
+        return jnp.argmax(logits, axis=-1).reshape(1, 1)
+    
+    for t in range(T_rollout):
+        output, cache = model.apply(state.params, current_obs, past_keys_values=cache, deterministic=True)
+        act_token = jnp.array([[future_actions[t]]])
+        output, cache = model.apply(state.params, act_token, past_keys_values=cache, deterministic=True)
+        
+        next_frame_tokens = []
+        logits = output.logits_observations[:, -1, :]
+        sample_rng, rng = jax.random.split(sample_rng)
+        next_token = sample_token(logits, rng)
+        next_frame_tokens.append(next_token)
+        
+        for _ in range(63):
+            output, cache = model.apply(state.params, next_token, past_keys_values=cache, deterministic=True)
+            logits = output.logits_observations[:, -1, :]
+            sample_rng, rng = jax.random.split(sample_rng)
+            next_token = sample_token(logits, rng)
+            next_frame_tokens.append(next_token)
+        
+        full_frame = jnp.concatenate(next_frame_tokens, axis=1)
+        generated_frames_tokens.append(full_frame)
+        current_obs = full_frame
+
+    return jnp.stack(generated_frames_tokens, axis=1)
 
 def decode_and_viz(tokens, original_pixels, save_name):
     """
@@ -577,61 +649,87 @@ def main():
         pickle.dump(state.params, f)
     print("TWM params saved.")
     
-    # 4. Rollout Smoke Test
-    print("--- Phase 4: Rollout Smoke Test ---")
-    # Pick a test sample
+    # 4. Rollout Smoke Test (Paper-style with burn-in context)
+    print("--- Phase 4: Rollout Smoke Test (Paper-style) ---")
+    
+    # Paper settings (Table 5)
+    BURNIN_M = 5  # Burn-in horizon M (paper: 5)
+    ROLLOUT_LEN = 5  # Number of frames to generate
+    
+    # Pick a test sample - need enough room for burn-in + rollout
     test_idx = 0
-    test_start = 0
-    test_len = 10 # 10 steps rollout
+    test_start = 10  # Start after some timesteps so we have diverse context
     
-    # Inputs
-    start_obs_tokens = obs_tokens[test_idx, test_start] # (64,)
-    action_seq = actions[test_idx, test_start:test_start+test_len].reshape(1, -1) # (1, 10)
+    # Ensure we have enough data
+    total_needed = BURNIN_M + 1 + ROLLOUT_LEN  # context + starting frame + rollout
+    assert test_start + total_needed < obs_tokens.shape[1], "Not enough data for test"
     
-    # Ground truth tokens for comparison
-    gt_obs_tokens = obs_tokens[test_idx, test_start+1:test_start+1+test_len]  # (10, 64)
+    # Context for burn-in (M frames + actions)
+    context_obs = obs_tokens[test_idx, test_start:test_start + BURNIN_M + 1]  # (M+1, 64)
+    context_act = actions[test_idx, test_start:test_start + BURNIN_M + 1]     # (M+1,)
     
+    # Future actions for rollout
+    future_start = test_start + BURNIN_M + 1
+    future_act = actions[test_idx, future_start:future_start + ROLLOUT_LEN]   # (ROLLOUT_LEN,)
+    
+    # Ground truth for comparison
+    gt_obs_tokens = obs_tokens[test_idx, future_start:future_start + ROLLOUT_LEN]  # (ROLLOUT_LEN, 64)
+    
+    print(f"  Burn-in context: {BURNIN_M} steps (paper recommends M=5)")
+    print(f"  Rollout length: {ROLLOUT_LEN} steps")
+    print(f"  Context obs shape: {context_obs.shape}")
     print(f"  Ground truth obs tokens (frame 0, first 10): {gt_obs_tokens[0, :10]}")
     print(f"  Ground truth token range: [{gt_obs_tokens.min()}, {gt_obs_tokens.max()}]")
     
     # Ground Truth Pixels
     data = np.load(DATA_PATH)
-    gt_pixels = data['obs'][test_idx:test_idx+1, test_start+1:test_start+1+test_len] # Next frames
+    gt_pixels = data['obs'][test_idx:test_idx+1, future_start:future_start + ROLLOUT_LEN]
     
     # === TEACHER FORCING TEST ===
-    # This tests if the model can predict correctly given GROUND TRUTH context
     print("\n--- Teacher Forcing Test (Model Quality Check) ---")
-    teacher_force_test(state, obs_tokens, actions, test_idx, test_start, test_len)
+    teacher_force_test(state, obs_tokens, actions, test_idx, test_start, ROLLOUT_LEN + BURNIN_M)
     
-    # Try both greedy and sampling to compare
-    print("\n--- Autoregressive Generation (Greedy/Argmax) ---")
-    imagined_tokens_greedy = run_rollout(state, jnp.array(start_obs_tokens), jnp.array(action_seq), 
-                                         temperature=1.0, use_sampling=False)
+    # === PAPER-STYLE ROLLOUT WITH CONTEXT ===
+    print("\n--- Paper-style Rollout (with burn-in context) ---")
+    print("\n  [Greedy/Argmax]")
+    imagined_greedy = run_rollout_with_context(
+        state, context_obs, context_act, future_act,
+        temperature=1.0, use_sampling=False
+    )
     
-    print("\n--- Autoregressive Generation (Temperature=0.5) ---")
-    imagined_tokens = run_rollout(state, jnp.array(start_obs_tokens), jnp.array(action_seq), 
-                                  temperature=0.5, use_sampling=True)
+    print("\n  [Temperature=0.7 Sampling]")
+    imagined_sampled = run_rollout_with_context(
+        state, context_obs, context_act, future_act,
+        temperature=0.7, use_sampling=True
+    )
     
     # Compare tokens for both methods
-    for name, tokens in [("Greedy", imagined_tokens_greedy), ("Temp0.5", imagined_tokens)]:
-        imagined_np = np.array(tokens[0])  # (10, 64)
+    for name, tokens in [("Greedy+Context", imagined_greedy), ("Temp0.7+Context", imagined_sampled)]:
+        imagined_np = np.array(tokens[0])  # (ROLLOUT_LEN, 64)
         print(f"\n--- Token Comparison ({name}) ---")
         print(f"  Imagined token range: [{imagined_np.min()}, {imagined_np.max()}]")
         print(f"  Imagined frame 0 (first 10): {imagined_np[0, :10]}")
         print(f"  Ground truth frame 0 (first 10): {gt_obs_tokens[0, :10]}")
         
-        # Token accuracy (how many match exactly)
+        # Token accuracy
         matches = (imagined_np == gt_obs_tokens).sum()
         total = gt_obs_tokens.size
         print(f"  Token accuracy: {matches}/{total} = {100*matches/total:.1f}%")
     
-    # Visualize both
-    decode_and_viz(imagined_tokens_greedy, gt_pixels, "smoke_test_greedy.png")
-    decode_and_viz(imagined_tokens, gt_pixels, "smoke_test_temp05.png")
+    # Visualize
+    decode_and_viz(imagined_greedy, gt_pixels, "smoke_test_context_greedy.png")
+    decode_and_viz(imagined_sampled, gt_pixels, "smoke_test_context_sampled.png")
     
-    print("\nSmoke Test Complete!")
-    print("NOTE: With only 15 gradient steps, the model is essentially random.")
-    print("      For meaningful generation, train for many more epochs.")
+    print("\n" + "="*60)
+    print("SMOKE TEST COMPLETE!")
+    print("="*60)
+    print(f"  Training loss: {np.mean(epoch_losses):.4f}")
+    print(f"  Teacher forcing accuracy: See above")
+    print(f"  Paper-style rollout with M={BURNIN_M} burn-in: See above")
+    print("\nNext steps for production:")
+    print("  1. Collect more data (aim for 50k+ transitions)")
+    print("  2. Integrate with MBRL loop (Algorithm 1 from paper)")
+    print("  3. Use flashbax for efficient replay buffer")
 
 if __name__ == "__main__":
     main()
