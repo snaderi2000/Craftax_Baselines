@@ -178,3 +178,4 @@ craftax_classic_200M_dataset/
 ../craftax_classic_1M_dataset/
 craftax_classic_1M_dataset/
 *.duckdb
+*.pkl
