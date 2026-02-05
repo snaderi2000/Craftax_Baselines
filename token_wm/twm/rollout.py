@@ -30,6 +30,8 @@ def decode_tokens_to_pixels(tokens, vqvae, v_params):
     
     pixels = vqvae.apply(v_params, z_q, method=lambda m, x: m.decoder(x, training=False))
     # Scale to uint8 for PIL
+    pixels = pixels[:, :63, :63, :] #crop to scale of 63x63
+
     return np.clip(pixels * 255, 0, 255).astype(np.uint8)
 
 def main():
