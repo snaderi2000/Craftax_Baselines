@@ -383,14 +383,16 @@ def run_rollout_with_context(state, context_obs_tokens, context_actions, future_
         else:
             return jnp.argmax(logits, axis=-1).reshape(1, 1)
     
+    # First iteration: process the starting observation (it's not in cache yet)
+    output, cache = model.apply(state.params, current_obs, past_keys_values=cache, deterministic=True)
+    
+    if debug:
+        print(f"  After first imagination obs, cache index: {cache[0].index}")
+    
     for t in range(T_rollout):
-        # A. Process current observation (64 tokens)
-        output, cache = model.apply(state.params, current_obs, past_keys_values=cache, deterministic=True)
-        
-        if debug and t == 0:
-            print(f"  After first imagination obs, cache index: {cache[0].index}")
-        
-        # B. Process action (1 token)
+        # A. Process action (1 token)
+        # The observation for this timestep is ALREADY in the cache 
+        # (either from initial feed or from previous generation)
         act_token = jnp.array([[future_actions[t]]])  # (1, 1)
         output, cache = model.apply(state.params, act_token, past_keys_values=cache, deterministic=True)
         
@@ -402,7 +404,8 @@ def run_rollout_with_context(state, context_obs_tokens, context_actions, future_
             top5_probs = jax.nn.softmax(action_logits[0])[top5_idx]
             print(f"  First token - top5: {list(zip(np.array(top5_idx), np.array(top5_probs).round(3)))}")
         
-        # C. Auto-regressive generation of the NEXT 64 observation tokens
+        # B. Auto-regressive generation of the NEXT 64 observation tokens
+        # Each generated token is fed to the model and added to the cache
         next_frame_tokens = []
         
         # Get first token prediction from action output
@@ -414,19 +417,23 @@ def run_rollout_with_context(state, context_obs_tokens, context_actions, future_
         if debug and t == 0:
             print(f"  First generated token: {int(next_token[0, 0])}")
         
-        # Generate remaining 63 tokens
-        for i in range(63):
+        # Generate remaining 63 tokens - each is fed and cached
+        # IMPORTANT: We feed ALL 64 tokens (including the first one) to build the cache
+        for i in range(64):
+            # Feed current token to cache (this is how autoregressive generation works)
             output, cache = model.apply(state.params, next_token, past_keys_values=cache, deterministic=True)
-            logits = output.logits_observations[:, -1, :]
             
-            if debug and t == 0 and i < 3:
-                print(f"    Token {i+1}: logits sum={float(logits.sum()):.2f}, max={float(logits.max()):.2f}")
-            
-            sample_rng, rng = jax.random.split(sample_rng)
-            next_token = sample_token(logits, rng)
-            next_frame_tokens.append(next_token)
+            if i < 63:  # Generate next token for all but last position
+                logits = output.logits_observations[:, -1, :]
+                
+                if debug and t == 0 and i < 3:
+                    print(f"    Token {i+1}: logits sum={float(logits.sum()):.2f}, max={float(logits.max()):.2f}")
+                
+                sample_rng, rng = jax.random.split(sample_rng)
+                next_token = sample_token(logits, rng)
+                next_frame_tokens.append(next_token)
         
-        # Stack this frame
+        # Stack this frame for return value
         full_frame = jnp.concatenate(next_frame_tokens, axis=1)  # (1, 64)
         generated_frames_tokens.append(full_frame)
         
@@ -434,8 +441,9 @@ def run_rollout_with_context(state, context_obs_tokens, context_actions, future_
             print(f"  Generated frame {t} tokens (first 10): {full_frame[0, :10]}")
             print(f"  Generated frame {t} unique values: {len(np.unique(np.array(full_frame)))}")
         
-        # This generated frame becomes the current observation for the next step
-        current_obs = full_frame
+        # NOTE: We do NOT re-feed the generated observation!
+        # The generated tokens are already in the cache from the autoregressive loop above.
+        # The next iteration just needs to process the action.
 
     result = jnp.stack(generated_frames_tokens, axis=1)  # (1, T, 64)
     
