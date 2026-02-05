@@ -46,7 +46,7 @@ class WorldModel(nn.Module):
         
         # 2. Components
         self.transformer = Transformer(self.config)
-        self.pos_emb = nn.Embed(self.config.max_tokens, self.config.embed_dim)
+        # NOTE: pos_emb removed - using RoPE in transformer instead (Paper Table 4)
         
         # Embedder with Correct Lists
         self.embedder = Embedder(
@@ -99,13 +99,10 @@ class WorldModel(nn.Module):
         # Mix Obs/Act embeddings
         x = self.embedder(tokens, start_step=prev_steps)
         
-        # Add Learned Positional Embeddings
-        pos_indices = jnp.arange(T) + prev_steps
-        # Debug prints (comment out for cleaner output)
-        # print("pos_indices.max():", pos_indices.max())
-        # print("pos_emb.num_embeddings:", self.pos_emb.num_embeddings)
-
-        x = x + self.pos_emb(pos_indices)
+        # NOTE: We use RoPE (Rotary Position Embeddings) in the Transformer,
+        # so we do NOT add learned positional embeddings here.
+        # The paper (Table 4) specifies RoPE only.
+        # Previously we had: x = x + self.pos_emb(pos_indices) - REMOVED
         
         # 2. Transformer Backbone
         # Returns (x, new_cache) if cache provided, else x

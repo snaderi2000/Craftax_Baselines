@@ -33,16 +33,19 @@ class RotaryEmbedding(nn.Module):
     """
     Implements Rotary Positional Embeddings (RoPE).
     Crucial for the Craftax TWM as specified in the paper.
+    
+    IMPORTANT: Must pass start_pos for KV caching to work correctly!
     """
     dim: int
 
     @nn.compact
-    def __call__(self, x):
+    def __call__(self, x, start_pos: int = 0):
         # x shape: [batch, length, heads, dim]
         seq_len = x.shape[1]
         
-        # Create position indices [0, 1, ..., seq_len-1]
-        pos = jnp.arange(seq_len, dtype=jnp.float32)
+        # Create position indices starting from start_pos
+        # This is CRITICAL for KV caching - new tokens need absolute positions!
+        pos = jnp.arange(seq_len, dtype=jnp.float32) + start_pos
         
         # Calculate frequencies
         # theta_i = 10000 ^ (-2(i-1)/d)
@@ -107,11 +110,18 @@ class SelfAttention(nn.Module):
         k = rearrange(k, 'b t (h d) -> b t h d', h=self.config.num_heads)
         v = rearrange(v, 'b t (h d) -> b t h d', h=self.config.num_heads)
 
-        # 3. Apply RoPE
-        q = self.rope(q)
-        k = self.rope(k)
+        # 4. KV Cache Interaction - need to get start_pos BEFORE applying RoPE
+        if kv_cache is not None:
+            start_pos = kv_cache.index
+        else:
+            start_pos = 0
 
-        # 4. KV Cache Interaction
+        # 3. Apply RoPE with correct absolute positions
+        # This is CRITICAL for generation - tokens must know their absolute position!
+        q = self.rope(q, start_pos)
+        k = self.rope(k, start_pos)
+
+        # 4. KV Cache Update
         if kv_cache is not None:
             # Update cache using the class method
             new_kv_cache = kv_cache.update(k, v)
@@ -119,9 +129,7 @@ class SelfAttention(nn.Module):
             # Use full history for attention
             k_in = new_kv_cache.key
             v_in = new_kv_cache.value
-            
-            # Calculate start position for masking
-            start_pos = kv_cache.index
+            # start_pos already set above for RoPE
         else:
             k_in = k
             v_in = v
