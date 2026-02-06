@@ -232,8 +232,8 @@ class VQVAE(nn.Module):
         """
         z = self.encoder(x, training=False)
         _, _, _, indices = self.quantizer(z)
-        # indices is (B, 8, 8), flatten to (B, 64)
-        b = indices.shape[0]
+        # indices is flat (B*H*W,) from VectorQuantizer, reshape to (B, 64)
+        b = x.shape[0]
         return indices.reshape(b, -1)
     
     def decode_tokens(self, tokens):
@@ -293,8 +293,8 @@ class VQVAE(nn.Module):
         # Total loss (Equation 5 from paper with lambda1=1, lambda2=0, lambda3=1, lambda4=0.25)
         total_loss = l1_loss + loss_codebook + loss_commitment
         
-        # Flatten indices
-        b = indices.shape[0]
+        # Flatten indices (indices is flat (B*H*W,) from VectorQuantizer)
+        b = x.shape[0]
         tokens = indices.reshape(b, -1)
         
         return x_recon, tokens, total_loss, {
