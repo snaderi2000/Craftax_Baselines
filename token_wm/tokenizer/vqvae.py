@@ -215,7 +215,90 @@ class VQVAE(nn.Module):
         return x_recon, loss_codebook, loss_commitment, indices
 
     def encode_indices(self, x):
-        """Helper for inference/rollouts"""
+        """Helper for inference/rollouts - returns tokens only"""
         z = self.encoder(x, training=False)
         _, _, _, indices = self.quantizer(z)
         return indices
+    
+    def encode(self, x):
+        """
+        Encode images to tokens.
+        
+        Args:
+            x: (B, H, W, C) images
+            
+        Returns:
+            tokens: (B, L) where L=64 for 8x8 feature map
+        """
+        z = self.encoder(x, training=False)
+        _, _, _, indices = self.quantizer(z)
+        # indices is (B, 8, 8), flatten to (B, 64)
+        b = indices.shape[0]
+        return indices.reshape(b, -1)
+    
+    def decode_tokens(self, tokens):
+        """
+        Decode tokens back to images.
+        
+        Args:
+            tokens: (B, L) where L=64
+            
+        Returns:
+            images: (B, H, W, C)
+        """
+        b = tokens.shape[0]
+        # Reshape tokens to spatial (B, 8, 8)
+        tokens_spatial = tokens.reshape(b, 8, 8)
+        
+        # Get embeddings from codebook
+        # self.quantizer.embedding is (num_embeddings, embedding_dim)
+        embedding_norm = self.quantizer.embedding / (
+            jnp.linalg.norm(self.quantizer.embedding, axis=-1, keepdims=True) + 1e-10
+        )
+        
+        # Gather embeddings for each token
+        z_q = embedding_norm[tokens_spatial]  # (B, 8, 8, embedding_dim)
+        
+        # Decode
+        x_recon = self.decoder(z_q, training=False)
+        
+        return x_recon
+    
+    def get_vq_loss(self, x):
+        """
+        Compute full VQ-VAE loss for training.
+        
+        Returns:
+            recon: reconstructed images
+            tokens: (B, L) token indices
+            total_loss: scalar loss
+            metrics: dict with individual losses
+        """
+        # Encode
+        z = self.encoder(x, training=True)
+        
+        # Quantize
+        z_q, loss_codebook, loss_commitment, indices = self.quantizer(z)
+        
+        # Decode
+        x_recon = self.decoder(z_q, training=True)
+        
+        # Crop if needed
+        if x_recon.shape[1] != x.shape[1] or x_recon.shape[2] != x.shape[2]:
+            x_recon = x_recon[:, :x.shape[1], :x.shape[2], :]
+        
+        # Reconstruction loss (paper uses L1 with lambda1=1)
+        l1_loss = jnp.mean(jnp.abs(x - x_recon))
+        
+        # Total loss (Equation 5 from paper with lambda1=1, lambda2=0, lambda3=1, lambda4=0.25)
+        total_loss = l1_loss + loss_codebook + loss_commitment
+        
+        # Flatten indices
+        b = indices.shape[0]
+        tokens = indices.reshape(b, -1)
+        
+        return x_recon, tokens, total_loss, {
+            'l1': l1_loss,
+            'codebook': loss_codebook,
+            'commitment': loss_commitment,
+        }
