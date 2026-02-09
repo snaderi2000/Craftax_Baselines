@@ -3,13 +3,21 @@ M1 Model-Based RL Implementation for Craftax
 Based on "Improving Transformer World Models for Data-Efficient RL"
 
 Uses the RNN-based IMPALA policy from ppo_m1_best.py (ActorCriticRNN)
-and trains it on both real environment data AND imagined TWM rollouts.
 
-Algorithm 1 from the paper:
-1. Collect data from environment → replay buffer
-2. Update policy on environment data (PPO)
-3. Update world model (VQ-VAE + TWM)
-4. Update policy on imagined data (after T_BP steps)
+PURE M1 (NOT Dyna):
+- Before T_BP: Collect data, train VQ-VAE, train TWM
+- After T_BP: Train policy ONLY on imagined data from TWM
+- Real environment data is ONLY used to train the world model, NOT the policy
+
+MEMORY OPTIMIZED VERSION:
+- Uses separate JIT functions instead of one giant JIT
+- Python outer loop to avoid tracing entire training
+- Each step is JIT compiled independently
+
+Algorithm 1 from the paper (M1):
+1. Collect data from environment → replay buffer (for WM training)
+2. Update world model (VQ-VAE + TWM) on real data
+3. Update policy ONLY on imagined data (after T_BP steps)
 """
 
 import argparse
@@ -19,6 +27,7 @@ import time
 import pickle
 import functools
 from typing import NamedTuple, Dict, Any, Tuple
+from tqdm import tqdm
 
 import jax
 import jax.numpy as jnp
@@ -131,15 +140,13 @@ class ActorCriticRNN(nn.Module):
 
     @nn.compact
     def __call__(self, hidden, x):
-        obs, dones = x  # obs: (T, B, 63, 63, 3), dones: (T, B)
+        obs, dones = x
 
         # 1. IMPALA CNN Encoder
         x_enc = obs.astype(jnp.float32)
         for ch in (64, 64, 128):
             x_enc = ImpalaStack(ch)(x_enc)
         x_enc = nn.relu(x_enc)
-        
-        # Flatten CNN output -> z_t (8192 dims)
         z_t = x_enc.reshape((*x_enc.shape[:2], -1))
 
         # 2. RNN Bridge
@@ -245,509 +252,340 @@ def create_twm_train_state(config, rng, sample_tokens):
 
 
 # =============================================================================
+# JIT-Compiled Step Functions (Separate JITs for memory efficiency)
+# =============================================================================
+
+def make_env_rollout_fn(env, env_params, network, config):
+    """Create JIT-compiled environment rollout function."""
+    
+    @jax.jit
+    def env_rollout(policy_state, env_state, last_obs, last_done, hstate, rng):
+        """Collect NUM_STEPS of environment data (for world model training)."""
+        
+        def _env_step(carry, _):
+            policy_state, env_state, last_obs, last_done, hstate, rng = carry
+            rng, action_rng, step_rng = jax.random.split(rng, 3)
+            
+            ac_in = (last_obs[np.newaxis, :], last_done[np.newaxis, :])
+            hstate, pi, value = network.apply(policy_state.params, hstate, ac_in)
+            action = pi.sample(seed=action_rng)
+            log_prob = pi.log_prob(action)
+            value, action, log_prob = value.squeeze(0), action.squeeze(0), log_prob.squeeze(0)
+            
+            obsv, env_state, reward, done, info = env.step(step_rng, env_state, action, env_params)
+            
+            transition = Transition(last_done, action, value, reward, log_prob, last_obs, info)
+            return (policy_state, env_state, obsv, done, hstate, rng), transition
+        
+        initial_hstate = hstate
+        carry = (policy_state, env_state, last_obs, last_done, hstate, rng)
+        carry, traj = jax.lax.scan(_env_step, carry, None, config["NUM_STEPS"])
+        _, env_state, last_obs, last_done, hstate, rng = carry
+        
+        return traj, env_state, last_obs, last_done, hstate, initial_hstate, rng
+    
+    return env_rollout
+
+
+def make_vqvae_update_fn(vqvae, config):
+    """Create JIT-compiled VQ-VAE update function."""
+    
+    def _vqvae_loss_fn(params, obs_batch):
+        recon, tokens, total_loss, metrics = vqvae.apply(params, obs_batch, method=vqvae.get_vq_loss)
+        return total_loss, metrics
+    
+    @jax.jit
+    def vqvae_update(vqvae_state, obs_batch, num_updates):
+        """Update VQ-VAE on observation batch."""
+        def _update_step(state, _):
+            grad_fn = jax.value_and_grad(_vqvae_loss_fn, has_aux=True)
+            (loss, metrics), grads = grad_fn(state.params, obs_batch)
+            state = state.apply_gradients(grads=grads)
+            return state, loss
+        
+        vqvae_state, losses = jax.lax.scan(_update_step, vqvae_state, None, num_updates)
+        return vqvae_state, losses[-1]
+    
+    return vqvae_update
+
+
+def make_twm_update_fn(twm, vqvae, config):
+    """Create JIT-compiled TWM update function."""
+    
+    def _twm_loss_fn(params, obs_tokens, actions, mask):
+        """Compute TWM loss on tokenized sequences."""
+        # Interleave obs tokens and action tokens: [o0, a0, o1, a1, ...]
+        B, T, L = obs_tokens.shape  # (batch, time, tokens_per_frame)
+        
+        # Build input sequence
+        # For each timestep: 64 obs tokens + 1 action token = 65 tokens
+        seq_len = T * config["TOKENS_PER_BLOCK"]
+        
+        # Create interleaved sequence
+        input_tokens = jnp.zeros((B, seq_len), dtype=jnp.int32)
+        
+        # Fill in observation tokens and action tokens
+        for t in range(T):
+            start_idx = t * config["TOKENS_PER_BLOCK"]
+            # Obs tokens for this frame
+            input_tokens = input_tokens.at[:, start_idx:start_idx+L].set(obs_tokens[:, t, :])
+            # Action token (if not last frame)
+            if t < T - 1:
+                input_tokens = input_tokens.at[:, start_idx+L].set(actions[:, t])
+        
+        # Forward pass
+        output = twm.apply(params, input_tokens, deterministic=False)
+        
+        # Compute loss on next-token prediction
+        # Target is shifted input
+        target_tokens = jnp.roll(input_tokens, -1, axis=1)
+        
+        # Get observation logits and compute cross-entropy
+        obs_logits = output.logits_observations  # (B, seq_len, vocab_size)
+        
+        # Flatten for loss computation
+        logits_flat = obs_logits[:, :-1, :].reshape(-1, obs_logits.shape[-1])
+        targets_flat = target_tokens[:, :-1].reshape(-1)
+        
+        # Cross-entropy loss with mask
+        mask_flat = jnp.ones_like(targets_flat, dtype=jnp.float32)  # Simple mask for now
+        
+        log_probs = jax.nn.log_softmax(logits_flat, axis=-1)
+        targets_one_hot = jax.nn.one_hot(targets_flat, obs_logits.shape[-1])
+        loss = -jnp.sum(log_probs * targets_one_hot, axis=-1)
+        loss = jnp.sum(loss * mask_flat) / jnp.maximum(jnp.sum(mask_flat), 1.0)
+        
+        return loss
+    
+    @jax.jit
+    def twm_update(twm_state, vqvae_state, obs_batch, actions_batch, rng):
+        """Update TWM on observation/action sequences."""
+        # Tokenize observations
+        B, T = obs_batch.shape[:2]
+        obs_flat = obs_batch.reshape(B * T, 63, 63, 3)
+        tokens_flat = vqvae.apply(vqvae_state.params, obs_flat, method=vqvae.encode)
+        obs_tokens = tokens_flat.reshape(B, T, -1)
+        
+        # Compute gradient and update
+        mask = jnp.ones((B, T))  # Simple mask
+        grad_fn = jax.value_and_grad(_twm_loss_fn)
+        loss, grads = grad_fn(twm_state.params, obs_tokens, actions_batch, mask)
+        twm_state = twm_state.apply_gradients(grads=grads)
+        
+        return twm_state, loss
+    
+    return twm_update
+
+
+def make_imagination_fn(network, vqvae, twm, config):
+    """Create JIT-compiled imagination rollout + PPO function (M1 style)."""
+    
+    def _calculate_gae(traj_batch, last_val, last_done):
+        def _get_advantages(carry, transition):
+            gae, next_value, next_done = carry
+            done, value, reward = transition.done, transition.value, transition.reward
+            delta = reward + config["GAMMA"] * next_value * (1 - next_done) - value
+            gae = delta + config["GAMMA"] * config["GAE_LAMBDA"] * (1 - next_done) * gae
+            return (gae, value, done), gae
+        
+        _, advantages = jax.lax.scan(
+            _get_advantages, (jnp.zeros_like(last_val), last_val, last_done),
+            traj_batch, reverse=True, unroll=16,
+        )
+        return advantages, advantages + traj_batch.value
+    
+    def _ppo_loss_fn(params, init_hstate, traj_batch, gae, targets):
+        _, pi, value = network.apply(params, init_hstate[0], (traj_batch.obs, traj_batch.done))
+        log_prob = pi.log_prob(traj_batch.action)
+        
+        value_pred_clipped = traj_batch.value + (value - traj_batch.value).clip(-config["CLIP_EPS"], config["CLIP_EPS"])
+        value_losses = jnp.square(value - targets)
+        value_losses_clipped = jnp.square(value_pred_clipped - targets)
+        value_loss = 0.5 * jnp.maximum(value_losses, value_losses_clipped).mean()
+        
+        ratio = jnp.exp(log_prob - traj_batch.log_prob)
+        loss_actor1 = ratio * gae
+        loss_actor2 = jnp.clip(ratio, 1.0 - config["CLIP_EPS"], 1.0 + config["CLIP_EPS"]) * gae
+        loss_actor = -jnp.minimum(loss_actor1, loss_actor2).mean()
+        
+        entropy = pi.entropy().mean()
+        total_loss = loss_actor + config["VF_COEF"] * value_loss - config["ENT_COEF"] * entropy
+        return total_loss, (value_loss, loss_actor, entropy)
+    
+    def _ppo_update_minbatch(train_state, batch_info):
+        init_hstate, traj_batch, advantages, targets = batch_info
+        grad_fn = jax.value_and_grad(_ppo_loss_fn, has_aux=True)
+        (loss, aux), grads = grad_fn(train_state.params, init_hstate, traj_batch, advantages, targets)
+        train_state = train_state.apply_gradients(grads=grads)
+        return train_state, (loss, aux)
+    
+    def _ppo_update_epoch(update_state, _):
+        policy_state, init_hstate, traj_batch, advantages, targets, rng = update_state
+        advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
+        
+        rng, perm_rng = jax.random.split(rng)
+        N = traj_batch.obs.shape[1]  # num envs dimension
+        permutation = jax.random.permutation(perm_rng, N)
+        batch = (init_hstate, traj_batch, advantages, targets)
+        shuffled_batch = jax.tree.map(lambda x: jnp.take(x, permutation, axis=1), batch)
+        
+        # Reshape for minibatches
+        num_minibatches = config["NUM_MINIBATCHES"]
+        minibatches = jax.tree.map(
+            lambda x: jnp.swapaxes(jnp.reshape(x, [x.shape[0], num_minibatches, -1] + list(x.shape[2:])), 1, 0),
+            shuffled_batch,
+        )
+        policy_state, losses = jax.lax.scan(_ppo_update_minbatch, policy_state, minibatches)
+        return (policy_state, init_hstate, traj_batch, advantages, targets, rng), losses
+    
+    @jax.jit
+    def imagination_step(policy_state, vqvae_state, twm_state, buffer_obs, buffer_size, rng):
+        """
+        M1: Single imagination rollout + PPO update.
+        Policy is trained ONLY on imagined data.
+        """
+        N = config["IMAGINATION_BATCH_SIZE"]
+        rng, sample_rng, imagine_rng = jax.random.split(rng, 3)
+        
+        # Sample starting states from buffer
+        sample_idx = jax.random.randint(sample_rng, (N,), 0, jnp.maximum(buffer_size, 1))
+        start_obs = buffer_obs[sample_idx]
+        start_done = jnp.zeros(N)
+        start_hstate = ScannedRNN.initialize_carry(N, 256)
+        
+        # Tokenize starting observation
+        start_tokens = vqvae.apply(vqvae_state.params, start_obs, method=vqvae.encode)
+        
+        # Initialize KV cache
+        cache = KeysValues.init(
+            n=N,
+            num_heads=config["TWM_NUM_HEADS"],
+            max_tokens=config["TWM_SEQ_LEN"] * config["TOKENS_PER_BLOCK"],
+            embed_dim=config["TWM_EMBED_DIM"],
+            num_layers=config["TWM_NUM_LAYERS"],
+        )
+        
+        # Feed initial observation to TWM
+        _, cache = twm.apply(twm_state.params, start_tokens, past_keys_values=cache, deterministic=True)
+        
+        # Imagination loop
+        def _imagine_step(carry, _):
+            current_obs, hstate, current_done, cache, rng = carry
+            rng, action_rng, gen_rng = jax.random.split(rng, 3)
+            
+            # Policy takes action
+            ac_in = (current_obs[np.newaxis, :], current_done[np.newaxis, :])
+            hstate, pi, value = network.apply(policy_state.params, hstate, ac_in)
+            action = pi.sample(seed=action_rng)
+            log_prob = pi.log_prob(action)
+            value, action, log_prob = value.squeeze(0), action.squeeze(0), log_prob.squeeze(0)
+            
+            # Feed action to TWM
+            action_tokens = action.reshape(N, 1)
+            output, cache = twm.apply(twm_state.params, action_tokens, past_keys_values=cache, deterministic=True)
+            
+            # Sample reward and done from TWM predictions
+            rew_logits = output.logits_rewards[:, -1, :]
+            done_logits = output.logits_ends[:, -1, :]
+            
+            rng, rew_rng, done_rng = jax.random.split(rng, 3)
+            # Reward: probability of positive reward
+            reward_prob = jax.nn.softmax(rew_logits)[:, 1]
+            reward = reward_prob  # Use soft reward for smoother gradients
+            
+            # Done: probability of episode end
+            done_prob = jax.nn.softmax(done_logits)[:, 1]
+            new_done = jax.random.bernoulli(done_rng, done_prob).astype(jnp.float32)
+            
+            # Generate next observation tokens autoregressively
+            obs_logits = output.logits_observations[:, -1, :]
+            next_token = jax.random.categorical(gen_rng, obs_logits / config["TWM_TEMPERATURE"], axis=-1)
+            
+            def _gen_token(carry, _):
+                token, cache, rng = carry
+                token_input = token.reshape(N, 1)
+                output, cache = twm.apply(twm_state.params, token_input, past_keys_values=cache, deterministic=True)
+                rng, gen_rng = jax.random.split(rng)
+                obs_logits = output.logits_observations[:, -1, :]
+                next_tok = jax.random.categorical(gen_rng, obs_logits / config["TWM_TEMPERATURE"], axis=-1)
+                return (next_tok, cache, rng), next_tok
+            
+            (last_token, cache, rng), generated_tokens = jax.lax.scan(
+                _gen_token, (next_token, cache, rng), None, 63
+            )
+            
+            # Feed last token to complete frame
+            last_input = last_token.reshape(N, 1)
+            _, cache = twm.apply(twm_state.params, last_input, past_keys_values=cache, deterministic=True)
+            
+            # Stack tokens and decode
+            all_next_tokens = jnp.concatenate([next_token.reshape(N, 1), generated_tokens.T], axis=1)
+            next_obs = vqvae.apply(vqvae_state.params, all_next_tokens, method=vqvae.decode_tokens)
+            next_obs = next_obs[:, :63, :63, :]
+            
+            transition = Transition(
+                done=current_done, action=action, value=value,
+                reward=reward, log_prob=log_prob, obs=current_obs, info=None,
+            )
+            return (next_obs, hstate, new_done, cache, rng), transition
+        
+        carry = (start_obs, start_hstate, start_done, cache, imagine_rng)
+        carry, imag_traj = jax.lax.scan(_imagine_step, carry, None, config["TWM_ROLLOUT_LEN"])
+        final_obs, final_hstate, final_done, _, _ = carry
+        
+        # Get final value
+        ac_in = (final_obs[np.newaxis, :], final_done[np.newaxis, :])
+        _, _, last_val = network.apply(policy_state.params, final_hstate, ac_in)
+        last_val = last_val.squeeze(0)
+        
+        # PPO on imagined data (M1: this is the ONLY policy training)
+        imag_advantages, imag_targets = _calculate_gae(imag_traj, last_val, final_done)
+        init_hstate_batch = start_hstate[None, :]
+        
+        rng, ppo_rng = jax.random.split(rng)
+        ppo_state = (policy_state, init_hstate_batch, imag_traj, imag_advantages, imag_targets, ppo_rng)
+        ppo_state, _ = jax.lax.scan(_ppo_update_epoch, ppo_state, None, config["UPDATE_EPOCHS_WM"])
+        policy_state = ppo_state[0]
+        
+        return policy_state, rng
+    
+    return imagination_step
+
+
+def make_buffer_update_fn(config):
+    """Create JIT-compiled buffer update function."""
+    
+    @jax.jit
+    def update_buffer(buffer_obs, buffer_actions, buffer_rewards, buffer_dones, 
+                      buffer_ptr, buffer_size, traj_obs, traj_actions, traj_rewards, traj_dones):
+        """Update circular buffer with new trajectory data."""
+        num_new = traj_obs.shape[0]
+        buffer_max = config["BUFFER_SIZE"]
+        indices = (jnp.arange(num_new) + buffer_ptr) % buffer_max
+        
+        buffer_obs = buffer_obs.at[indices].set(traj_obs)
+        buffer_actions = buffer_actions.at[indices].set(traj_actions)
+        buffer_rewards = buffer_rewards.at[indices].set(traj_rewards)
+        buffer_dones = buffer_dones.at[indices].set(traj_dones)
+        
+        new_ptr = (buffer_ptr + num_new) % buffer_max
+        new_size = jnp.minimum(buffer_size + num_new, buffer_max)
+        
+        return buffer_obs, buffer_actions, buffer_rewards, buffer_dones, new_ptr, new_size
+    
+    return update_buffer
+
+
+# =============================================================================
 # Main Training Function
 # =============================================================================
 
-def make_train(config):
-    config["NUM_UPDATES"] = (
-        config["TOTAL_TIMESTEPS"] // config["NUM_STEPS"] // config["NUM_ENVS"]
-    )
-    config["MINIBATCH_SIZE"] = (
-        config["NUM_ENVS"] * config["NUM_STEPS"] // config["NUM_MINIBATCHES"]
-    )
-    config["TOKENS_PER_BLOCK"] = 65
-
-    # Create environment
-    env = make_craftax_env_from_name(
-        config["ENV_NAME"], not config["USE_OPTIMISTIC_RESETS"]
-    )
-    env_params = env.default_params
-    config["NUM_ACTIONS"] = env.action_space(env_params).n
-
-    env = LogWrapper(env)
-    if config["USE_OPTIMISTIC_RESETS"]:
-        env = OptimisticResetVecEnvWrapper(
-            env,
-            num_envs=config["NUM_ENVS"],
-            reset_ratio=min(config["OPTIMISTIC_RESET_RATIO"], config["NUM_ENVS"]),
-        )
-    else:
-        env = AutoResetEnvWrapper(env)
-        env = BatchEnvWrapper(env, num_envs=config["NUM_ENVS"])
-
-    # Pre-create modules
-    vqvae = create_vqvae(config)
-    twm = create_twm(config)
-
-    def linear_schedule(count):
-        frac = 1.0 - (count // (config["NUM_MINIBATCHES"] * config["UPDATE_EPOCHS"])) / config["NUM_UPDATES"]
-        return config["LR"] * frac
-
-    def train(rng):
-        # =================================================================
-        # Initialize Policy Network (RNN-based)
-        # =================================================================
-        network = ActorCriticRNN(env.action_space(env_params).n, config=config)
-        rng, net_rng = jax.random.split(rng)
-        
-        init_x = (
-            jnp.zeros((1, config["NUM_ENVS"], 63, 63, 3)),
-            jnp.zeros((1, config["NUM_ENVS"])),
-        )
-        init_hstate = ScannedRNN.initialize_carry(config["NUM_ENVS"], 256)
-        network_params = network.init(net_rng, init_hstate, init_x)
-        
-        param_count = sum(x.size for x in jax.tree.leaves(network_params))
-        print(f"Policy parameter count: {param_count:,}")
-
-        # Paper: no LR annealing for MBRL
-        if config["ANNEAL_LR"]:
-            tx = optax.chain(
-                optax.clip_by_global_norm(config["MAX_GRAD_NORM"]),
-                optax.adam(learning_rate=linear_schedule, eps=1e-5),
-            )
-        else:
-            tx = optax.chain(
-                optax.clip_by_global_norm(config["MAX_GRAD_NORM"]),
-                optax.adam(config["LR"], eps=1e-5),
-            )
-        policy_state = TrainState.create(
-            apply_fn=network.apply, params=network_params, tx=tx
-        )
-
-        # =================================================================
-        # Initialize World Model (VQ-VAE + TWM)
-        # =================================================================
-        rng, vqvae_rng, twm_rng = jax.random.split(rng, 3)
-        sample_obs = jnp.zeros((1, 63, 63, 3))
-        sample_tokens = jnp.zeros((1, config["TOKENS_PER_BLOCK"]), dtype=jnp.int32)
-        
-        vqvae_state = create_vqvae_train_state(config, vqvae_rng, sample_obs)
-        twm_state = create_twm_train_state(config, twm_rng, sample_tokens)
-
-        # Load pre-trained VQ-VAE if specified
-        # (This happens outside JIT, handled in run_mbrl)
-
-        # =================================================================
-        # Initialize Environment
-        # =================================================================
-        rng, env_rng = jax.random.split(rng)
-        obsv, env_state = env.reset(env_rng, env_params)
-        init_hstate = ScannedRNN.initialize_carry(config["NUM_ENVS"], 256)
-
-        # =================================================================
-        # Replay Buffer (simple circular buffer)
-        # =================================================================
-        # Memory: buffer_size * 63 * 63 * 3 * 4 bytes
-        # 50k entries ≈ 2.4GB, 128k ≈ 6GB
-        buffer_size = config["BUFFER_SIZE"]
-        buffer = {
-            'obs': jnp.zeros((buffer_size, 63, 63, 3)),
-            'actions': jnp.zeros((buffer_size,), dtype=jnp.int32),
-            'rewards': jnp.zeros((buffer_size,)),
-            'dones': jnp.zeros((buffer_size,)),
-            # Note: next_obs removed to save memory (not needed for imagination sampling)
-            'ptr': jnp.array(0, dtype=jnp.int32),
-            'size': jnp.array(0, dtype=jnp.int32),
-        }
-
-        # =================================================================
-        # Training Helpers
-        # =================================================================
-        
-        def _calculate_gae(traj_batch, last_val, last_done):
-            def _get_advantages(carry, transition):
-                gae, next_value, next_done = carry
-                done, value, reward = transition.done, transition.value, transition.reward
-                delta = reward + config["GAMMA"] * next_value * (1 - next_done) - value
-                gae = delta + config["GAMMA"] * config["GAE_LAMBDA"] * (1 - next_done) * gae
-                return (gae, value, done), gae
-            
-            _, advantages = jax.lax.scan(
-                _get_advantages,
-                (jnp.zeros_like(last_val), last_val, last_done),
-                traj_batch,
-                reverse=True,
-                unroll=16,
-            )
-            return advantages, advantages + traj_batch.value
-
-        def _ppo_loss_fn(params, init_hstate, traj_batch, gae, targets):
-            _, pi, value = network.apply(
-                params, init_hstate[0], (traj_batch.obs, traj_batch.done)
-            )
-            log_prob = pi.log_prob(traj_batch.action)
-            
-            # Value loss
-            value_pred_clipped = traj_batch.value + (
-                value - traj_batch.value
-            ).clip(-config["CLIP_EPS"], config["CLIP_EPS"])
-            value_losses = jnp.square(value - targets)
-            value_losses_clipped = jnp.square(value_pred_clipped - targets)
-            value_loss = 0.5 * jnp.maximum(value_losses, value_losses_clipped).mean()
-            
-            # Actor loss
-            ratio = jnp.exp(log_prob - traj_batch.log_prob)
-            loss_actor1 = ratio * gae
-            loss_actor2 = jnp.clip(ratio, 1.0 - config["CLIP_EPS"], 1.0 + config["CLIP_EPS"]) * gae
-            loss_actor = -jnp.minimum(loss_actor1, loss_actor2).mean()
-            
-            entropy = pi.entropy().mean()
-            
-            total_loss = loss_actor + config["VF_COEF"] * value_loss - config["ENT_COEF"] * entropy
-            return total_loss, (value_loss, loss_actor, entropy)
-
-        def _ppo_update_minbatch(train_state, batch_info):
-            init_hstate, traj_batch, advantages, targets = batch_info
-            grad_fn = jax.value_and_grad(_ppo_loss_fn, has_aux=True)
-            (loss, aux), grads = grad_fn(train_state.params, init_hstate, traj_batch, advantages, targets)
-            train_state = train_state.apply_gradients(grads=grads)
-            return train_state, (loss, aux)
-
-        def _ppo_update_epoch(update_state, _):
-            policy_state, init_hstate, traj_batch, advantages, targets, rng = update_state
-            
-            # Normalize advantages for whole batch
-            advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
-            
-            rng, perm_rng = jax.random.split(rng)
-            permutation = jax.random.permutation(perm_rng, config["NUM_ENVS"])
-            batch = (init_hstate, traj_batch, advantages, targets)
-            
-            shuffled_batch = jax.tree.map(lambda x: jnp.take(x, permutation, axis=1), batch)
-            minibatches = jax.tree.map(
-                lambda x: jnp.swapaxes(
-                    jnp.reshape(x, [x.shape[0], config["NUM_MINIBATCHES"], -1] + list(x.shape[2:])),
-                    1, 0,
-                ),
-                shuffled_batch,
-            )
-            
-            policy_state, losses = jax.lax.scan(_ppo_update_minbatch, policy_state, minibatches)
-            return (policy_state, init_hstate, traj_batch, advantages, targets, rng), losses
-
-        def _vqvae_loss_fn(params, obs_batch):
-            recon, tokens, total_loss, metrics = vqvae.apply(
-                params, obs_batch, method=vqvae.get_vq_loss
-            )
-            return total_loss, metrics
-
-        # =================================================================
-        # Imagination Rollout Function
-        # =================================================================
-        
-        def _imagine_rollout(
-            rng, policy_state, vqvae_state, twm_state, 
-            start_obs, start_hstate, start_done,
-            num_steps,
-        ):
-            """
-            Generate imagined trajectory using TWM.
-            Policy acts on decoded observations from TWM.
-            """
-            N = start_obs.shape[0]
-            
-            # Tokenize starting observation
-            start_tokens = vqvae.apply(vqvae_state.params, start_obs, method=vqvae.encode)
-            
-            # Initialize KV cache
-            cache = KeysValues.init(
-                n=N,
-                num_heads=config["TWM_NUM_HEADS"],
-                max_tokens=config["TWM_SEQ_LEN"] * config["TOKENS_PER_BLOCK"],
-                embed_dim=config["TWM_EMBED_DIM"],
-                num_layers=config["TWM_NUM_LAYERS"],
-            )
-            
-            # Feed initial observation to TWM
-            _, cache = twm.apply(twm_state.params, start_tokens, past_keys_values=cache, deterministic=True)
-            
-            # Imagination loop
-            def _imagine_step(carry, _):
-                current_obs, hstate, current_done, cache, rng = carry
-                rng, action_rng, gen_rng = jax.random.split(rng, 3)
-                
-                # Policy takes action based on current observation
-                ac_in = (current_obs[np.newaxis, :], current_done[np.newaxis, :])
-                hstate, pi, value = network.apply(policy_state.params, hstate, ac_in)
-                action = pi.sample(seed=action_rng)
-                log_prob = pi.log_prob(action)
-                value, action, log_prob = value.squeeze(0), action.squeeze(0), log_prob.squeeze(0)
-                
-                # Feed action to TWM
-                action_tokens = action.reshape(N, 1)
-                output, cache = twm.apply(twm_state.params, action_tokens, past_keys_values=cache, deterministic=True)
-                
-                # Sample reward and done from TWM predictions
-                rew_logits = output.logits_rewards[:, -1, :]
-                done_logits = output.logits_ends[:, -1, :]
-                
-                rng, rew_rng, done_rng = jax.random.split(rng, 3)
-                reward = jax.nn.softmax(rew_logits)[:, 1]  # Probability of reward
-                reward = jax.random.bernoulli(rew_rng, reward).astype(jnp.float32)
-                
-                new_done = jax.nn.softmax(done_logits)[:, 1]
-                new_done = jax.random.bernoulli(done_rng, new_done).astype(jnp.float32)
-                
-                # Generate next observation tokens autoregressively
-                obs_logits = output.logits_observations[:, -1, :]
-                next_token = jax.random.categorical(gen_rng, obs_logits / config["TWM_TEMPERATURE"], axis=-1)
-                next_tokens = [next_token]
-                
-                # Generate remaining 63 tokens and feed all 64 to cache
-                def _gen_token(carry, _):
-                    token, cache, rng = carry
-                    token_input = token.reshape(N, 1)
-                    output, cache = twm.apply(twm_state.params, token_input, past_keys_values=cache, deterministic=True)
-                    rng, gen_rng = jax.random.split(rng)
-                    obs_logits = output.logits_observations[:, -1, :]
-                    next_tok = jax.random.categorical(gen_rng, obs_logits / config["TWM_TEMPERATURE"], axis=-1)
-                    return (next_tok, cache, rng), next_tok
-                
-                (last_token, cache, rng), generated_tokens = jax.lax.scan(
-                    _gen_token, (next_token, cache, rng), None, 63
-                )
-                
-                # Feed the last token to complete the frame
-                last_input = last_token.reshape(N, 1)
-                _, cache = twm.apply(twm_state.params, last_input, past_keys_values=cache, deterministic=True)
-                
-                # Stack all 64 tokens
-                all_next_tokens = jnp.concatenate([next_token.reshape(N, 1), generated_tokens.T], axis=1)
-                
-                # Decode to observation
-                next_obs = vqvae.apply(vqvae_state.params, all_next_tokens, method=vqvae.decode_tokens)
-                
-                # Crop to 63x63 if needed
-                next_obs = next_obs[:, :63, :63, :]
-                
-                transition = Transition(
-                    done=current_done,
-                    action=action,
-                    value=value,
-                    reward=reward,
-                    log_prob=log_prob,
-                    obs=current_obs,
-                    info=None,
-                )
-                
-                return (next_obs, hstate, new_done, cache, rng), transition
-            
-            carry = (start_obs, start_hstate, start_done, cache, rng)
-            carry, traj = jax.lax.scan(_imagine_step, carry, None, num_steps)
-            final_obs, final_hstate, final_done, _, _ = carry
-            
-            # Get final value
-            ac_in = (final_obs[np.newaxis, :], final_done[np.newaxis, :])
-            _, _, last_val = network.apply(policy_state.params, final_hstate, ac_in)
-            last_val = last_val.squeeze(0)
-            
-            return traj, last_val, final_done, final_hstate
-
-        # =================================================================
-        # Main Update Step
-        # =================================================================
-        
-        def _update_step(runner_state, update_idx):
-            (
-                policy_state,
-                vqvae_state,
-                twm_state,
-                env_state,
-                last_obs,
-                last_done,
-                hstate,
-                buffer,
-                rng,
-                total_steps,
-            ) = runner_state
-
-            # -----------------------------------------------------------------
-            # Step 1: Collect environment trajectories
-            # -----------------------------------------------------------------
-            def _env_step(carry, _):
-                policy_state, env_state, last_obs, last_done, hstate, rng = carry
-                rng, action_rng, step_rng = jax.random.split(rng, 3)
-                
-                ac_in = (last_obs[np.newaxis, :], last_done[np.newaxis, :])
-                hstate, pi, value = network.apply(policy_state.params, hstate, ac_in)
-                action = pi.sample(seed=action_rng)
-                log_prob = pi.log_prob(action)
-                value, action, log_prob = value.squeeze(0), action.squeeze(0), log_prob.squeeze(0)
-                
-                obsv, env_state, reward, done, info = env.step(step_rng, env_state, action, env_params)
-                
-                transition = Transition(last_done, action, value, reward, log_prob, last_obs, info)
-                return (policy_state, env_state, obsv, done, hstate, rng), transition
-
-            initial_hstate = hstate
-            carry = (policy_state, env_state, last_obs, last_done, hstate, rng)
-            carry, env_traj = jax.lax.scan(_env_step, carry, None, config["NUM_STEPS"])
-            policy_state, env_state, last_obs, last_done, hstate, rng = carry
-            
-            total_steps = total_steps + config["NUM_ENVS"] * config["NUM_STEPS"]
-
-            # Add to replay buffer
-            traj_obs = env_traj.obs.reshape(-1, 63, 63, 3)
-            traj_actions = env_traj.action.reshape(-1)
-            traj_rewards = env_traj.reward.reshape(-1)
-            traj_dones = env_traj.done.reshape(-1)
-            
-            num_new = traj_obs.shape[0]
-            ptr = buffer['ptr']
-            indices = (jnp.arange(num_new) + ptr) % buffer_size
-            
-            buffer = {
-                'obs': buffer['obs'].at[indices].set(traj_obs),
-                'actions': buffer['actions'].at[indices].set(traj_actions),
-                'rewards': buffer['rewards'].at[indices].set(traj_rewards),
-                'dones': buffer['dones'].at[indices].set(traj_dones),
-                'ptr': (ptr + num_new) % buffer_size,
-                'size': jnp.minimum(buffer['size'] + num_new, buffer_size),
-            }
-
-            # -----------------------------------------------------------------
-            # Step 2: PPO update on environment data
-            # -----------------------------------------------------------------
-            ac_in = (last_obs[np.newaxis, :], last_done[np.newaxis, :])
-            _, _, last_val = network.apply(policy_state.params, hstate, ac_in)
-            last_val = last_val.squeeze(0)
-            
-            advantages, targets = _calculate_gae(env_traj, last_val, last_done)
-            
-            init_hstate_batch = initial_hstate[None, :]
-            ppo_state = (policy_state, init_hstate_batch, env_traj, advantages, targets, rng)
-            ppo_state, _ = jax.lax.scan(_ppo_update_epoch, ppo_state, None, config["UPDATE_EPOCHS"])
-            policy_state = ppo_state[0]
-            rng = ppo_state[-1]
-
-            # -----------------------------------------------------------------
-            # Step 3: Update World Model
-            # -----------------------------------------------------------------
-            obs_batch = env_traj.obs.reshape(-1, 63, 63, 3)
-            
-            def _vqvae_update(state, _):
-                grad_fn = jax.value_and_grad(_vqvae_loss_fn, has_aux=True)
-                (loss, metrics), grads = grad_fn(state.params, obs_batch)
-                state = state.apply_gradients(grads=grads)
-                return state, loss
-            
-            vqvae_state, vqvae_losses = jax.lax.scan(
-                _vqvae_update, vqvae_state, None, config["VQVAE_UPDATES_PER_ITER"]
-            )
-
-            # -----------------------------------------------------------------
-            # Step 4: Imagination training (after T_BP)
-            # -----------------------------------------------------------------
-            # Paper Algorithm 1: Do imagination rollouts as part of the main loop
-            # Instead of 150 iterations inside one update, we do 1 per update step.
-            # Over many update steps, this accumulates to many imagination updates.
-            do_imagination = total_steps >= config["BACKGROUND_PLANNING_START"]
-            
-            def _do_imagination(carry):
-                policy_state, vqvae_state, twm_state, buffer, rng = carry
-                rng, sample_rng, imagine_rng = jax.random.split(rng, 3)
-                
-                # Sample starting states from buffer
-                sample_idx = jax.random.randint(
-                    sample_rng, (config["NUM_ENVS"],), 0, jnp.maximum(buffer['size'], 1)
-                )
-                start_obs = buffer['obs'][sample_idx]
-                start_done = jnp.zeros(config["NUM_ENVS"])
-                start_hstate = ScannedRNN.initialize_carry(config["NUM_ENVS"], 256)
-                
-                # Single imagination rollout (no nested scan!)
-                imag_traj, imag_last_val, imag_last_done, _ = _imagine_rollout(
-                    imagine_rng, policy_state, vqvae_state, twm_state,
-                    start_obs, start_hstate, start_done,
-                    config["TWM_ROLLOUT_LEN"],
-                )
-                
-                # PPO on imagined data
-                imag_advantages, imag_targets = _calculate_gae(imag_traj, imag_last_val, imag_last_done)
-                
-                init_hstate_batch = start_hstate[None, :]
-                ppo_state = (policy_state, init_hstate_batch, imag_traj, imag_advantages, imag_targets, rng)
-                ppo_state, _ = jax.lax.scan(_ppo_update_epoch, ppo_state, None, config["UPDATE_EPOCHS_WM"])
-                policy_state = ppo_state[0]
-                rng = ppo_state[-1]
-                
-                return policy_state, rng
-            
-            def _skip_imagination(carry):
-                policy_state, _, _, _, rng = carry
-                return policy_state, rng
-            
-            imag_carry = (policy_state, vqvae_state, twm_state, buffer, rng)
-            policy_state, rng = jax.lax.cond(
-                do_imagination, _do_imagination, _skip_imagination, imag_carry
-            )
-
-            # -----------------------------------------------------------------
-            # Logging
-            # -----------------------------------------------------------------
-            metric = jax.tree.map(
-                lambda x: (x * env_traj.info["returned_episode"]).sum()
-                / (env_traj.info["returned_episode"].sum() + 1e-8),
-                env_traj.info,
-            )
-            metric["vqvae_loss"] = vqvae_losses[-1]
-            metric["total_steps"] = total_steps
-            metric["buffer_size"] = buffer['size']
-
-            if config["DEBUG"] and config["USE_WANDB"]:
-                def callback(metric, update_idx):
-                    to_log = create_log_dict(metric, config)
-                    to_log["vqvae_loss"] = float(metric["vqvae_loss"])
-                    batch_log(update_idx, to_log, config)
-                jax.debug.callback(callback, metric, update_idx)
-
-            runner_state = (
-                policy_state,
-                vqvae_state,
-                twm_state,
-                env_state,
-                last_obs,
-                last_done,
-                hstate,
-                buffer,
-                rng,
-                total_steps,
-            )
-            return runner_state, metric
-
-        # =================================================================
-        # Run Training
-        # =================================================================
-        rng, train_rng = jax.random.split(rng)
-        runner_state = (
-            policy_state,
-            vqvae_state,
-            twm_state,
-            env_state,
-            obsv,
-            jnp.zeros((config["NUM_ENVS"]), dtype=bool),
-            init_hstate,
-            buffer,
-            train_rng,
-            0,
-        )
-        
-        runner_state, metrics = jax.lax.scan(
-            _update_step, runner_state, jnp.arange(config["NUM_UPDATES"])
-        )
-        
-        return {"runner_state": runner_state, "metrics": metrics}
-
-    return train
-
-
-# =============================================================================
-# Main
-# =============================================================================
-
 def run_mbrl(config):
+    """Run M1 MBRL training (pure imagination, NOT Dyna)."""
     config = {k.upper(): v for k, v in config.__dict__.items()}
+    config["TOKENS_PER_BLOCK"] = 65
+    config["NUM_UPDATES"] = config["TOTAL_TIMESTEPS"] // config["NUM_STEPS"] // config["NUM_ENVS"]
+    config["MINIBATCH_SIZE"] = config["NUM_ENVS"] * config["NUM_STEPS"] // config["NUM_MINIBATCHES"]
 
     if config["USE_WANDB"]:
         wandb.init(
@@ -757,49 +595,269 @@ def run_mbrl(config):
             name=f"M1-MBRL-{config['ENV_NAME']}-{int(config['TOTAL_TIMESTEPS']//1e6)}M",
         )
 
-    rng = jax.random.PRNGKey(config["SEED"])
-    rngs = jax.random.split(rng, config["NUM_REPEATS"])
-
-    train_fn = make_train(config)
-    train_jit = jax.jit(train_fn)
-    train_vmap = jax.vmap(train_jit)
-
     print("\n" + "="*60)
-    print("M1 MBRL Training (RNN Policy)")
+    print("M1 MBRL Training (Pure Imagination - NOT Dyna)")
     print("="*60)
     print(f"Environment: {config['ENV_NAME']}")
     print(f"Total timesteps: {config['TOTAL_TIMESTEPS']:,}")
     print(f"Num envs: {config['NUM_ENVS']}")
+    print(f"Num updates: {config['NUM_UPDATES']}")
     print(f"Background planning starts at: {config['BACKGROUND_PLANNING_START']:,}")
     print(f"Imagination rollout length: {config['TWM_ROLLOUT_LEN']}")
+    print(f"Imagination batch size: {config['IMAGINATION_BATCH_SIZE']}")
+    print("="*60)
+    print("NOTE: Policy is trained ONLY on imagined data (after T_BP)")
+    print("      Real data is used ONLY for world model training")
     print("="*60 + "\n")
 
-    t0 = time.time()
-    out = train_vmap(rngs)
-    jax.block_until_ready(out)
-    t1 = time.time()
+    # =========================================================================
+    # Setup Environment and Networks
+    # =========================================================================
+    env = make_craftax_env_from_name(config["ENV_NAME"], not config["USE_OPTIMISTIC_RESETS"])
+    env_params = env.default_params
+    config["NUM_ACTIONS"] = env.action_space(env_params).n
 
+    env = LogWrapper(env)
+    if config["USE_OPTIMISTIC_RESETS"]:
+        env = OptimisticResetVecEnvWrapper(
+            env, num_envs=config["NUM_ENVS"],
+            reset_ratio=min(config["OPTIMISTIC_RESET_RATIO"], config["NUM_ENVS"]),
+        )
+    else:
+        env = AutoResetEnvWrapper(env)
+        env = BatchEnvWrapper(env, num_envs=config["NUM_ENVS"])
+
+    # Create networks
+    network = ActorCriticRNN(env.action_space(env_params).n, config=config)
+    vqvae = create_vqvae(config)
+    twm = create_twm(config)
+
+    # =========================================================================
+    # Initialize States
+    # =========================================================================
+    rng = jax.random.PRNGKey(config["SEED"])
+    
+    # Policy
+    rng, net_rng = jax.random.split(rng)
+    init_x = (jnp.zeros((1, config["NUM_ENVS"], 63, 63, 3)), jnp.zeros((1, config["NUM_ENVS"])))
+    init_hstate = ScannedRNN.initialize_carry(config["NUM_ENVS"], 256)
+    network_params = network.init(net_rng, init_hstate, init_x)
+    
+    param_count = sum(x.size for x in jax.tree.leaves(network_params))
+    print(f"Policy parameter count: {param_count:,}")
+    
+    tx = optax.chain(optax.clip_by_global_norm(config["MAX_GRAD_NORM"]), optax.adam(config["LR"], eps=1e-5))
+    policy_state = TrainState.create(apply_fn=network.apply, params=network_params, tx=tx)
+    
+    # VQ-VAE
+    rng, vqvae_rng = jax.random.split(rng)
+    vqvae_state = create_vqvae_train_state(config, vqvae_rng, jnp.zeros((1, 63, 63, 3)))
+    
+    # Load pre-trained VQ-VAE if specified
+    if config["USE_PRETRAINED_VQVAE"] and config["VQVAE_CHECKPOINT"]:
+        print(f"Loading pre-trained VQ-VAE from: {config['VQVAE_CHECKPOINT']}")
+        with open(config["VQVAE_CHECKPOINT"], 'rb') as f:
+            loaded_params = pickle.load(f)
+        vqvae_state = vqvae_state.replace(params=loaded_params)
+        print("VQ-VAE loaded successfully!")
+    
+    # TWM
+    rng, twm_rng = jax.random.split(rng)
+    twm_state = create_twm_train_state(config, twm_rng, jnp.zeros((1, config["TOKENS_PER_BLOCK"]), dtype=jnp.int32))
+    
+    # Environment
+    rng, env_rng = jax.random.split(rng)
+    obsv, env_state = env.reset(env_rng, env_params)
+    hstate = ScannedRNN.initialize_carry(config["NUM_ENVS"], 256)
+    last_done = jnp.zeros((config["NUM_ENVS"]), dtype=bool)
+    
+    # Buffer (for world model training only in M1)
+    buffer_size = config["BUFFER_SIZE"]
+    buffer_obs = jnp.zeros((buffer_size, 63, 63, 3))
+    buffer_actions = jnp.zeros((buffer_size,), dtype=jnp.int32)
+    buffer_rewards = jnp.zeros((buffer_size,))
+    buffer_dones = jnp.zeros((buffer_size,))
+    buffer_ptr = jnp.array(0, dtype=jnp.int32)
+    buffer_count = jnp.array(0, dtype=jnp.int32)
+    
+    # Sequence buffer for TWM training (stores sequences)
+    seq_buffer_size = config["SEQ_BUFFER_SIZE"]
+    seq_len = config["TWM_SEQ_LEN"]
+    seq_buffer_obs = jnp.zeros((seq_buffer_size, seq_len, 63, 63, 3))
+    seq_buffer_actions = jnp.zeros((seq_buffer_size, seq_len), dtype=jnp.int32)
+    seq_buffer_ptr = jnp.array(0, dtype=jnp.int32)
+    seq_buffer_count = jnp.array(0, dtype=jnp.int32)
+
+    # =========================================================================
+    # Create JIT Functions
+    # =========================================================================
+    env_rollout = make_env_rollout_fn(env, env_params, network, config)
+    vqvae_update = make_vqvae_update_fn(vqvae, config)
+    twm_update = make_twm_update_fn(twm, vqvae, config)
+    imagination_step = make_imagination_fn(network, vqvae, twm, config)
+    update_buffer = make_buffer_update_fn(config)
+
+    # =========================================================================
+    # Training Loop (Python outer loop - not JIT traced!)
+    # =========================================================================
+    total_steps = 0
+    t0 = time.time()
+    imagination_started = False
+    
+    # Accumulators for sequence building
+    current_sequences_obs = []
+    current_sequences_actions = []
+    
+    pbar = tqdm(range(config["NUM_UPDATES"]), desc="Training")
+    for update_idx in pbar:
+        # ---------------------------------------------------------------------
+        # Step 1: Environment Rollout (for data collection only)
+        # ---------------------------------------------------------------------
+        traj, env_state, obsv, last_done, hstate, initial_hstate, rng = env_rollout(
+            policy_state, env_state, obsv, last_done, hstate, rng
+        )
+        total_steps += config["NUM_ENVS"] * config["NUM_STEPS"]
+        
+        # ---------------------------------------------------------------------
+        # Step 2: Update Buffer (for world model training)
+        # ---------------------------------------------------------------------
+        traj_obs = traj.obs.reshape(-1, 63, 63, 3)
+        traj_actions = traj.action.reshape(-1)
+        traj_rewards = traj.reward.reshape(-1)
+        traj_dones = traj.done.reshape(-1)
+        
+        buffer_obs, buffer_actions, buffer_rewards, buffer_dones, buffer_ptr, buffer_count = update_buffer(
+            buffer_obs, buffer_actions, buffer_rewards, buffer_dones,
+            buffer_ptr, buffer_count, traj_obs, traj_actions, traj_rewards, traj_dones
+        )
+        
+        # Build sequences for TWM training
+        # Reshape to (num_envs, num_steps, ...)
+        env_obs = traj.obs.transpose(1, 0, 2, 3, 4)  # (num_envs, num_steps, H, W, C)
+        env_actions = traj.action.transpose(1, 0)  # (num_envs, num_steps)
+        
+        # Add sequences to buffer if we have enough steps
+        if config["NUM_STEPS"] >= seq_len:
+            for i in range(config["NUM_ENVS"]):
+                # Take first seq_len steps as a sequence
+                seq_obs = env_obs[i, :seq_len]
+                seq_actions = env_actions[i, :seq_len]
+                
+                # Add to sequence buffer
+                idx = int(seq_buffer_ptr) % seq_buffer_size
+                seq_buffer_obs = seq_buffer_obs.at[idx].set(seq_obs)
+                seq_buffer_actions = seq_buffer_actions.at[idx].set(seq_actions)
+                seq_buffer_ptr = (seq_buffer_ptr + 1) % seq_buffer_size
+                seq_buffer_count = jnp.minimum(seq_buffer_count + 1, seq_buffer_size)
+        
+        # ---------------------------------------------------------------------
+        # Step 3: VQ-VAE Update (always, for reconstruction)
+        # ---------------------------------------------------------------------
+        if not config["USE_PRETRAINED_VQVAE"]:
+            vqvae_state, vqvae_loss = vqvae_update(vqvae_state, traj_obs, config["VQVAE_UPDATES_PER_ITER"])
+        else:
+            vqvae_loss = 0.0
+        
+        # ---------------------------------------------------------------------
+        # Step 4: TWM Update (train world model on real data)
+        # ---------------------------------------------------------------------
+        twm_loss = 0.0
+        if int(seq_buffer_count) >= config["TWM_BATCH_SIZE"]:
+            # Sample batch of sequences
+            rng, sample_rng = jax.random.split(rng)
+            batch_idx = jax.random.randint(sample_rng, (config["TWM_BATCH_SIZE"],), 0, int(seq_buffer_count))
+            batch_obs = seq_buffer_obs[batch_idx]
+            batch_actions = seq_buffer_actions[batch_idx]
+            
+            twm_state, twm_loss = twm_update(twm_state, vqvae_state, batch_obs, batch_actions, rng)
+        
+        # ---------------------------------------------------------------------
+        # Step 5: Imagination + Policy Update (M1: ONLY source of policy training)
+        # ---------------------------------------------------------------------
+        if total_steps >= config["BACKGROUND_PLANNING_START"]:
+            if not imagination_started:
+                print(f"\n*** Starting imagination-based policy training at step {total_steps:,} ***\n")
+                imagination_started = True
+            
+            # M1: Policy is trained ONLY on imagined data
+            policy_state, rng = imagination_step(
+                policy_state, vqvae_state, twm_state, buffer_obs, buffer_count, rng
+            )
+        
+        # ---------------------------------------------------------------------
+        # Logging
+        # ---------------------------------------------------------------------
+        if update_idx % 10 == 0:
+            # Compute metrics from real environment (for monitoring only)
+            returned = traj.info["returned_episode"]
+            if returned.sum() > 0:
+                avg_return = (traj.info["returned_episode_returns"] * returned).sum() / returned.sum()
+            else:
+                avg_return = 0.0
+            
+            status = "WM-only" if not imagination_started else "Imagination"
+            pbar.set_postfix({
+                'mode': status,
+                'steps': f'{total_steps:,}',
+                'return': f'{float(avg_return):.2f}',
+                'vq': f'{float(vqvae_loss):.3f}',
+                'twm': f'{float(twm_loss):.3f}',
+            })
+            
+            if config["USE_WANDB"]:
+                log_dict = {
+                    'step': total_steps,
+                    'return': float(avg_return),
+                    'vqvae_loss': float(vqvae_loss),
+                    'twm_loss': float(twm_loss),
+                    'buffer_size': int(buffer_count),
+                    'imagination_active': imagination_started,
+                }
+                wandb.log(log_dict)
+    
+    t1 = time.time()
     print(f"\nTraining complete!")
     print(f"Time: {t1 - t0:.2f}s")
     print(f"SPS: {config['TOTAL_TIMESTEPS'] / (t1 - t0):.0f}")
+    
+    # Save checkpoints
+    if config["SAVE_POLICY"]:
+        save_dir = f"checkpoints/m1_mbrl_{config['ENV_NAME']}_{config['SEED']}"
+        os.makedirs(save_dir, exist_ok=True)
+        
+        with open(f"{save_dir}/policy_params.pkl", 'wb') as f:
+            pickle.dump(policy_state.params, f)
+        with open(f"{save_dir}/vqvae_params.pkl", 'wb') as f:
+            pickle.dump(vqvae_state.params, f)
+        with open(f"{save_dir}/twm_params.pkl", 'wb') as f:
+            pickle.dump(twm_state.params, f)
+        print(f"Saved checkpoints to {save_dir}/")
+    
+    return {
+        'policy_state': policy_state,
+        'vqvae_state': vqvae_state,
+        'twm_state': twm_state,
+    }
 
-    return out
 
+# =============================================================================
+# Main
+# =============================================================================
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="M1 MBRL for Craftax")
+    parser = argparse.ArgumentParser(description="M1 MBRL for Craftax (Pure Imagination)")
     
     # Environment
     parser.add_argument("--env_name", type=str, default="Craftax-Classic-Pixels-v1")
     parser.add_argument("--num_envs", type=int, default=48)
-    parser.add_argument("--num_steps", type=int, default=96)
+    parser.add_argument("--num_steps", type=int, default=64)
     
     # Training
-    parser.add_argument("--total_timesteps", type=lambda x: int(float(x)), default=1e6)
+    parser.add_argument("--total_timesteps", type=lambda x: int(float(x)), default=1e7)
     parser.add_argument("--lr", type=float, default=2e-4)
     parser.add_argument("--update_epochs", type=int, default=4)
-    parser.add_argument("--update_epochs_wm", type=int, default=1)
-    parser.add_argument("--num_minibatches", type=int, default=8)
+    parser.add_argument("--update_epochs_wm", type=int, default=2)
+    parser.add_argument("--num_minibatches", type=int, default=4)
     parser.add_argument("--gamma", type=float, default=0.99)
     parser.add_argument("--gae_lambda", type=float, default=0.8)
     parser.add_argument("--clip_eps", type=float, default=0.2)
@@ -812,7 +870,7 @@ if __name__ == "__main__":
     parser.add_argument("--vqvae_codebook_size", type=int, default=512)
     parser.add_argument("--vqvae_embed_dim", type=int, default=128)
     parser.add_argument("--vqvae_lr", type=float, default=0.001)
-    parser.add_argument("--vqvae_updates_per_iter", type=int, default=5)
+    parser.add_argument("--vqvae_updates_per_iter", type=int, default=3)
     parser.add_argument("--use_pretrained_vqvae", action="store_true")
     parser.add_argument("--vqvae_checkpoint", type=str, default="")
     
@@ -824,20 +882,18 @@ if __name__ == "__main__":
     parser.add_argument("--twm_dropout", type=float, default=0.1)
     parser.add_argument("--twm_lr", type=float, default=0.001)
     parser.add_argument("--twm_max_grad_norm", type=float, default=0.5)
-    parser.add_argument("--twm_rollout_len", type=int, default=20)
+    parser.add_argument("--twm_rollout_len", type=int, default=15)
     parser.add_argument("--twm_temperature", type=float, default=1.0)
+    parser.add_argument("--twm_batch_size", type=int, default=16)
     
     # MBRL
-    # Note: Buffer stores observations (63x63x3 float32 = ~48KB each)
-    # 50k entries = ~2.4GB, 128k = ~6GB
     parser.add_argument("--buffer_size", type=int, default=50000)
+    parser.add_argument("--seq_buffer_size", type=int, default=2000)
     parser.add_argument("--background_planning_start", type=int, default=200000)
-    # Note: imagination_iters is now 1 per update step (paper-style), this param is unused
-    parser.add_argument("--imagination_iters", type=int, default=1)
+    parser.add_argument("--imagination_batch_size", type=int, default=32)
     
     # Misc
     parser.add_argument("--seed", type=int, default=0)
-    parser.add_argument("--num_repeats", type=int, default=1)
     parser.add_argument("--layer_size", type=int, default=512)
     parser.add_argument("--debug", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--use_wandb", action=argparse.BooleanOptionalAction, default=False)
@@ -856,13 +912,15 @@ if __name__ == "__main__":
     
     if args.smoke_test:
         print("\n*** SMOKE TEST MODE ***\n")
-        args.total_timesteps = 100000
+        args.total_timesteps = 50000
         args.num_envs = 8
         args.num_steps = 32
         args.vqvae_updates_per_iter = 1
-        args.background_planning_start = 20000
-        args.imagination_iters = 2
-        args.buffer_size = 10000
+        args.background_planning_start = 10000
+        args.buffer_size = 5000
+        args.seq_buffer_size = 200
+        args.twm_batch_size = 4
+        args.imagination_batch_size = 8
         args.use_wandb = False
     
     if args.seed is None:
