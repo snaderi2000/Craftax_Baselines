@@ -338,13 +338,15 @@ def make_train(config):
         # =================================================================
         # Replay Buffer (simple circular buffer)
         # =================================================================
+        # Memory: buffer_size * 63 * 63 * 3 * 4 bytes
+        # 50k entries ≈ 2.4GB, 128k ≈ 6GB
         buffer_size = config["BUFFER_SIZE"]
         buffer = {
             'obs': jnp.zeros((buffer_size, 63, 63, 3)),
             'actions': jnp.zeros((buffer_size,), dtype=jnp.int32),
             'rewards': jnp.zeros((buffer_size,)),
             'dones': jnp.zeros((buffer_size,)),
-            'next_obs': jnp.zeros((buffer_size, 63, 63, 3)),
+            # Note: next_obs removed to save memory (not needed for imagination sampling)
             'ptr': jnp.array(0, dtype=jnp.int32),
             'size': jnp.array(0, dtype=jnp.int32),
         }
@@ -600,7 +602,6 @@ def make_train(config):
                 'actions': buffer['actions'].at[indices].set(traj_actions),
                 'rewards': buffer['rewards'].at[indices].set(traj_rewards),
                 'dones': buffer['dones'].at[indices].set(traj_dones),
-                'next_obs': buffer['next_obs'],  # Not used in this simplified version
                 'ptr': (ptr + num_new) % buffer_size,
                 'size': jnp.minimum(buffer['size'] + num_new, buffer_size),
             }
@@ -638,51 +639,46 @@ def make_train(config):
             # -----------------------------------------------------------------
             # Step 4: Imagination training (after T_BP)
             # -----------------------------------------------------------------
+            # Paper Algorithm 1: Do imagination rollouts as part of the main loop
+            # Instead of 150 iterations inside one update, we do 1 per update step.
+            # Over many update steps, this accumulates to many imagination updates.
             do_imagination = total_steps >= config["BACKGROUND_PLANNING_START"]
             
             def _do_imagination(carry):
-                policy_state, vqvae_state, twm_state, buffer, hstate, last_done, rng = carry
+                policy_state, vqvae_state, twm_state, buffer, rng = carry
+                rng, sample_rng, imagine_rng = jax.random.split(rng, 3)
                 
-                def _imagine_iter(carry, _):
-                    policy_state, rng = carry
-                    rng, sample_rng, imagine_rng = jax.random.split(rng, 3)
-                    
-                    # Sample starting states from buffer
-                    sample_idx = jax.random.randint(
-                        sample_rng, (config["NUM_ENVS"],), 0, jnp.maximum(buffer['size'], 1)
-                    )
-                    start_obs = buffer['obs'][sample_idx]
-                    start_done = jnp.zeros(config["NUM_ENVS"])
-                    start_hstate = ScannedRNN.initialize_carry(config["NUM_ENVS"], 256)
-                    
-                    # Imagination rollout
-                    imag_traj, imag_last_val, imag_last_done, _ = _imagine_rollout(
-                        imagine_rng, policy_state, vqvae_state, twm_state,
-                        start_obs, start_hstate, start_done,
-                        config["TWM_ROLLOUT_LEN"],
-                    )
-                    
-                    # PPO on imagined data
-                    imag_advantages, imag_targets = _calculate_gae(imag_traj, imag_last_val, imag_last_done)
-                    
-                    init_hstate_batch = start_hstate[None, :]
-                    ppo_state = (policy_state, init_hstate_batch, imag_traj, imag_advantages, imag_targets, rng)
-                    ppo_state, _ = jax.lax.scan(_ppo_update_epoch, ppo_state, None, config["UPDATE_EPOCHS_WM"])
-                    policy_state = ppo_state[0]
-                    rng = ppo_state[-1]
-                    
-                    return (policy_state, rng), None
-                
-                (policy_state, rng), _ = jax.lax.scan(
-                    _imagine_iter, (policy_state, rng), None, config["IMAGINATION_ITERS"]
+                # Sample starting states from buffer
+                sample_idx = jax.random.randint(
+                    sample_rng, (config["NUM_ENVS"],), 0, jnp.maximum(buffer['size'], 1)
                 )
+                start_obs = buffer['obs'][sample_idx]
+                start_done = jnp.zeros(config["NUM_ENVS"])
+                start_hstate = ScannedRNN.initialize_carry(config["NUM_ENVS"], 256)
+                
+                # Single imagination rollout (no nested scan!)
+                imag_traj, imag_last_val, imag_last_done, _ = _imagine_rollout(
+                    imagine_rng, policy_state, vqvae_state, twm_state,
+                    start_obs, start_hstate, start_done,
+                    config["TWM_ROLLOUT_LEN"],
+                )
+                
+                # PPO on imagined data
+                imag_advantages, imag_targets = _calculate_gae(imag_traj, imag_last_val, imag_last_done)
+                
+                init_hstate_batch = start_hstate[None, :]
+                ppo_state = (policy_state, init_hstate_batch, imag_traj, imag_advantages, imag_targets, rng)
+                ppo_state, _ = jax.lax.scan(_ppo_update_epoch, ppo_state, None, config["UPDATE_EPOCHS_WM"])
+                policy_state = ppo_state[0]
+                rng = ppo_state[-1]
+                
                 return policy_state, rng
             
             def _skip_imagination(carry):
-                policy_state, _, _, _, _, _, rng = carry
+                policy_state, _, _, _, rng = carry
                 return policy_state, rng
             
-            imag_carry = (policy_state, vqvae_state, twm_state, buffer, hstate, last_done, rng)
+            imag_carry = (policy_state, vqvae_state, twm_state, buffer, rng)
             policy_state, rng = jax.lax.cond(
                 do_imagination, _do_imagination, _skip_imagination, imag_carry
             )
@@ -799,7 +795,7 @@ if __name__ == "__main__":
     parser.add_argument("--num_steps", type=int, default=96)
     
     # Training
-    parser.add_argument("--total_timesteps", type=lambda x: int(float(x)), default=1e7)
+    parser.add_argument("--total_timesteps", type=lambda x: int(float(x)), default=1e6)
     parser.add_argument("--lr", type=float, default=2e-4)
     parser.add_argument("--update_epochs", type=int, default=4)
     parser.add_argument("--update_epochs_wm", type=int, default=1)
@@ -832,9 +828,12 @@ if __name__ == "__main__":
     parser.add_argument("--twm_temperature", type=float, default=1.0)
     
     # MBRL
-    parser.add_argument("--buffer_size", type=int, default=128000)
+    # Note: Buffer stores observations (63x63x3 float32 = ~48KB each)
+    # 50k entries = ~2.4GB, 128k = ~6GB
+    parser.add_argument("--buffer_size", type=int, default=50000)
     parser.add_argument("--background_planning_start", type=int, default=200000)
-    parser.add_argument("--imagination_iters", type=int, default=150)
+    # Note: imagination_iters is now 1 per update step (paper-style), this param is unused
+    parser.add_argument("--imagination_iters", type=int, default=1)
     
     # Misc
     parser.add_argument("--seed", type=int, default=0)
