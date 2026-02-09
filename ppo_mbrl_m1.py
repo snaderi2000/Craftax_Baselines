@@ -289,13 +289,14 @@ def make_env_rollout_fn(env, env_params, network, config):
 
 def make_vqvae_update_fn(vqvae, config):
     """Create JIT-compiled VQ-VAE update function."""
+    num_updates = config["VQVAE_UPDATES_PER_ITER"]
     
     def _vqvae_loss_fn(params, obs_batch):
         recon, tokens, total_loss, metrics = vqvae.apply(params, obs_batch, method=vqvae.get_vq_loss)
         return total_loss, metrics
     
     @jax.jit
-    def vqvae_update(vqvae_state, obs_batch, num_updates):
+    def vqvae_update(vqvae_state, obs_batch):
         """Update VQ-VAE on observation batch."""
         def _update_step(state, _):
             grad_fn = jax.value_and_grad(_vqvae_loss_fn, has_aux=True)
@@ -754,7 +755,7 @@ def run_mbrl(config):
         # Step 3: VQ-VAE Update (always, for reconstruction)
         # ---------------------------------------------------------------------
         if not config["USE_PRETRAINED_VQVAE"]:
-            vqvae_state, vqvae_loss = vqvae_update(vqvae_state, traj_obs, config["VQVAE_UPDATES_PER_ITER"])
+            vqvae_state, vqvae_loss = vqvae_update(vqvae_state, traj_obs)
         else:
             vqvae_loss = 0.0
         
