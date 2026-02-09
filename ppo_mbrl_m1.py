@@ -313,7 +313,7 @@ def make_vqvae_update_fn(vqvae, config):
 def make_twm_update_fn(twm, vqvae, config):
     """Create JIT-compiled TWM update function."""
     
-    def _twm_loss_fn(params, obs_tokens, actions, mask):
+    def _twm_loss_fn(params, obs_tokens, actions, dropout_rng):
         """Compute TWM loss on tokenized sequences."""
         # Interleave obs tokens and action tokens: [o0, a0, o1, a1, ...]
         B, T, L = obs_tokens.shape  # (batch, time, tokens_per_frame)
@@ -334,8 +334,8 @@ def make_twm_update_fn(twm, vqvae, config):
             if t < T - 1:
                 input_tokens = input_tokens.at[:, start_idx+L].set(actions[:, t])
         
-        # Forward pass
-        output = twm.apply(params, input_tokens, deterministic=False)
+        # Forward pass with dropout RNG
+        output = twm.apply(params, input_tokens, deterministic=False, rngs={'dropout': dropout_rng})
         
         # Compute loss on next-token prediction
         # Target is shifted input
@@ -367,10 +367,12 @@ def make_twm_update_fn(twm, vqvae, config):
         tokens_flat = vqvae.apply(vqvae_state.params, obs_flat, method=vqvae.encode)
         obs_tokens = tokens_flat.reshape(B, T, -1)
         
+        # Split RNG for dropout
+        rng, dropout_rng = jax.random.split(rng)
+        
         # Compute gradient and update
-        mask = jnp.ones((B, T))  # Simple mask
         grad_fn = jax.value_and_grad(_twm_loss_fn)
-        loss, grads = grad_fn(twm_state.params, obs_tokens, actions_batch, mask)
+        loss, grads = grad_fn(twm_state.params, obs_tokens, actions_batch, dropout_rng)
         twm_state = twm_state.apply_gradients(grads=grads)
         
         return twm_state, loss
