@@ -5,19 +5,19 @@ Based on "Improving Transformer World Models for Data-Efficient RL"
 Uses the RNN-based IMPALA policy from ppo_m1_best.py (ActorCriticRNN)
 
 PURE M1 (NOT Dyna):
-- Before T_BP: Collect data, train VQ-VAE, train TWM
+- From step 0: Collect data, train VQ-VAE AND TWM
 - After T_BP: Train policy ONLY on imagined data from TWM
 - Real environment data is ONLY used to train the world model, NOT the policy
+
+Paper's training counts per iteration:
+- N_iters_tok = 500 (tokenizer updates)
+- N_iters_TWM = 500 (TWM updates)
+- N_mb_training_WM = 3 (minibatches per update)
+- N_iters_AC = 150 (imagination policy updates after T_BP)
 
 MEMORY OPTIMIZED VERSION:
 - Uses separate JIT functions instead of one giant JIT
 - Python outer loop to avoid tracing entire training
-- Each step is JIT compiled independently
-
-Algorithm 1 from the paper (M1):
-1. Collect data from environment → replay buffer (for WM training)
-2. Update world model (VQ-VAE + TWM) on real data
-3. Update policy ONLY on imagined data (after T_BP steps)
 """
 
 import argparse
@@ -288,68 +288,48 @@ def make_env_rollout_fn(env, env_params, network, config):
 
 
 def make_vqvae_update_fn(vqvae, config):
-    """Create JIT-compiled VQ-VAE update function."""
-    num_updates = config["VQVAE_UPDATES_PER_ITER"]
+    """Create JIT-compiled VQ-VAE single update function."""
     
     def _vqvae_loss_fn(params, obs_batch):
         recon, tokens, total_loss, metrics = vqvae.apply(params, obs_batch, method=vqvae.get_vq_loss)
         return total_loss, metrics
     
     @jax.jit
-    def vqvae_update(vqvae_state, obs_batch):
-        """Update VQ-VAE on observation batch."""
-        def _update_step(state, _):
-            grad_fn = jax.value_and_grad(_vqvae_loss_fn, has_aux=True)
-            (loss, metrics), grads = grad_fn(state.params, obs_batch)
-            state = state.apply_gradients(grads=grads)
-            return state, loss
-        
-        vqvae_state, losses = jax.lax.scan(_update_step, vqvae_state, None, num_updates)
-        return vqvae_state, losses[-1]
+    def vqvae_update_single(vqvae_state, obs_batch):
+        """Single VQ-VAE update step."""
+        grad_fn = jax.value_and_grad(_vqvae_loss_fn, has_aux=True)
+        (loss, metrics), grads = grad_fn(vqvae_state.params, obs_batch)
+        vqvae_state = vqvae_state.apply_gradients(grads=grads)
+        return vqvae_state, loss
     
-    return vqvae_update
+    return vqvae_update_single
 
 
 def make_twm_update_fn(twm, vqvae, config):
-    """Create JIT-compiled TWM update function."""
+    """Create JIT-compiled TWM single update function."""
     
     def _twm_loss_fn(params, obs_tokens, actions, dropout_rng):
         """Compute TWM loss on tokenized sequences."""
-        # Interleave obs tokens and action tokens: [o0, a0, o1, a1, ...]
-        B, T, L = obs_tokens.shape  # (batch, time, tokens_per_frame)
-        
-        # Build input sequence
-        # For each timestep: 64 obs tokens + 1 action token = 65 tokens
+        B, T, L = obs_tokens.shape
         seq_len = T * config["TOKENS_PER_BLOCK"]
         
         # Create interleaved sequence
         input_tokens = jnp.zeros((B, seq_len), dtype=jnp.int32)
         
-        # Fill in observation tokens and action tokens
         for t in range(T):
             start_idx = t * config["TOKENS_PER_BLOCK"]
-            # Obs tokens for this frame
             input_tokens = input_tokens.at[:, start_idx:start_idx+L].set(obs_tokens[:, t, :])
-            # Action token (if not last frame)
             if t < T - 1:
                 input_tokens = input_tokens.at[:, start_idx+L].set(actions[:, t])
         
-        # Forward pass with dropout RNG
         output = twm.apply(params, input_tokens, deterministic=False, rngs={'dropout': dropout_rng})
         
-        # Compute loss on next-token prediction
-        # Target is shifted input
         target_tokens = jnp.roll(input_tokens, -1, axis=1)
+        obs_logits = output.logits_observations
         
-        # Get observation logits and compute cross-entropy
-        obs_logits = output.logits_observations  # (B, seq_len, vocab_size)
-        
-        # Flatten for loss computation
         logits_flat = obs_logits[:, :-1, :].reshape(-1, obs_logits.shape[-1])
         targets_flat = target_tokens[:, :-1].reshape(-1)
-        
-        # Cross-entropy loss with mask
-        mask_flat = jnp.ones_like(targets_flat, dtype=jnp.float32)  # Simple mask for now
+        mask_flat = jnp.ones_like(targets_flat, dtype=jnp.float32)
         
         log_probs = jax.nn.log_softmax(logits_flat, axis=-1)
         targets_one_hot = jax.nn.one_hot(targets_flat, obs_logits.shape[-1])
@@ -359,29 +339,30 @@ def make_twm_update_fn(twm, vqvae, config):
         return loss
     
     @jax.jit
-    def twm_update(twm_state, vqvae_state, obs_batch, actions_batch, rng):
-        """Update TWM on observation/action sequences."""
-        # Tokenize observations
+    def twm_update_single(twm_state, vqvae_params, obs_batch, actions_batch, rng):
+        """Single TWM update step."""
         B, T = obs_batch.shape[:2]
         obs_flat = obs_batch.reshape(B * T, 63, 63, 3)
-        tokens_flat = vqvae.apply(vqvae_state.params, obs_flat, method=vqvae.encode)
+        tokens_flat = vqvae.apply(vqvae_params, obs_flat, method=vqvae.encode)
         obs_tokens = tokens_flat.reshape(B, T, -1)
         
-        # Split RNG for dropout
         rng, dropout_rng = jax.random.split(rng)
         
-        # Compute gradient and update
         grad_fn = jax.value_and_grad(_twm_loss_fn)
         loss, grads = grad_fn(twm_state.params, obs_tokens, actions_batch, dropout_rng)
         twm_state = twm_state.apply_gradients(grads=grads)
         
-        return twm_state, loss
+        return twm_state, loss, rng
     
-    return twm_update
+    return twm_update_single
 
 
 def make_imagination_fn(network, vqvae, twm, config):
     """Create JIT-compiled imagination rollout + PPO function (M1 style)."""
+    
+    # Use paper's settings for imagination PPO
+    n_mb_imagination = config.get("N_MB_IMAGINATION", 1)
+    n_epoch_imagination = config.get("N_EPOCH_IMAGINATION", 1)
     
     def _calculate_gae(traj_batch, last_val, last_done):
         def _get_advantages(carry, transition):
@@ -427,13 +408,13 @@ def make_imagination_fn(network, vqvae, twm, config):
         advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
         
         rng, perm_rng = jax.random.split(rng)
-        N = traj_batch.obs.shape[1]  # num envs dimension
+        N = traj_batch.obs.shape[1]
         permutation = jax.random.permutation(perm_rng, N)
         batch = (init_hstate, traj_batch, advantages, targets)
         shuffled_batch = jax.tree.map(lambda x: jnp.take(x, permutation, axis=1), batch)
         
-        # Reshape for minibatches
-        num_minibatches = config["NUM_MINIBATCHES"]
+        # Paper: N_mb_WM = 1 for imagination
+        num_minibatches = n_mb_imagination
         minibatches = jax.tree.map(
             lambda x: jnp.swapaxes(jnp.reshape(x, [x.shape[0], num_minibatches, -1] + list(x.shape[2:])), 1, 0),
             shuffled_batch,
@@ -442,7 +423,7 @@ def make_imagination_fn(network, vqvae, twm, config):
         return (policy_state, init_hstate, traj_batch, advantages, targets, rng), losses
     
     @jax.jit
-    def imagination_step(policy_state, vqvae_state, twm_state, buffer_obs, buffer_size, rng):
+    def imagination_step(policy_state, vqvae_params, twm_state, buffer_obs, buffer_size, rng):
         """
         M1: Single imagination rollout + PPO update.
         Policy is trained ONLY on imagined data.
@@ -457,7 +438,7 @@ def make_imagination_fn(network, vqvae, twm, config):
         start_hstate = ScannedRNN.initialize_carry(N, 256)
         
         # Tokenize starting observation
-        start_tokens = vqvae.apply(vqvae_state.params, start_obs, method=vqvae.encode)
+        start_tokens = vqvae.apply(vqvae_params, start_obs, method=vqvae.encode)
         
         # Initialize KV cache
         cache = KeysValues.init(
@@ -474,7 +455,7 @@ def make_imagination_fn(network, vqvae, twm, config):
         # Imagination loop
         def _imagine_step(carry, _):
             current_obs, hstate, current_done, cache, rng = carry
-            rng, action_rng, gen_rng = jax.random.split(rng, 3)
+            rng, action_rng, gen_rng, rew_rng, done_rng = jax.random.split(rng, 5)
             
             # Policy takes action
             ac_in = (current_obs[np.newaxis, :], current_done[np.newaxis, :])
@@ -487,16 +468,15 @@ def make_imagination_fn(network, vqvae, twm, config):
             action_tokens = action.reshape(N, 1)
             output, cache = twm.apply(twm_state.params, action_tokens, past_keys_values=cache, deterministic=True)
             
-            # Sample reward and done from TWM predictions
+            # Sample reward and done from TWM predictions (FIXED: use binary sampling)
             rew_logits = output.logits_rewards[:, -1, :]
             done_logits = output.logits_ends[:, -1, :]
             
-            rng, rew_rng, done_rng = jax.random.split(rng, 3)
-            # Reward: probability of positive reward
+            # Reward: sample binary from probability
             reward_prob = jax.nn.softmax(rew_logits)[:, 1]
-            reward = reward_prob  # Use soft reward for smoother gradients
+            reward = jax.random.bernoulli(rew_rng, reward_prob).astype(jnp.float32)
             
-            # Done: probability of episode end
+            # Done: sample binary from probability
             done_prob = jax.nn.softmax(done_logits)[:, 1]
             new_done = jax.random.bernoulli(done_rng, done_prob).astype(jnp.float32)
             
@@ -523,7 +503,7 @@ def make_imagination_fn(network, vqvae, twm, config):
             
             # Stack tokens and decode
             all_next_tokens = jnp.concatenate([next_token.reshape(N, 1), generated_tokens.T], axis=1)
-            next_obs = vqvae.apply(vqvae_state.params, all_next_tokens, method=vqvae.decode_tokens)
+            next_obs = vqvae.apply(vqvae_params, all_next_tokens, method=vqvae.decode_tokens)
             next_obs = next_obs[:, :63, :63, :]
             
             transition = Transition(
@@ -547,7 +527,8 @@ def make_imagination_fn(network, vqvae, twm, config):
         
         rng, ppo_rng = jax.random.split(rng)
         ppo_state = (policy_state, init_hstate_batch, imag_traj, imag_advantages, imag_targets, ppo_rng)
-        ppo_state, _ = jax.lax.scan(_ppo_update_epoch, ppo_state, None, config["UPDATE_EPOCHS_WM"])
+        # Paper: N_epoch_WM = 1 for imagination
+        ppo_state, _ = jax.lax.scan(_ppo_update_epoch, ppo_state, None, n_epoch_imagination)
         policy_state = ppo_state[0]
         
         return policy_state, rng
@@ -598,20 +579,29 @@ def run_mbrl(config):
             name=f"M1-MBRL-{config['ENV_NAME']}-{int(config['TOTAL_TIMESTEPS']//1e6)}M",
         )
 
-    print("\n" + "="*60)
+    print("\n" + "="*70)
     print("M1 MBRL Training (Pure Imagination - NOT Dyna)")
-    print("="*60)
+    print("="*70)
     print(f"Environment: {config['ENV_NAME']}")
     print(f"Total timesteps: {config['TOTAL_TIMESTEPS']:,}")
     print(f"Num envs: {config['NUM_ENVS']}")
     print(f"Num updates: {config['NUM_UPDATES']}")
     print(f"Background planning starts at: {config['BACKGROUND_PLANNING_START']:,}")
+    print("-"*70)
+    print(f"Tokenizer iters per update: {config['N_ITERS_TOK']}")
+    print(f"TWM iters per update: {config['N_ITERS_TWM']}")
+    print(f"WM minibatches: {config['N_MB_WM']}")
+    print(f"Imagination policy updates: {config['N_ITERS_AC']}")
     print(f"Imagination rollout length: {config['TWM_ROLLOUT_LEN']}")
     print(f"Imagination batch size: {config['IMAGINATION_BATCH_SIZE']}")
-    print("="*60)
+    print("-"*70)
+    print(f"Pre-trained tokenizer: {config['USE_PRETRAINED_TOKENIZER']}")
+    if config['USE_PRETRAINED_TOKENIZER']:
+        print(f"  Path: {config['TOKENIZER_PATH']}")
+    print("="*70)
     print("NOTE: Policy is trained ONLY on imagined data (after T_BP)")
     print("      Real data is used ONLY for world model training")
-    print("="*60 + "\n")
+    print("="*70 + "\n")
 
     # =========================================================================
     # Setup Environment and Networks
@@ -656,13 +646,13 @@ def run_mbrl(config):
     rng, vqvae_rng = jax.random.split(rng)
     vqvae_state = create_vqvae_train_state(config, vqvae_rng, jnp.zeros((1, 63, 63, 3)))
     
-    # Load pre-trained VQ-VAE if specified
-    if config["USE_PRETRAINED_VQVAE"] and config["VQVAE_CHECKPOINT"]:
-        print(f"Loading pre-trained VQ-VAE from: {config['VQVAE_CHECKPOINT']}")
-        with open(config["VQVAE_CHECKPOINT"], 'rb') as f:
+    # Load pre-trained tokenizer if specified
+    if config["USE_PRETRAINED_TOKENIZER"]:
+        print(f"Loading pre-trained tokenizer from: {config['TOKENIZER_PATH']}")
+        with open(config["TOKENIZER_PATH"], 'rb') as f:
             loaded_params = pickle.load(f)
         vqvae_state = vqvae_state.replace(params=loaded_params)
-        print("VQ-VAE loaded successfully!")
+        print("Pre-trained tokenizer loaded successfully! (frozen, no gradient updates)")
     
     # TWM
     rng, twm_rng = jax.random.split(rng)
@@ -695,8 +685,8 @@ def run_mbrl(config):
     # Create JIT Functions
     # =========================================================================
     env_rollout = make_env_rollout_fn(env, env_params, network, config)
-    vqvae_update = make_vqvae_update_fn(vqvae, config)
-    twm_update = make_twm_update_fn(twm, vqvae, config)
+    vqvae_update_single = make_vqvae_update_fn(vqvae, config)
+    twm_update_single = make_twm_update_fn(twm, vqvae, config)
     imagination_step = make_imagination_fn(network, vqvae, twm, config)
     update_buffer = make_buffer_update_fn(config)
 
@@ -706,10 +696,6 @@ def run_mbrl(config):
     total_steps = 0
     t0 = time.time()
     imagination_started = False
-    
-    # Accumulators for sequence building
-    current_sequences_obs = []
-    current_sequences_actions = []
     
     pbar = tqdm(range(config["NUM_UPDATES"]), desc="Training")
     for update_idx in pbar:
@@ -735,18 +721,14 @@ def run_mbrl(config):
         )
         
         # Build sequences for TWM training
-        # Reshape to (num_envs, num_steps, ...)
         env_obs = traj.obs.transpose(1, 0, 2, 3, 4)  # (num_envs, num_steps, H, W, C)
         env_actions = traj.action.transpose(1, 0)  # (num_envs, num_steps)
         
-        # Add sequences to buffer if we have enough steps
         if config["NUM_STEPS"] >= seq_len:
             for i in range(config["NUM_ENVS"]):
-                # Take first seq_len steps as a sequence
                 seq_obs = env_obs[i, :seq_len]
                 seq_actions = env_actions[i, :seq_len]
                 
-                # Add to sequence buffer
                 idx = int(seq_buffer_ptr) % seq_buffer_size
                 seq_buffer_obs = seq_buffer_obs.at[idx].set(seq_obs)
                 seq_buffer_actions = seq_buffer_actions.at[idx].set(seq_actions)
@@ -754,28 +736,39 @@ def run_mbrl(config):
                 seq_buffer_count = jnp.minimum(seq_buffer_count + 1, seq_buffer_size)
         
         # ---------------------------------------------------------------------
-        # Step 3: VQ-VAE Update (always, for reconstruction)
+        # Step 3: VQ-VAE Update (N_ITERS_TOK iterations, if not pretrained)
+        # Paper: 500 iterations with 3 minibatches each
         # ---------------------------------------------------------------------
-        if not config["USE_PRETRAINED_VQVAE"]:
-            vqvae_state, vqvae_loss = vqvae_update(vqvae_state, traj_obs)
-        else:
-            vqvae_loss = 0.0
+        vqvae_loss = 0.0
+        if not config["USE_PRETRAINED_TOKENIZER"] and config["N_ITERS_TOK"] > 0:
+            for tok_iter in range(config["N_ITERS_TOK"]):
+                for mb in range(config["N_MB_WM"]):
+                    # Sample minibatch from buffer
+                    rng, sample_rng = jax.random.split(rng)
+                    mb_size = min(config["VQVAE_BATCH_SIZE"], int(buffer_count))
+                    if mb_size > 0:
+                        mb_idx = jax.random.randint(sample_rng, (mb_size,), 0, int(buffer_count))
+                        obs_mb = buffer_obs[mb_idx]
+                        vqvae_state, vqvae_loss = vqvae_update_single(vqvae_state, obs_mb)
         
         # ---------------------------------------------------------------------
-        # Step 4: TWM Update (train world model on real data)
+        # Step 4: TWM Update (N_ITERS_TWM iterations from step 0)
+        # Paper: 500 iterations with 3 minibatches each
         # ---------------------------------------------------------------------
         twm_loss = 0.0
-        if int(seq_buffer_count) >= config["TWM_BATCH_SIZE"]:
-            # Sample batch of sequences
-            rng, sample_rng = jax.random.split(rng)
-            batch_idx = jax.random.randint(sample_rng, (config["TWM_BATCH_SIZE"],), 0, int(seq_buffer_count))
-            batch_obs = seq_buffer_obs[batch_idx]
-            batch_actions = seq_buffer_actions[batch_idx]
-            
-            twm_state, twm_loss = twm_update(twm_state, vqvae_state, batch_obs, batch_actions, rng)
+        if int(seq_buffer_count) >= config["TWM_BATCH_SIZE"] and config["N_ITERS_TWM"] > 0:
+            for twm_iter in range(config["N_ITERS_TWM"]):
+                for mb in range(config["N_MB_WM"]):
+                    rng, sample_rng = jax.random.split(rng)
+                    batch_idx = jax.random.randint(sample_rng, (config["TWM_BATCH_SIZE"],), 0, int(seq_buffer_count))
+                    batch_obs = seq_buffer_obs[batch_idx]
+                    batch_actions = seq_buffer_actions[batch_idx]
+                    
+                    twm_state, twm_loss, rng = twm_update_single(twm_state, vqvae_state.params, batch_obs, batch_actions, rng)
         
         # ---------------------------------------------------------------------
         # Step 5: Imagination + Policy Update (M1: ONLY source of policy training)
+        # Paper: N_ITERS_AC = 150 policy updates per iteration after T_BP
         # ---------------------------------------------------------------------
         if total_steps >= config["BACKGROUND_PLANNING_START"]:
             if not imagination_started:
@@ -783,39 +776,48 @@ def run_mbrl(config):
                 imagination_started = True
             
             # M1: Policy is trained ONLY on imagined data
-            policy_state, rng = imagination_step(
-                policy_state, vqvae_state, twm_state, buffer_obs, buffer_count, rng
-            )
+            for ac_iter in range(config["N_ITERS_AC"]):
+                policy_state, rng = imagination_step(
+                    policy_state, vqvae_state.params, twm_state, buffer_obs, buffer_count, rng
+                )
         
         # ---------------------------------------------------------------------
-        # Logging
+        # Logging with achievements/score
         # ---------------------------------------------------------------------
         if update_idx % 10 == 0:
-            # Compute metrics from real environment (for monitoring only)
+            status = "WM-only" if not imagination_started else "Imagination"
+            
+            # Use create_log_dict for proper achievement logging
+            log_dict = create_log_dict(traj.info, config)
+            
+            # Get return and score for progress bar
             returned = traj.info["returned_episode"]
             if returned.sum() > 0:
                 avg_return = (traj.info["returned_episode_returns"] * returned).sum() / returned.sum()
             else:
                 avg_return = 0.0
             
-            status = "WM-only" if not imagination_started else "Imagination"
+            score = log_dict.get("score", 0.0)
+            
             pbar.set_postfix({
                 'mode': status,
                 'steps': f'{total_steps:,}',
                 'return': f'{float(avg_return):.2f}',
+                'score': f'{float(score):.2f}',
                 'vq': f'{float(vqvae_loss):.3f}',
                 'twm': f'{float(twm_loss):.3f}',
             })
             
             if config["USE_WANDB"]:
-                log_dict = {
+                # Add additional metrics
+                log_dict.update({
                     'step': total_steps,
-                    'return': float(avg_return),
                     'vqvae_loss': float(vqvae_loss),
                     'twm_loss': float(twm_loss),
                     'buffer_size': int(buffer_count),
+                    'seq_buffer_size': int(seq_buffer_count),
                     'imagination_active': imagination_started,
-                }
+                })
                 wandb.log(log_dict)
     
     t1 = time.time()
@@ -853,29 +855,32 @@ if __name__ == "__main__":
     # Environment
     parser.add_argument("--env_name", type=str, default="Craftax-Classic-Pixels-v1")
     parser.add_argument("--num_envs", type=int, default=48)
-    parser.add_argument("--num_steps", type=int, default=64)
+    parser.add_argument("--num_steps", type=int, default=96)
     
     # Training
-    parser.add_argument("--total_timesteps", type=lambda x: int(float(x)), default=1e7)
-    parser.add_argument("--lr", type=float, default=2e-4)
+    parser.add_argument("--total_timesteps", type=lambda x: int(float(x)), default=1e6)
+    parser.add_argument("--lr", type=float, default=0.00045)
     parser.add_argument("--update_epochs", type=int, default=4)
-    parser.add_argument("--update_epochs_wm", type=int, default=2)
-    parser.add_argument("--num_minibatches", type=int, default=4)
-    parser.add_argument("--gamma", type=float, default=0.99)
-    parser.add_argument("--gae_lambda", type=float, default=0.8)
+    parser.add_argument("--num_minibatches", type=int, default=8)
+    parser.add_argument("--gamma", type=float, default=0.925)
+    parser.add_argument("--gae_lambda", type=float, default=0.625)
     parser.add_argument("--clip_eps", type=float, default=0.2)
     parser.add_argument("--ent_coef", type=float, default=0.01)
-    parser.add_argument("--vf_coef", type=float, default=0.5)
-    parser.add_argument("--max_grad_norm", type=float, default=1.0)
+    parser.add_argument("--vf_coef", type=float, default=1.0)
+    parser.add_argument("--max_grad_norm", type=float, default=0.5)
     parser.add_argument("--anneal_lr", action=argparse.BooleanOptionalAction, default=False)
     
-    # VQ-VAE
+    # VQ-VAE / Tokenizer
     parser.add_argument("--vqvae_codebook_size", type=int, default=512)
     parser.add_argument("--vqvae_embed_dim", type=int, default=128)
     parser.add_argument("--vqvae_lr", type=float, default=0.001)
-    parser.add_argument("--vqvae_updates_per_iter", type=int, default=3)
-    parser.add_argument("--use_pretrained_vqvae", action="store_true")
-    parser.add_argument("--vqvae_checkpoint", type=str, default="")
+    parser.add_argument("--vqvae_batch_size", type=int, default=256)
+    parser.add_argument("--use_pretrained_tokenizer", action="store_true", 
+                        help="Use pre-trained VQ-VAE tokenizer (frozen)")
+    parser.add_argument("--tokenizer_path", type=str, default="token_wm/tokenizer/vqvae_params.pkl",
+                        help="Path to pre-trained tokenizer params")
+    parser.add_argument("--n_iters_tok", type=int, default=500,
+                        help="Number of tokenizer update iterations per step (paper: 500)")
     
     # TWM
     parser.add_argument("--twm_seq_len", type=int, default=20)
@@ -885,19 +890,29 @@ if __name__ == "__main__":
     parser.add_argument("--twm_dropout", type=float, default=0.1)
     parser.add_argument("--twm_lr", type=float, default=0.001)
     parser.add_argument("--twm_max_grad_norm", type=float, default=0.5)
-    parser.add_argument("--twm_rollout_len", type=int, default=15)
+    parser.add_argument("--twm_rollout_len", type=int, default=20)
     parser.add_argument("--twm_temperature", type=float, default=1.0)
     parser.add_argument("--twm_batch_size", type=int, default=16)
+    parser.add_argument("--n_iters_twm", type=int, default=500,
+                        help="Number of TWM update iterations per step (paper: 500)")
+    parser.add_argument("--n_mb_wm", type=int, default=3,
+                        help="Number of minibatches for WM training (paper: 3)")
     
-    # MBRL
-    parser.add_argument("--buffer_size", type=int, default=50000)
-    parser.add_argument("--seq_buffer_size", type=int, default=2000)
+    # Imagination / MBRL
+    parser.add_argument("--buffer_size", type=int, default=128000)
+    parser.add_argument("--seq_buffer_size", type=int, default=5000)
     parser.add_argument("--background_planning_start", type=int, default=200000)
-    parser.add_argument("--imagination_batch_size", type=int, default=32)
+    parser.add_argument("--imagination_batch_size", type=int, default=48)
+    parser.add_argument("--n_iters_ac", type=int, default=150,
+                        help="Number of imagination policy updates per step (paper: 150)")
+    parser.add_argument("--n_mb_imagination", type=int, default=1,
+                        help="Number of minibatches for imagination PPO (paper: 1)")
+    parser.add_argument("--n_epoch_imagination", type=int, default=1,
+                        help="Number of epochs for imagination PPO (paper: 1)")
     
     # Misc
     parser.add_argument("--seed", type=int, default=0)
-    parser.add_argument("--layer_size", type=int, default=512)
+    parser.add_argument("--layer_size", type=int, default=2048)
     parser.add_argument("--debug", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--use_wandb", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--wandb_project", type=str, default="craftax-mbrl")
@@ -914,12 +929,16 @@ if __name__ == "__main__":
         print(f"Warning: Unknown args: {rest}")
     
     if args.smoke_test:
-        print("\n*** SMOKE TEST MODE ***\n")
+        print("\n*** SMOKE TEST MODE (with pre-trained tokenizer) ***\n")
         args.total_timesteps = 50000
         args.num_envs = 8
         args.num_steps = 32
-        args.vqvae_updates_per_iter = 1
-        args.background_planning_start = 10000
+        args.use_pretrained_tokenizer = True  # Use pre-trained tokenizer
+        args.n_iters_tok = 0  # Skip tokenizer training
+        args.n_iters_twm = 5  # Reduced TWM iterations
+        args.n_iters_ac = 3   # Reduced imagination iterations
+        args.n_mb_wm = 1      # Reduced minibatches
+        args.background_planning_start = 5000
         args.buffer_size = 5000
         args.seq_buffer_size = 200
         args.twm_batch_size = 4
