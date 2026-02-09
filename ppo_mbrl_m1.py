@@ -787,16 +787,25 @@ def run_mbrl(config):
         if update_idx % 10 == 0:
             status = "WM-only" if not imagination_started else "Imagination"
             
-            # Use create_log_dict for proper achievement logging
-            log_dict = create_log_dict(traj.info, config)
-            
-            # Get return and score for progress bar
+            # Compute episode-averaged metrics (like ppo_rnn.py)
+            # This averages values over completed episodes only
             returned = traj.info["returned_episode"]
-            if returned.sum() > 0:
-                avg_return = (traj.info["returned_episode_returns"] * returned).sum() / returned.sum()
+            num_returned = returned.sum()
+            
+            if num_returned > 0:
+                # Average all info values over completed episodes
+                metric = jax.tree.map(
+                    lambda x: (x * returned).sum() / num_returned,
+                    traj.info,
+                )
+                avg_return = float(metric["returned_episode_returns"])
             else:
+                # No completed episodes, use zeros
+                metric = jax.tree.map(lambda x: jnp.zeros_like(x).mean(), traj.info)
                 avg_return = 0.0
             
+            # Use create_log_dict with properly averaged metrics
+            log_dict = create_log_dict(metric, config)
             score = log_dict.get("score", 0.0)
             
             pbar.set_postfix({
