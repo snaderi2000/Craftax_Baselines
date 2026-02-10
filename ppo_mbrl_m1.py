@@ -306,41 +306,36 @@ def make_vqvae_update_fn(vqvae, config):
 
 
 def make_twm_update_fn(twm, vqvae, config):
-    """Create JIT-compiled TWM single update function."""
+    """Create JIT-compiled TWM single update function.
     
-    def _twm_loss_fn(params, obs_tokens, actions, dropout_rng):
-        """Compute TWM loss on tokenized sequences."""
-        B, T, L = obs_tokens.shape
-        seq_len = T * config["TOKENS_PER_BLOCK"]
-        
-        # Create interleaved sequence
-        input_tokens = jnp.zeros((B, seq_len), dtype=jnp.int32)
-        
-        for t in range(T):
-            start_idx = t * config["TOKENS_PER_BLOCK"]
-            input_tokens = input_tokens.at[:, start_idx:start_idx+L].set(obs_tokens[:, t, :])
-            if t < T - 1:
-                input_tokens = input_tokens.at[:, start_idx+L].set(actions[:, t])
-        
-        output = twm.apply(params, input_tokens, deterministic=False, rngs={'dropout': dropout_rng})
-        
-        target_tokens = jnp.roll(input_tokens, -1, axis=1)
-        obs_logits = output.logits_observations
-        
-        logits_flat = obs_logits[:, :-1, :].reshape(-1, obs_logits.shape[-1])
-        targets_flat = target_tokens[:, :-1].reshape(-1)
-        mask_flat = jnp.ones_like(targets_flat, dtype=jnp.float32)
-        
-        log_probs = jax.nn.log_softmax(logits_flat, axis=-1)
-        targets_one_hot = jax.nn.one_hot(targets_flat, obs_logits.shape[-1])
-        loss = -jnp.sum(log_probs * targets_one_hot, axis=-1)
-        loss = jnp.sum(loss * mask_flat) / jnp.maximum(jnp.sum(mask_flat), 1.0)
-        
-        return loss
+    Uses WorldModel.compute_loss which trains ALL three heads:
+      1. Observation prediction (cross-entropy on codebook tokens)
+      2. Reward prediction (cross-entropy on {-1, 0, +1} → {0, 1, 2})
+      3. Termination prediction (cross-entropy on {continue, end})
+    """
+    
+    def _twm_loss_fn(params, obs_tokens, actions, rewards, dones, dropout_rng):
+        """Compute TWM loss using proper compute_loss (obs + reward + termination)."""
+        B, T, K = obs_tokens.shape
+        batch = {
+            'obs_tokens': obs_tokens,       # (B, T, 64)
+            'actions': actions,              # (B, T)
+            'rewards': rewards,              # (B, T)
+            'ends': dones,                   # (B, T)
+            'mask_padding': jnp.zeros((B, T), dtype=jnp.bool_),  # No padding
+        }
+        loss_output = twm.apply(
+            params,
+            batch,
+            dropout_rng,
+            method=twm.compute_loss,
+            rngs={'dropout': dropout_rng},
+        )
+        return loss_output.total_loss, (loss_output.loss_obs, loss_output.loss_rewards, loss_output.loss_ends)
     
     @jax.jit
-    def twm_update_single(twm_state, vqvae_params, obs_batch, actions_batch, rng):
-        """Single TWM update step."""
+    def twm_update_single(twm_state, vqvae_params, obs_batch, actions_batch, rewards_batch, dones_batch, rng):
+        """Single TWM update step with obs + reward + termination losses."""
         B, T = obs_batch.shape[:2]
         obs_flat = obs_batch.reshape(B * T, 63, 63, 3)
         tokens_flat = vqvae.apply(vqvae_params, obs_flat, method=vqvae.encode)
@@ -348,11 +343,13 @@ def make_twm_update_fn(twm, vqvae, config):
         
         rng, dropout_rng = jax.random.split(rng)
         
-        grad_fn = jax.value_and_grad(_twm_loss_fn)
-        loss, grads = grad_fn(twm_state.params, obs_tokens, actions_batch, dropout_rng)
+        grad_fn = jax.value_and_grad(_twm_loss_fn, has_aux=True)
+        (loss, (loss_obs, loss_rew, loss_ends)), grads = grad_fn(
+            twm_state.params, obs_tokens, actions_batch, rewards_batch, dones_batch, dropout_rng
+        )
         twm_state = twm_state.apply_gradients(grads=grads)
         
-        return twm_state, loss, rng
+        return twm_state, loss, (loss_obs, loss_rew, loss_ends), rng
     
     return twm_update_single
 
@@ -441,10 +438,13 @@ def make_imagination_fn(network, vqvae, twm, config):
         start_tokens = vqvae.apply(vqvae_params, start_obs, method=vqvae.encode)
         
         # Initialize KV cache
+        # Cache needs: initial obs (64 tokens) + TWM_ROLLOUT_LEN steps × 65 tokens each
+        # = 64 + TWM_ROLLOUT_LEN * 65 = (TWM_ROLLOUT_LEN + 1) * 65 - 1
+        # Use (TWM_ROLLOUT_LEN + 1) * TOKENS_PER_BLOCK for safety
         cache = KeysValues.init(
             n=N,
             num_heads=config["TWM_NUM_HEADS"],
-            max_tokens=config["TWM_SEQ_LEN"] * config["TOKENS_PER_BLOCK"],
+            max_tokens=(config["TWM_ROLLOUT_LEN"] + 1) * config["TOKENS_PER_BLOCK"],
             embed_dim=config["TWM_EMBED_DIM"],
             num_layers=config["TWM_NUM_LAYERS"],
         )
@@ -673,11 +673,13 @@ def run_mbrl(config):
     buffer_ptr = jnp.array(0, dtype=jnp.int32)
     buffer_count = jnp.array(0, dtype=jnp.int32)
     
-    # Sequence buffer for TWM training (stores sequences)
+    # Sequence buffer for TWM training (stores sequences with rewards/dones)
     seq_buffer_size = config["SEQ_BUFFER_SIZE"]
     seq_len = config["TWM_SEQ_LEN"]
     seq_buffer_obs = jnp.zeros((seq_buffer_size, seq_len, 63, 63, 3))
     seq_buffer_actions = jnp.zeros((seq_buffer_size, seq_len), dtype=jnp.int32)
+    seq_buffer_rewards = jnp.zeros((seq_buffer_size, seq_len))
+    seq_buffer_dones = jnp.zeros((seq_buffer_size, seq_len))
     seq_buffer_ptr = jnp.array(0, dtype=jnp.int32)
     seq_buffer_count = jnp.array(0, dtype=jnp.int32)
 
@@ -720,20 +722,28 @@ def run_mbrl(config):
             buffer_ptr, buffer_count, traj_obs, traj_actions, traj_rewards, traj_dones
         )
         
-        # Build sequences for TWM training
+        # Build sequences for TWM training (with rewards/dones, multiple subsequences)
         env_obs = traj.obs.transpose(1, 0, 2, 3, 4)  # (num_envs, num_steps, H, W, C)
         env_actions = traj.action.transpose(1, 0)  # (num_envs, num_steps)
+        env_rewards = traj.reward.transpose(1, 0)  # (num_envs, num_steps)
+        env_dones = traj.done.transpose(1, 0).astype(jnp.float32)  # (num_envs, num_steps)
         
         if config["NUM_STEPS"] >= seq_len:
             for i in range(config["NUM_ENVS"]):
-                seq_obs = env_obs[i, :seq_len]
-                seq_actions = env_actions[i, :seq_len]
-                
-                idx = int(seq_buffer_ptr) % seq_buffer_size
-                seq_buffer_obs = seq_buffer_obs.at[idx].set(seq_obs)
-                seq_buffer_actions = seq_buffer_actions.at[idx].set(seq_actions)
-                seq_buffer_ptr = (seq_buffer_ptr + 1) % seq_buffer_size
-                seq_buffer_count = jnp.minimum(seq_buffer_count + 1, seq_buffer_size)
+                # Extract multiple non-overlapping subsequences per env
+                for j in range(0, config["NUM_STEPS"] - seq_len + 1, seq_len):
+                    seq_obs = env_obs[i, j:j+seq_len]
+                    seq_actions = env_actions[i, j:j+seq_len]
+                    seq_rewards = env_rewards[i, j:j+seq_len]
+                    seq_dones = env_dones[i, j:j+seq_len]
+                    
+                    idx = int(seq_buffer_ptr) % seq_buffer_size
+                    seq_buffer_obs = seq_buffer_obs.at[idx].set(seq_obs)
+                    seq_buffer_actions = seq_buffer_actions.at[idx].set(seq_actions)
+                    seq_buffer_rewards = seq_buffer_rewards.at[idx].set(seq_rewards)
+                    seq_buffer_dones = seq_buffer_dones.at[idx].set(seq_dones)
+                    seq_buffer_ptr = (seq_buffer_ptr + 1) % seq_buffer_size
+                    seq_buffer_count = jnp.minimum(seq_buffer_count + 1, seq_buffer_size)
         
         # ---------------------------------------------------------------------
         # Step 3: VQ-VAE Update (N_ITERS_TOK iterations, if not pretrained)
@@ -756,6 +766,9 @@ def run_mbrl(config):
         # Paper: 500 iterations with 3 minibatches each
         # ---------------------------------------------------------------------
         twm_loss = 0.0
+        twm_loss_obs = 0.0
+        twm_loss_rew = 0.0
+        twm_loss_ends = 0.0
         if int(seq_buffer_count) >= config["TWM_BATCH_SIZE"] and config["N_ITERS_TWM"] > 0:
             for twm_iter in range(config["N_ITERS_TWM"]):
                 for mb in range(config["N_MB_WM"]):
@@ -763,8 +776,12 @@ def run_mbrl(config):
                     batch_idx = jax.random.randint(sample_rng, (config["TWM_BATCH_SIZE"],), 0, int(seq_buffer_count))
                     batch_obs = seq_buffer_obs[batch_idx]
                     batch_actions = seq_buffer_actions[batch_idx]
+                    batch_rewards = seq_buffer_rewards[batch_idx]
+                    batch_dones = seq_buffer_dones[batch_idx]
                     
-                    twm_state, twm_loss, rng = twm_update_single(twm_state, vqvae_state.params, batch_obs, batch_actions, rng)
+                    twm_state, twm_loss, (twm_loss_obs, twm_loss_rew, twm_loss_ends), rng = twm_update_single(
+                        twm_state, vqvae_state.params, batch_obs, batch_actions, batch_rewards, batch_dones, rng
+                    )
         
         # ---------------------------------------------------------------------
         # Step 5: Imagination + Policy Update (M1: ONLY source of policy training)
@@ -815,6 +832,8 @@ def run_mbrl(config):
                 'score': f'{float(score):.2f}',
                 'vq': f'{float(vqvae_loss):.3f}',
                 'twm': f'{float(twm_loss):.3f}',
+                'twm_r': f'{float(twm_loss_rew):.3f}',
+                'twm_d': f'{float(twm_loss_ends):.3f}',
             })
             
             if config["USE_WANDB"]:
@@ -823,6 +842,9 @@ def run_mbrl(config):
                     'step': total_steps,
                     'vqvae_loss': float(vqvae_loss),
                     'twm_loss': float(twm_loss),
+                    'twm_loss_obs': float(twm_loss_obs),
+                    'twm_loss_rew': float(twm_loss_rew),
+                    'twm_loss_ends': float(twm_loss_ends),
                     'buffer_size': int(buffer_count),
                     'seq_buffer_size': int(seq_buffer_count),
                     'imagination_active': imagination_started,
