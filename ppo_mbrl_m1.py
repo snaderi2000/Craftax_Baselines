@@ -438,13 +438,13 @@ def make_imagination_fn(network, vqvae, twm, config):
         start_tokens = vqvae.apply(vqvae_params, start_obs, method=vqvae.encode)
         
         # Initialize KV cache
-        # Cache needs: initial obs (64 tokens) + TWM_ROLLOUT_LEN steps × 65 tokens each
-        # = 64 + TWM_ROLLOUT_LEN * 65 = (TWM_ROLLOUT_LEN + 1) * 65 - 1
-        # Use (TWM_ROLLOUT_LEN + 1) * TOKENS_PER_BLOCK for safety
+        # Must match transformer's internal causal mask size = TWM_SEQ_LEN * TOKENS_PER_BLOCK
+        # The initial obs frame (64 tokens) + TWM_ROLLOUT_LEN * 65 must fit within this.
+        # This is enforced by setting TWM_ROLLOUT_LEN = TWM_SEQ_LEN - 1.
         cache = KeysValues.init(
             n=N,
             num_heads=config["TWM_NUM_HEADS"],
-            max_tokens=(config["TWM_ROLLOUT_LEN"] + 1) * config["TOKENS_PER_BLOCK"],
+            max_tokens=config["TWM_SEQ_LEN"] * config["TOKENS_PER_BLOCK"],
             embed_dim=config["TWM_EMBED_DIM"],
             num_layers=config["TWM_NUM_LAYERS"],
         )
@@ -570,6 +570,13 @@ def run_mbrl(config):
     config["TOKENS_PER_BLOCK"] = 65
     config["NUM_UPDATES"] = config["TOTAL_TIMESTEPS"] // config["NUM_STEPS"] // config["NUM_ENVS"]
     config["MINIBATCH_SIZE"] = config["NUM_ENVS"] * config["NUM_STEPS"] // config["NUM_MINIBATCHES"]
+
+    # Validate: initial obs (64 tokens) + rollout_len * 65 must fit in TWM_SEQ_LEN * 65
+    max_rollout = config["TWM_SEQ_LEN"] - 1  # initial frame uses ~1 block
+    if config["TWM_ROLLOUT_LEN"] > max_rollout:
+        print(f"WARNING: TWM_ROLLOUT_LEN={config['TWM_ROLLOUT_LEN']} too large for TWM_SEQ_LEN={config['TWM_SEQ_LEN']}. "
+              f"Clamping to {max_rollout} (initial obs uses 64 of 65 tokens in first block).")
+        config["TWM_ROLLOUT_LEN"] = max_rollout
 
     if config["USE_WANDB"]:
         wandb.init(
@@ -921,7 +928,8 @@ if __name__ == "__main__":
     parser.add_argument("--twm_dropout", type=float, default=0.1)
     parser.add_argument("--twm_lr", type=float, default=0.001)
     parser.add_argument("--twm_max_grad_norm", type=float, default=0.5)
-    parser.add_argument("--twm_rollout_len", type=int, default=20)
+    parser.add_argument("--twm_rollout_len", type=int, default=19,
+                        help="Imagination rollout length. Must be <= twm_seq_len-1 (initial obs uses ~1 block)")
     parser.add_argument("--twm_temperature", type=float, default=1.0)
     parser.add_argument("--twm_batch_size", type=int, default=16)
     parser.add_argument("--n_iters_twm", type=int, default=500,
