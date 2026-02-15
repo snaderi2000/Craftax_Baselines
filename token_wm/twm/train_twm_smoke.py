@@ -325,7 +325,9 @@ def run_rollout_with_context(state, context_obs_tokens, context_actions, future_
         use_sampling: Whether to sample or use argmax
     
     Returns:
-        Generated observation tokens for T future timesteps
+        result: (1, T, 64) generated observation tokens
+        predicted_rewards: list of T floats, predicted reward per step ({-1, 0, +1})
+        predicted_dones: list of T floats, predicted done probability per step
     """
     print(f"Running TWM Rollout with Context... [temp={temperature}, sampling={use_sampling}]")
     model = WorldModel(
@@ -374,6 +376,8 @@ def run_rollout_with_context(state, context_obs_tokens, context_actions, future_
         print(f"  Starting frame (context_obs[{M}], first 5): {context_obs_tokens[M, :5]}")
     
     generated_frames_tokens = []
+    predicted_rewards = []
+    predicted_dones = []
     
     def sample_token(logits, rng):
         """Sample a token from logits with temperature."""
@@ -395,6 +399,28 @@ def run_rollout_with_context(state, context_obs_tokens, context_actions, future_
         # (either from initial feed or from previous generation)
         act_token = jnp.array([[future_actions[t]]])  # (1, 1)
         output, cache = model.apply(state.params, act_token, past_keys_values=cache, deterministic=True)
+        
+        # --- Extract reward and done predictions at action token position ---
+        rew_logits = output.logits_rewards[:, -1, :]   # (1, 3) classes {0,1,2} -> {-1,0,+1}
+        done_logits = output.logits_ends[:, -1, :]     # (1, 2) classes {0=continue, 1=done}
+        
+        # Reward: sample from 3-class categorical, map {0,1,2} -> {-1,0,+1}
+        rew_probs = jax.nn.softmax(rew_logits)
+        sample_rng, rew_rng = jax.random.split(sample_rng)
+        sampled_rew_class = jax.random.categorical(rew_rng, rew_logits, axis=-1)
+        pred_reward = float(sampled_rew_class[0]) - 1.0  # map to {-1, 0, +1}
+        predicted_rewards.append(pred_reward)
+        
+        # Done: probability of class 1
+        done_probs = jax.nn.softmax(done_logits)
+        pred_done_prob = float(done_probs[0, 1])
+        predicted_dones.append(pred_done_prob)
+        
+        if debug and t < 3:
+            rew_p = np.array(rew_probs[0])
+            print(f"  Step {t}: action={int(future_actions[t])}, "
+                  f"rew_probs=[neg:{rew_p[0]:.3f}, zero:{rew_p[1]:.3f}, pos:{rew_p[2]:.3f}] -> sampled={pred_reward:+.0f}, "
+                  f"done_prob={pred_done_prob:.4f}")
         
         if debug and t == 0:
             print(f"  After action, cache index: {cache[0].index}")
@@ -452,7 +478,7 @@ def run_rollout_with_context(state, context_obs_tokens, context_actions, future_
         all_tokens = np.array(result).flatten()
         print(f"  Token diversity: {len(np.unique(all_tokens))} unique values out of {len(all_tokens)}")
     
-    return result
+    return result, predicted_rewards, predicted_dones
 
 
 # Keep old function for backwards compatibility but mark as deprecated
@@ -509,11 +535,24 @@ def run_rollout(state, initial_obs_tokens, action_sequence, debug=True, temperat
 
     return jnp.stack(generated_frames_tokens, axis=1)
 
-def decode_and_viz(tokens, original_pixels, save_name):
+def decode_and_viz(tokens, original_pixels, save_name,
+                   predicted_rewards=None, predicted_dones=None,
+                   gt_rewards=None, gt_dones=None, actions=None):
     """
-    Decodes tokens back to pixels using VQ-VAE and saves grid.
-    tokens: (1, T, 64)
+    Decodes tokens back to pixels using VQ-VAE and saves annotated grid.
+    
+    Args:
+        tokens: (1, T, 64) generated observation tokens
+        original_pixels: (1, T, H, W, C) ground truth pixels
+        save_name: output filename
+        predicted_rewards: list of T predicted rewards ({-1, 0, +1})
+        predicted_dones: list of T predicted done probabilities
+        gt_rewards: (T,) ground truth rewards
+        gt_dones: (T,) ground truth dones
+        actions: (T,) actions taken
     """
+    from PIL import ImageDraw, ImageFont
+    
     # Load VQ-VAE (Re-load, since we deleted it)
     with open(VQVAE_PARAMS_PATH, "rb") as f:
         vqvae_params = pickle.load(f)
@@ -526,10 +565,6 @@ def decode_and_viz(tokens, original_pixels, save_name):
     
     @jax.jit
     def decode_batch(idxs):
-        # VQVAE decode expects quantized vectors usually, or we add a helper
-        # We need to map indices -> quantized vectors -> decode
-        # Or easier: if VQVAE has a 'decode_from_indices' or we do it manually
-        
         # Manual lookup from codebook
         codebook = vqvae_params['params']['quantizer']['embedding'] # (512, 128)
         # Normalize codebook if VQVAE was trained with normalized codes
@@ -544,8 +579,6 @@ def decode_and_viz(tokens, original_pixels, save_name):
     recon_pixels = decode_batch(indices) # (T, 63, 63, 3)
     recon_pixels = recon_pixels[:, :63, :63, :]
     
-    # Visualization Grid
-    # Top: Real, Bottom: Imagined
     # Ensure original_pixels matches T
     orig = original_pixels[0, :T] # (T, 63, 63, 3)
     
@@ -553,14 +586,85 @@ def decode_and_viz(tokens, original_pixels, save_name):
     orig = np.clip(orig * 255, 0, 255).astype(np.uint8)
     recon = np.clip(recon_pixels * 255, 0, 255).astype(np.uint8)
     
-    # Make grid
-    row_orig = np.concatenate([orig[t] for t in range(T)], axis=1)
-    row_recon = np.concatenate([recon[t] for t in range(T)], axis=1)
+    # === Build annotated visualization ===
+    # Scale up frames for readability
+    SCALE = 3
+    frame_h, frame_w = 63 * SCALE, 63 * SCALE
+    LABEL_HEIGHT = 45  # Height for text labels above/below frames
     
-    grid = np.concatenate([row_orig, row_recon], axis=0)
+    has_annotations = (predicted_rewards is not None or gt_rewards is not None)
+    
+    if has_annotations:
+        # Layout: GT labels | GT row | Pred row | Pred labels
+        total_h = LABEL_HEIGHT + frame_h + frame_h + LABEL_HEIGHT
+    else:
+        total_h = frame_h + frame_h
+    
+    total_w = frame_w * T
+    canvas = Image.new('RGB', (total_w, total_h), color=(255, 255, 255))
+    draw = ImageDraw.Draw(canvas)
+    
+    # Try to load a font, fall back to default
+    try:
+        font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 11)
+    except (OSError, IOError):
+        try:
+            font = ImageFont.truetype("/System/Library/Fonts/Helvetica.ttc", 11)
+        except (OSError, IOError):
+            font = ImageFont.load_default()
+    
+    y_gt_label = 0
+    y_gt_row = LABEL_HEIGHT if has_annotations else 0
+    y_pred_row = y_gt_row + frame_h
+    y_pred_label = y_pred_row + frame_h
+    
+    for t in range(T):
+        x_offset = t * frame_w
+        
+        # Scale up frames
+        gt_frame = Image.fromarray(orig[t]).resize((frame_w, frame_h), Image.NEAREST)
+        pred_frame = Image.fromarray(recon[t]).resize((frame_w, frame_h), Image.NEAREST)
+        
+        # Paste frames
+        canvas.paste(gt_frame, (x_offset, y_gt_row))
+        canvas.paste(pred_frame, (x_offset, y_pred_row))
+        
+        if has_annotations:
+            # GT labels (above GT row)
+            gt_lines = [f"t={t}"]
+            if actions is not None:
+                gt_lines[0] += f" a={int(actions[t])}"
+            if gt_rewards is not None:
+                gt_lines.append(f"r={float(gt_rewards[t]):+.1f}")
+            if gt_dones is not None:
+                gt_lines.append(f"d={'T' if float(gt_dones[t]) > 0.5 else 'F'}")
+            gt_text = " ".join(gt_lines)
+            draw.text((x_offset + 2, y_gt_label + 2), f"GT: {gt_text}", fill=(0, 0, 0), font=font)
+            
+            # Pred labels (below pred row)
+            pred_lines = [f"t={t}"]
+            if predicted_rewards is not None:
+                pred_lines.append(f"r={predicted_rewards[t]:+.1f}")
+            if predicted_dones is not None:
+                pred_lines.append(f"d={predicted_dones[t]:.3f}")
+            pred_text = " ".join(pred_lines)
+            
+            # Color: green if reward matches, red if not
+            color = (0, 0, 0)
+            if predicted_rewards is not None and gt_rewards is not None:
+                gt_r_sign = float(np.sign(gt_rewards[t]))
+                if predicted_rewards[t] == gt_r_sign:
+                    color = (0, 128, 0)  # green = match
+                elif gt_r_sign != 0 or predicted_rewards[t] != 0:
+                    color = (200, 0, 0)  # red = mismatch
+            draw.text((x_offset + 2, y_pred_label + 2), f"Pred: {pred_text}", fill=color, font=font)
+    
+    # Add row labels on the left margin (draw over first few pixels)
+    draw.text((2, y_gt_row + frame_h // 2 - 6), "REAL", fill=(0, 0, 255), font=font)
+    draw.text((2, y_pred_row + frame_h // 2 - 6), "IMAG", fill=(255, 0, 0), font=font)
     
     os.makedirs(OUTPUT_DIR, exist_ok=True)
-    Image.fromarray(grid).save(os.path.join(OUTPUT_DIR, save_name))
+    canvas.save(os.path.join(OUTPUT_DIR, save_name))
     print(f"Saved visualization to {OUTPUT_DIR}/{save_name}")
 
 # --- Main Driver ---
@@ -626,6 +730,9 @@ def main():
     
     for epoch in range(EPOCHS):
         epoch_losses = []
+        epoch_obs_losses = []
+        epoch_rew_losses = []
+        epoch_end_losses = []
         pbar = tqdm(range(steps_per_epoch), desc=f"Epoch {epoch+1}")
         
         for step in pbar:
@@ -635,15 +742,28 @@ def main():
             state, metrics = train_step(state, batch, drop_rng)
             
             loss_val = float(metrics.total_loss)
+            loss_obs_val = float(metrics.loss_obs)
+            loss_rew_val = float(metrics.loss_rewards)
+            loss_end_val = float(metrics.loss_ends)
+            
             epoch_losses.append(loss_val)
-            pbar.set_postfix(loss=f"{loss_val:.4f}")
+            epoch_obs_losses.append(loss_obs_val)
+            epoch_rew_losses.append(loss_rew_val)
+            epoch_end_losses.append(loss_end_val)
+            
+            pbar.set_postfix(
+                total=f"{loss_val:.4f}",
+                obs=f"{loss_obs_val:.4f}",
+                rew=f"{loss_rew_val:.4f}",
+                ends=f"{loss_end_val:.4f}"
+            )
             
             # Early NaN detection
             if np.isnan(loss_val):
                 print(f"\nNaN detected at epoch {epoch+1}, step {step}")
-                print(f"  loss_obs: {float(metrics.loss_obs)}")
-                print(f"  loss_rew: {float(metrics.loss_rewards)}")
-                print(f"  loss_ends: {float(metrics.loss_ends)}")
+                print(f"  loss_obs: {loss_obs_val}")
+                print(f"  loss_rew: {loss_rew_val}")
+                print(f"  loss_ends: {loss_end_val}")
                 print(f"  Batch stats:")
                 print(f"    obs_tokens range: [{batch['obs_tokens'].min()}, {batch['obs_tokens'].max()}]")
                 print(f"    actions range: [{batch['actions'].min()}, {batch['actions'].max()}]")
@@ -654,7 +774,10 @@ def main():
             print("Stopping training due to NaN")
             break
             
-        print(f"Epoch {epoch+1} Avg Loss: {np.mean(epoch_losses):.4f}")
+        print(f"Epoch {epoch+1} Avg Loss: total={np.mean(epoch_losses):.4f}, "
+              f"obs={np.mean(epoch_obs_losses):.4f}, "
+              f"rew={np.mean(epoch_rew_losses):.4f}, "
+              f"ends={np.mean(epoch_end_losses):.4f}")
 
     # 3. Save Weights
     print("--- Phase 3: Saving Weights ---")
@@ -703,9 +826,17 @@ def main():
     print(f"  Ground truth obs tokens (frame 0, first 10): {gt_obs_tokens[0, :10]}")
     print(f"  Ground truth token range: [{gt_obs_tokens.min()}, {gt_obs_tokens.max()}]")
     
-    # Ground Truth Pixels
+    # Ground Truth Pixels, Rewards, Dones
     data = np.load(DATA_PATH)
     gt_pixels = data['obs'][test_idx:test_idx+1, gt_start:gt_start + ROLLOUT_LEN]
+    gt_rewards_rollout = rewards[test_idx, future_act_start:future_act_start + ROLLOUT_LEN]
+    gt_dones_rollout = dones[test_idx, future_act_start:future_act_start + ROLLOUT_LEN]
+    
+    print(f"\n  Ground truth rewards for rollout: {gt_rewards_rollout}")
+    print(f"  Ground truth dones for rollout:   {gt_dones_rollout}")
+    print(f"  Reward stats: min={gt_rewards_rollout.min():.2f}, max={gt_rewards_rollout.max():.2f}, "
+          f"nonzero={np.count_nonzero(gt_rewards_rollout)}/{len(gt_rewards_rollout)}")
+    print(f"  Done stats: any_done={np.any(gt_dones_rollout > 0.5)}")
     
     # === TEACHER FORCING TEST ===
     print("\n--- Teacher Forcing Test (Model Quality Check) ---")
@@ -714,33 +845,73 @@ def main():
     # === PAPER-STYLE ROLLOUT WITH CONTEXT ===
     print("\n--- Paper-style Rollout (with burn-in context) ---")
     print("\n  [Greedy/Argmax]")
-    imagined_greedy = run_rollout_with_context(
+    imagined_greedy, pred_rew_greedy, pred_done_greedy = run_rollout_with_context(
         state, context_obs, context_act, future_act,
         temperature=1.0, use_sampling=False
     )
     
     print("\n  [Temperature=0.7 Sampling]")
-    imagined_sampled = run_rollout_with_context(
+    imagined_sampled, pred_rew_sampled, pred_done_sampled = run_rollout_with_context(
         state, context_obs, context_act, future_act,
         temperature=0.7, use_sampling=True
     )
     
-    # Compare tokens for both methods
-    for name, tokens in [("Greedy+Context", imagined_greedy), ("Temp0.7+Context", imagined_sampled)]:
+    # === REWARD & DONE COMPARISON TABLE ===
+    rollout_results = [
+        ("Greedy+Context", imagined_greedy, pred_rew_greedy, pred_done_greedy),
+        ("Temp0.7+Context", imagined_sampled, pred_rew_sampled, pred_done_sampled),
+    ]
+    
+    for name, tokens, pred_rews, pred_dones_list in rollout_results:
         imagined_np = np.array(tokens[0])  # (ROLLOUT_LEN, 64)
-        print(f"\n--- Token Comparison ({name}) ---")
-        print(f"  Imagined token range: [{imagined_np.min()}, {imagined_np.max()}]")
-        print(f"  Imagined frame 0 (first 10): {imagined_np[0, :10]}")
-        print(f"  Ground truth frame 0 (first 10): {gt_obs_tokens[0, :10]}")
+        print(f"\n{'='*70}")
+        print(f"  Results: {name}")
+        print(f"{'='*70}")
         
         # Token accuracy
         matches = (imagined_np == gt_obs_tokens).sum()
         total = gt_obs_tokens.size
         print(f"  Token accuracy: {matches}/{total} = {100*matches/total:.1f}%")
+        print(f"  Imagined token range: [{imagined_np.min()}, {imagined_np.max()}]")
+        
+        # Step-by-step comparison table
+        print(f"\n  {'Step':>4} | {'Action':>6} | {'GT Rew':>7} | {'Pred Rew':>8} | {'Rew Match':>9} | {'GT Done':>7} | {'Pred Done':>9} | {'Done Match':>10}")
+        print(f"  {'-'*4}-+-{'-'*6}-+-{'-'*7}-+-{'-'*8}-+-{'-'*9}-+-{'-'*7}-+-{'-'*9}-+-{'-'*10}")
+        
+        rew_correct = 0
+        done_correct = 0
+        for t in range(ROLLOUT_LEN):
+            gt_r = float(gt_rewards_rollout[t])
+            pred_r = pred_rews[t]
+            gt_d = float(gt_dones_rollout[t])
+            pred_d = pred_dones_list[t]
+            
+            # Reward match: compare sign
+            r_match = "YES" if np.sign(gt_r) == np.sign(pred_r) else "NO"
+            if r_match == "YES":
+                rew_correct += 1
+            
+            # Done match: threshold at 0.5
+            pred_d_binary = 1.0 if pred_d > 0.5 else 0.0
+            d_match = "YES" if (gt_d > 0.5) == (pred_d_binary > 0.5) else "NO"
+            if d_match == "YES":
+                done_correct += 1
+            
+            act = int(future_act[t])
+            print(f"  {t:>4} | {act:>6} | {gt_r:>+7.2f} | {pred_r:>+8.1f} | {r_match:>9} | {gt_d:>7.0f} | {pred_d:>9.4f} | {d_match:>10}")
+        
+        print(f"\n  Reward accuracy:  {rew_correct}/{ROLLOUT_LEN} = {100*rew_correct/ROLLOUT_LEN:.1f}%")
+        print(f"  Done accuracy:    {done_correct}/{ROLLOUT_LEN} = {100*done_correct/ROLLOUT_LEN:.1f}%")
     
-    # Visualize
-    decode_and_viz(imagined_greedy, gt_pixels, "smoke_test_context_greedy.png")
-    decode_and_viz(imagined_sampled, gt_pixels, "smoke_test_context_sampled.png")
+    # === Visualize with annotations ===
+    decode_and_viz(imagined_greedy, gt_pixels, "smoke_test_context_greedy.png",
+                   predicted_rewards=pred_rew_greedy, predicted_dones=pred_done_greedy,
+                   gt_rewards=gt_rewards_rollout, gt_dones=gt_dones_rollout,
+                   actions=future_act)
+    decode_and_viz(imagined_sampled, gt_pixels, "smoke_test_context_sampled.png",
+                   predicted_rewards=pred_rew_sampled, predicted_dones=pred_done_sampled,
+                   gt_rewards=gt_rewards_rollout, gt_dones=gt_dones_rollout,
+                   actions=future_act)
     
     print("\n" + "="*60)
     print("SMOKE TEST COMPLETE!")
@@ -748,10 +919,10 @@ def main():
     print(f"  Training loss: {np.mean(epoch_losses):.4f}")
     print(f"  Teacher forcing accuracy: See above")
     print(f"  Paper-style rollout with M={BURNIN_M} burn-in: See above")
-    print("\nNext steps for production:")
-    print("  1. Collect more data (aim for 50k+ transitions)")
-    print("  2. Integrate with MBRL loop (Algorithm 1 from paper)")
-    print("  3. Use flashbax for efficient replay buffer")
+    print("\nCheck the generated images in twm_results/ for visual comparison.")
+    print("Each image shows: GT labels (top) | Real frames | Imagined frames | Pred labels (bottom)")
+    print("  - Green pred labels = reward matches ground truth")
+    print("  - Red pred labels = reward mismatch")
 
 if __name__ == "__main__":
     main()
