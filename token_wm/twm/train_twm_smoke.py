@@ -13,10 +13,10 @@ current_dir = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(os.path.join(current_dir, '../tokenizer'))    
 
 # --- Import your modules ---
-from vqvae import VQVAE
-from world_model import WorldModel
-from transformer import TransformerConfig
-from kv_caching import KeysValues
+from token_wm.tokenizer.vqvae import VQVAE
+from token_wm.twm.world_model import WorldModel
+from token_wm.twm.transformer import TransformerConfig
+from token_wm.twm.kv_caching import KeysValues
 
 # --- Configuration ---
 DATA_PATH = "../../replay_data/my_buffer/replay_data.npz"
