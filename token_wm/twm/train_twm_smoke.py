@@ -19,8 +19,8 @@ from token_wm.twm.transformer import TransformerConfig
 from token_wm.twm.kv_caching import KeysValues
 
 # --- Configuration ---
-DATA_PATH = "../../replay_data/my_buffer/replay_data.npz"
-VQVAE_PARAMS_PATH = "../tokenizer/vqvae_params.pkl"
+DATA_PATH = "replay_data/my_buffer/replay_data.npz"
+VQVAE_PARAMS_PATH = "token_wm/tokenizer/vqvae_params.pkl"
 TWM_SAVE_PATH = "twm_params.pkl"
 OUTPUT_DIR = "twm_results"
 
