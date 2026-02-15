@@ -7,9 +7,9 @@ from einops import rearrange
 import optax
 
 # Import your modules
-from transformer import Transformer, TransformerConfig
-from kv_caching import KeysValues
-from slicer import Embedder, Head, Slicer
+from .transformer import Transformer, TransformerConfig
+from .kv_caching import KeysValues
+from .slicer import Embedder, Head, Slicer
 # Assuming Tokenizer and Batch are available/mocked or typed as Any
 Tokenizer = Any
 Batch = Any
