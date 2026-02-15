@@ -468,15 +468,15 @@ def make_imagination_fn(network, vqvae, twm, config):
             action_tokens = action.reshape(N, 1)
             output, cache = twm.apply(twm_state.params, action_tokens, past_keys_values=cache, deterministic=True)
             
-            # Sample reward and done from TWM predictions (FIXED: use binary sampling)
+            # Sample reward and done from TWM predictions
             rew_logits = output.logits_rewards[:, -1, :]
             done_logits = output.logits_ends[:, -1, :]
             
-            # Reward: sample binary from probability
-            reward_prob = jax.nn.softmax(rew_logits)[:, 1]
-            reward = jax.random.bernoulli(rew_rng, reward_prob).astype(jnp.float32)
+            # Reward: sample from 3-class categorical {0,1,2} -> {-1,0,+1}
+            sampled_rew_class = jax.random.categorical(rew_rng, rew_logits, axis=-1)
+            reward = (sampled_rew_class - 1).astype(jnp.float32)
             
-            # Done: sample binary from probability
+            # Done: sample from 2-class categorical (class 0=continue, class 1=done)
             done_prob = jax.nn.softmax(done_logits)[:, 1]
             new_done = jax.random.bernoulli(done_rng, done_prob).astype(jnp.float32)
             
