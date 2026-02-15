@@ -205,43 +205,24 @@ class WorldModel(nn.Module):
         labels_ends_flat = flat_ends.reshape(-1)
 
         # ------------------------------------------------------------------
-        # 5. Calculate Cross Entropy (masked, stable)
+        # 5. Masked cross-entropy helper (returns sum, not average)
         # ------------------------------------------------------------------
 
-        def compute_masked_loss(logits_flat, labels_flat, vocab_size, name=""):
+        def compute_masked_loss_sum(logits_flat, labels_flat, vocab_size):
             """
+            Returns (masked_loss_sum, num_valid) so caller can choose denominator.
             logits_flat: (N, C)
             labels_flat: (N,)
             """
             mask = (labels_flat != -100)
-            
-            # Clamp labels to valid range to prevent indexing errors
             safe_labels = jnp.where(mask, labels_flat, 0)
             safe_labels = jnp.clip(safe_labels, 0, vocab_size - 1)
-            
-            # Check for NaN in logits
-            has_nan_logits = jnp.any(jnp.isnan(logits_flat))
-            has_inf_logits = jnp.any(jnp.isinf(logits_flat))
-            
-            # Numerically stable cross-entropy
-            # Clip logits to prevent overflow
             logits_clipped = jnp.clip(logits_flat, -50.0, 50.0)
-            
             loss = optax.softmax_cross_entropy_with_integer_labels(
                 logits_clipped, safe_labels
             )
-
             loss = jnp.where(mask, loss, 0.0)
-            
-            num_valid = mask.sum()
-            avg_loss = jnp.where(num_valid > 0, loss.sum() / (num_valid + 1e-9), 0.0)
-            
-            # Debug: print if NaN detected (only during tracing, not during JIT)
-            # jax.debug.print("{name} - nan_logits: {nan}, inf_logits: {inf}, valid: {v}, loss: {l}", 
-            #                 name=name, nan=has_nan_logits, inf=has_inf_logits, v=num_valid, l=avg_loss)
-            
-            return avg_loss
-
+            return loss.sum(), mask.sum()
 
         # ------------------------------------------------------------------
         # 6. Get logits from the output (already computed in __call__)
@@ -253,7 +234,6 @@ class WorldModel(nn.Module):
 
         # ------------------------------------------------------------------
         # 7. Shift + flatten logits (autoregressive alignment)
-        #    Predict token t+1 from logits at t
         # ------------------------------------------------------------------
 
         # Obs logits: autoregressive shift (predict next token)
@@ -264,14 +244,26 @@ class WorldModel(nn.Module):
         logits_ends_flat = logits_ends.reshape(-1, 2)
 
         # ------------------------------------------------------------------
-        # 8. Compute losses
+        # 8. Compute losses with COMMON DENOMINATOR
+        #    All three losses are divided by total_tokens so that each
+        #    token position contributes equally to the gradient, regardless
+        #    of which head it belongs to. Obs naturally dominates (~63 tokens
+        #    per block) vs reward/done (1 token per block).
         # ------------------------------------------------------------------
 
-        loss_obs = compute_masked_loss(logits_obs_flat, labels_obs_flat, self.obs_vocab_size, "obs")
-        loss_rew = compute_masked_loss(logits_rew_flat, labels_rew_flat, 3, "rew")
-        loss_ends = compute_masked_loss(logits_ends_flat, labels_ends_flat, 2, "ends")
+        total_tokens = B * T * self.config.tokens_per_block  # common denominator
 
-        total_loss = loss_obs + loss_rew + loss_ends
+        obs_sum, obs_valid = compute_masked_loss_sum(logits_obs_flat, labels_obs_flat, self.obs_vocab_size)
+        rew_sum, rew_valid = compute_masked_loss_sum(logits_rew_flat, labels_rew_flat, 3)
+        ends_sum, ends_valid = compute_masked_loss_sum(logits_ends_flat, labels_ends_flat, 2)
+
+        # Total loss: sum of all masked losses / total tokens
+        total_loss = (obs_sum + rew_sum + ends_sum) / (total_tokens + 1e-9)
+
+        # Per-head averages for logging (each over its own valid count)
+        loss_obs = jnp.where(obs_valid > 0, obs_sum / (obs_valid + 1e-9), 0.0)
+        loss_rew = jnp.where(rew_valid > 0, rew_sum / (rew_valid + 1e-9), 0.0)
+        loss_ends = jnp.where(ends_valid > 0, ends_sum / (ends_valid + 1e-9), 0.0)
 
         return LossWithIntermediateLosses(
             loss_obs=loss_obs,
