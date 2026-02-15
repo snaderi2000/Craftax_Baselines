@@ -197,11 +197,12 @@ class WorldModel(nn.Module):
         flat_obs = target_obs_grid.reshape(B, -1)
         flat_ends = target_ends_grid.reshape(B, -1)
 
-        # 2. Slice off the FIRST token (Target for the prediction made at step 0)
-        # Shape becomes (Batch, 1299) -> Flatten to (41568,)
-        labels_rew_flat = flat_rew[:, 1:].reshape(-1)
+        # Obs labels: autoregressive shift (predict next token)
         labels_obs_flat = flat_obs[:, 1:].reshape(-1)
-        labels_ends_flat = flat_ends[:, 1:].reshape(-1)
+        
+        # Reward/ends labels: NO shift (transition-level prediction at action position)
+        labels_rew_flat = flat_rew.reshape(-1)
+        labels_ends_flat = flat_ends.reshape(-1)
 
         # ------------------------------------------------------------------
         # 5. Calculate Cross Entropy (masked, stable)
@@ -255,9 +256,12 @@ class WorldModel(nn.Module):
         #    Predict token t+1 from logits at t
         # ------------------------------------------------------------------
 
+        # Obs logits: autoregressive shift (predict next token)
         logits_obs_flat = logits_obs[:, :-1, :].reshape(-1, self.obs_vocab_size)
-        logits_rew_flat = logits_rew[:, :-1, :].reshape(-1, 3)
-        logits_ends_flat = logits_ends[:, :-1, :].reshape(-1, 2)
+        
+        # Reward/ends logits: NO shift (transition-level prediction at action position)
+        logits_rew_flat = logits_rew.reshape(-1, 3)
+        logits_ends_flat = logits_ends.reshape(-1, 2)
 
         # ------------------------------------------------------------------
         # 8. Compute losses
