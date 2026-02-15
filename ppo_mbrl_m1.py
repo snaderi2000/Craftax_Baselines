@@ -808,7 +808,7 @@ def run_mbrl(config):
         # ---------------------------------------------------------------------
         # Logging with achievements/score
         # ---------------------------------------------------------------------
-        if update_idx % 10 == 0:
+        if True:
             status = "WM-only" if not imagination_started else "Imagination"
             
             # Compute episode-averaged metrics (like ppo_rnn.py)
