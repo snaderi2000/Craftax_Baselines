@@ -26,6 +26,8 @@ import sys
 import time
 import pickle
 import functools
+import signal
+import shutil
 from typing import NamedTuple, Dict, Any, Tuple
 from tqdm import tqdm
 
@@ -562,6 +564,95 @@ def make_buffer_update_fn(config):
 
 
 # =============================================================================
+# Checkpointing
+# =============================================================================
+
+def save_checkpoint(ckpt_dir, step, policy_state, vqvae_state, twm_state, 
+                   fbx_buffer_state, buffer_data, metadata, max_checkpoints=2):
+    """Save training state to checkpoint directory and rotate old checkpoints."""
+    step_dir = os.path.join(ckpt_dir, f"checkpoint_{step}")
+    os.makedirs(step_dir, exist_ok=True)
+    
+    # Save models
+    # We use pickle for simplicity as it handles JAX arrays (pulling to host if needed)
+    with open(os.path.join(step_dir, "policy_state.pkl"), "wb") as f:
+        pickle.dump(policy_state, f)
+    with open(os.path.join(step_dir, "vqvae_state.pkl"), "wb") as f:
+        pickle.dump(vqvae_state, f)
+    with open(os.path.join(step_dir, "twm_state.pkl"), "wb") as f:
+        pickle.dump(twm_state, f)
+        
+    # Save buffers
+    # buffer_data is a dict or tuple
+    with open(os.path.join(step_dir, "flat_buffer.pkl"), "wb") as f:
+        pickle.dump(buffer_data, f)
+        
+    # Save Flashbax buffer state
+    with open(os.path.join(step_dir, "fbx_buffer.pkl"), "wb") as f:
+        pickle.dump(fbx_buffer_state, f)
+        
+    # Save metadata
+    with open(os.path.join(step_dir, "metadata.pkl"), "wb") as f:
+        pickle.dump(metadata, f)
+        
+    print(f"Saved checkpoint to {step_dir}")
+    
+    # Rotate checkpoints: keep only the most recent `max_checkpoints`
+    try:
+        checkpoints = []
+        for d in os.listdir(ckpt_dir):
+            if d.startswith("checkpoint_") and os.path.isdir(os.path.join(ckpt_dir, d)):
+                try:
+                    step_num = int(d.split("_")[1])
+                    checkpoints.append((step_num, d))
+                except ValueError:
+                    continue
+        
+        # Sort by step number (ascending)
+        checkpoints.sort(key=lambda x: x[0])
+        
+        # Remove old checkpoints if we have more than max_checkpoints
+        while len(checkpoints) > max_checkpoints:
+            oldest_step, oldest_dir = checkpoints.pop(0)
+            oldest_path = os.path.join(ckpt_dir, oldest_dir)
+            print(f"Removing old checkpoint: {oldest_path}")
+            shutil.rmtree(oldest_path)
+            
+    except Exception as e:
+        print(f"Warning: Failed to rotate checkpoints: {e}")
+
+
+def load_checkpoint(ckpt_path):
+    """Load training state from checkpoint directory."""
+    print(f"Loading checkpoint from {ckpt_path}...")
+    
+    if not os.path.exists(ckpt_path):
+        raise ValueError(f"Checkpoint path {ckpt_path} does not exist")
+
+    # Load models
+    with open(os.path.join(ckpt_path, "policy_state.pkl"), "rb") as f:
+        policy_state = pickle.load(f)
+    with open(os.path.join(ckpt_path, "vqvae_state.pkl"), "rb") as f:
+        vqvae_state = pickle.load(f)
+    with open(os.path.join(ckpt_path, "twm_state.pkl"), "rb") as f:
+        twm_state = pickle.load(f)
+        
+    # Load buffers
+    with open(os.path.join(ckpt_path, "flat_buffer.pkl"), "rb") as f:
+        buffer_data = pickle.load(f)
+        
+    with open(os.path.join(ckpt_path, "fbx_buffer.pkl"), "rb") as f:
+        fbx_buffer_state = pickle.load(f)
+        
+    # Load metadata
+    with open(os.path.join(ckpt_path, "metadata.pkl"), "rb") as f:
+        metadata = pickle.load(f)
+        
+    print(f"Loaded checkpoint from step {metadata['total_steps']}")
+    return policy_state, vqvae_state, twm_state, fbx_buffer_state, buffer_data, metadata
+
+
+# =============================================================================
 # Main Training Function
 # =============================================================================
 
@@ -701,6 +792,23 @@ def run_mbrl(config):
     fbx_buffer_state = fbx_buffer.init(example_timestep)
 
     # =========================================================================
+    # Checkpoint Loading
+    # =========================================================================
+    start_step = 0
+    imagination_started = False
+    if config.get("RESUME_FROM"):
+        print(f"\n*** Resuming from checkpoint: {config['RESUME_FROM']} ***\n")
+        policy_state, vqvae_state, twm_state, fbx_buffer_state, buffer_data, metadata = load_checkpoint(config['RESUME_FROM'])
+        
+        # Unpack flat buffer
+        buffer_obs, buffer_actions, buffer_rewards, buffer_dones, buffer_ptr, buffer_count = buffer_data
+        
+        start_step = metadata['total_steps']
+        # rng = metadata.get('rng', rng) # Restore RNG if available (optional)
+        imagination_started = metadata.get('imagination_started', False)
+        print(f"Resumed at step {start_step:,}")
+
+    # =========================================================================
     # Create JIT Functions
     # =========================================================================
     env_rollout = make_env_rollout_fn(env, env_params, network, config)
@@ -712,11 +820,21 @@ def run_mbrl(config):
     # =========================================================================
     # Training Loop (Python outer loop - not JIT traced!)
     # =========================================================================
-    total_steps = 0
+    total_steps = start_step
+    start_update = start_step // (config["NUM_ENVS"] * config["NUM_STEPS"])
     t0 = time.time()
-    imagination_started = False
     
-    pbar = tqdm(range(config["NUM_UPDATES"]), desc="Training")
+    # Signal handler for graceful exit
+    exit_requested = False
+    def signal_handler(sig, frame):
+        nonlocal exit_requested
+        print("\n\n*** Signal received, requesting graceful exit... ***\n")
+        exit_requested = True
+    
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
+    
+    pbar = tqdm(range(start_update, config["NUM_UPDATES"]), desc="Training", initial=start_update, total=config["NUM_UPDATES"])
     for update_idx in pbar:
         # ---------------------------------------------------------------------
         # Step 1: Environment Rollout (for data collection only)
@@ -857,6 +975,25 @@ def run_mbrl(config):
                     'imagination_active': imagination_started,
                 })
                 wandb.log(log_dict)
+        
+        # ---------------------------------------------------------------------
+        # Checkpointing
+        # ---------------------------------------------------------------------
+        if (total_steps > 0 and total_steps % config["CHECKPOINT_FREQ"] == 0) or exit_requested:
+            print(f"\nSaving checkpoint at step {total_steps:,}...")
+            buffer_data = (buffer_obs, buffer_actions, buffer_rewards, buffer_dones, buffer_ptr, buffer_count)
+            metadata = {
+                'total_steps': total_steps,
+                'update_idx': update_idx,
+                'rng': rng, # Note: JAX PRNGKey is array, pickle handles it
+                'imagination_started': imagination_started,
+            }
+            save_checkpoint(config["CHECKPOINT_DIR"], total_steps, policy_state, vqvae_state, twm_state, 
+                           fbx_buffer_state, buffer_data, metadata, max_checkpoints=config["MAX_CHECKPOINTS"])
+            
+            if exit_requested:
+                print(f"Exiting gracefully at step {total_steps:,}...")
+                break
     
     t1 = time.time()
     print(f"\nTraining complete!")
@@ -958,6 +1095,14 @@ if __name__ == "__main__":
     parser.add_argument("--use_optimistic_resets", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--optimistic_reset_ratio", type=int, default=16)
     parser.add_argument("--save_policy", action="store_true")
+
+    # Checkpointing
+    parser.add_argument("--checkpoint_freq", type=int, default=50000)
+    parser.add_argument("--checkpoint_dir", type=str, default="checkpoints")
+    parser.add_argument("--max_checkpoints", type=int, default=2,
+                        help="Maximum number of recent checkpoints to keep")
+    parser.add_argument("--resume_from", type=str, default=None, 
+                        help="Path to checkpoint directory to resume from (e.g. checkpoints/checkpoint_100000)")
     
     # Smoke test
     parser.add_argument("--smoke_test", action="store_true")
