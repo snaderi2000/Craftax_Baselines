@@ -63,6 +63,7 @@ from token_wm.twm.world_model import WorldModel
 from token_wm.twm.transformer import TransformerConfig
 from token_wm.twm.kv_caching import KeysValues
 
+import flashbax as fbx
 import wandb
 
 
@@ -601,6 +602,7 @@ def run_mbrl(config):
     print(f"Imagination policy updates: {config['N_ITERS_AC']}")
     print(f"Imagination rollout length: {config['TWM_ROLLOUT_LEN']}")
     print(f"Imagination batch size: {config['IMAGINATION_BATCH_SIZE']}")
+    print(f"Buffer: flashbax trajectory buffer (max {config['BUFFER_SIZE']:,} transitions)")
     print("-"*70)
     print(f"Pre-trained tokenizer: {config['USE_PRETRAINED_TOKENIZER']}")
     if config['USE_PRETRAINED_TOKENIZER']:
@@ -671,24 +673,32 @@ def run_mbrl(config):
     hstate = ScannedRNN.initialize_carry(config["NUM_ENVS"], 256)
     last_done = jnp.zeros((config["NUM_ENVS"]), dtype=bool)
     
-    # Buffer (for world model training only in M1)
-    buffer_size = config["BUFFER_SIZE"]
-    buffer_obs = jnp.zeros((buffer_size, 63, 63, 3))
-    buffer_actions = jnp.zeros((buffer_size,), dtype=jnp.int32)
-    buffer_rewards = jnp.zeros((buffer_size,))
-    buffer_dones = jnp.zeros((buffer_size,))
+    # Flat buffer for VQ-VAE training and imagination starting states
+    flat_buffer_size = config["BUFFER_SIZE"]
+    buffer_obs = jnp.zeros((flat_buffer_size, 63, 63, 3))
+    buffer_actions = jnp.zeros((flat_buffer_size,), dtype=jnp.int32)
+    buffer_rewards = jnp.zeros((flat_buffer_size,))
+    buffer_dones = jnp.zeros((flat_buffer_size,))
     buffer_ptr = jnp.array(0, dtype=jnp.int32)
     buffer_count = jnp.array(0, dtype=jnp.int32)
     
-    # Sequence buffer for TWM training (stores sequences with rewards/dones)
-    seq_buffer_size = config["SEQ_BUFFER_SIZE"]
-    seq_len = config["TWM_SEQ_LEN"]
-    seq_buffer_obs = jnp.zeros((seq_buffer_size, seq_len, 63, 63, 3))
-    seq_buffer_actions = jnp.zeros((seq_buffer_size, seq_len), dtype=jnp.int32)
-    seq_buffer_rewards = jnp.zeros((seq_buffer_size, seq_len))
-    seq_buffer_dones = jnp.zeros((seq_buffer_size, seq_len))
-    seq_buffer_ptr = jnp.array(0, dtype=jnp.int32)
-    seq_buffer_count = jnp.array(0, dtype=jnp.int32)
+    # Flashbax trajectory buffer for TWM training (paper: flashbax with 128k max)
+    # Stores (NUM_ENVS, time) and samples overlapping random windows of length TWM_SEQ_LEN
+    fbx_buffer = fbx.make_trajectory_buffer(
+        max_length_time_axis=config["BUFFER_SIZE"] // config["NUM_ENVS"],
+        min_length_time_axis=config["TWM_SEQ_LEN"] + 1,
+        sample_batch_size=config["TWM_BATCH_SIZE"],
+        sample_sequence_length=config["TWM_SEQ_LEN"],
+        period=1,
+        add_batch_size=config["NUM_ENVS"],
+    )
+    example_timestep = {
+        'obs': jnp.zeros((63, 63, 3)),
+        'action': jnp.zeros((), dtype=jnp.int32),
+        'reward': jnp.zeros(()),
+        'done': jnp.zeros(()),
+    }
+    fbx_buffer_state = fbx_buffer.init(example_timestep)
 
     # =========================================================================
     # Create JIT Functions
@@ -717,8 +727,9 @@ def run_mbrl(config):
         total_steps += config["NUM_ENVS"] * config["NUM_STEPS"]
         
         # ---------------------------------------------------------------------
-        # Step 2: Update Buffer (for world model training)
+        # Step 2: Update Buffers (flat for VQ-VAE/imagination, flashbax for TWM)
         # ---------------------------------------------------------------------
+        # Flat buffer update for VQ-VAE and imagination starting states
         traj_obs = traj.obs.reshape(-1, 63, 63, 3)
         traj_actions = traj.action.reshape(-1)
         traj_rewards = traj.reward.reshape(-1)
@@ -729,28 +740,20 @@ def run_mbrl(config):
             buffer_ptr, buffer_count, traj_obs, traj_actions, traj_rewards, traj_dones
         )
         
-        # Build sequences for TWM training (with rewards/dones, multiple subsequences)
-        env_obs = traj.obs.transpose(1, 0, 2, 3, 4)  # (num_envs, num_steps, H, W, C)
-        env_actions = traj.action.transpose(1, 0)  # (num_envs, num_steps)
-        env_rewards = traj.reward.transpose(1, 0)  # (num_envs, num_steps)
-        env_dones = traj.done.transpose(1, 0).astype(jnp.float32)  # (num_envs, num_steps)
+        # Flashbax trajectory buffer update for TWM training
+        # traj fields are already (NUM_STEPS, NUM_ENVS, ...) — scan over timesteps
+        fbx_scan_data = {
+            'obs': traj.obs,                                  # (NUM_STEPS, NUM_ENVS, 63, 63, 3)
+            'action': traj.action.astype(jnp.int32),          # (NUM_STEPS, NUM_ENVS)
+            'reward': traj.reward,                             # (NUM_STEPS, NUM_ENVS)
+            'done': traj.done.astype(jnp.float32),            # (NUM_STEPS, NUM_ENVS)
+        }
         
-        if config["NUM_STEPS"] >= seq_len:
-            for i in range(config["NUM_ENVS"]):
-                # Extract multiple non-overlapping subsequences per env
-                for j in range(0, config["NUM_STEPS"] - seq_len + 1, seq_len):
-                    seq_obs = env_obs[i, j:j+seq_len]
-                    seq_actions = env_actions[i, j:j+seq_len]
-                    seq_rewards = env_rewards[i, j:j+seq_len]
-                    seq_dones = env_dones[i, j:j+seq_len]
-                    
-                    idx = int(seq_buffer_ptr) % seq_buffer_size
-                    seq_buffer_obs = seq_buffer_obs.at[idx].set(seq_obs)
-                    seq_buffer_actions = seq_buffer_actions.at[idx].set(seq_actions)
-                    seq_buffer_rewards = seq_buffer_rewards.at[idx].set(seq_rewards)
-                    seq_buffer_dones = seq_buffer_dones.at[idx].set(seq_dones)
-                    seq_buffer_ptr = (seq_buffer_ptr + 1) % seq_buffer_size
-                    seq_buffer_count = jnp.minimum(seq_buffer_count + 1, seq_buffer_size)
+        def _add_one_timestep(fbx_state, step_data):
+            fbx_state = fbx_buffer.add(fbx_state, step_data)
+            return fbx_state, None
+        
+        fbx_buffer_state, _ = jax.lax.scan(_add_one_timestep, fbx_buffer_state, fbx_scan_data)
         
         # ---------------------------------------------------------------------
         # Step 3: VQ-VAE Update (N_ITERS_TOK iterations, if not pretrained)
@@ -771,20 +774,23 @@ def run_mbrl(config):
         # ---------------------------------------------------------------------
         # Step 4: TWM Update (N_ITERS_TWM iterations from step 0)
         # Paper: 500 iterations with 3 minibatches each
+        # Flashbax samples overlapping random windows from the full buffer
         # ---------------------------------------------------------------------
         twm_loss = 0.0
         twm_loss_obs = 0.0
         twm_loss_rew = 0.0
         twm_loss_ends = 0.0
-        if int(seq_buffer_count) >= config["TWM_BATCH_SIZE"] and config["N_ITERS_TWM"] > 0:
+        can_sample_twm = fbx_buffer.can_sample(fbx_buffer_state)
+        if can_sample_twm and config["N_ITERS_TWM"] > 0:
             for twm_iter in range(config["N_ITERS_TWM"]):
                 for mb in range(config["N_MB_WM"]):
                     rng, sample_rng = jax.random.split(rng)
-                    batch_idx = jax.random.randint(sample_rng, (config["TWM_BATCH_SIZE"],), 0, int(seq_buffer_count))
-                    batch_obs = seq_buffer_obs[batch_idx]
-                    batch_actions = seq_buffer_actions[batch_idx]
-                    batch_rewards = seq_buffer_rewards[batch_idx]
-                    batch_dones = seq_buffer_dones[batch_idx]
+                    fbx_batch = fbx_buffer.sample(fbx_buffer_state, sample_rng)
+                    # fbx_batch.experience is a dict with (TWM_BATCH_SIZE, TWM_SEQ_LEN, ...)
+                    batch_obs = fbx_batch.experience['obs']
+                    batch_actions = fbx_batch.experience['action']
+                    batch_rewards = fbx_batch.experience['reward']
+                    batch_dones = fbx_batch.experience['done']
                     
                     twm_state, twm_loss, (twm_loss_obs, twm_loss_rew, twm_loss_ends), rng = twm_update_single(
                         twm_state, vqvae_state.params, batch_obs, batch_actions, batch_rewards, batch_dones, rng
@@ -844,7 +850,6 @@ def run_mbrl(config):
             })
             
             if config["USE_WANDB"]:
-                # Add additional metrics
                 log_dict.update({
                     'step': total_steps,
                     'vqvae_loss': float(vqvae_loss),
@@ -853,7 +858,6 @@ def run_mbrl(config):
                     'twm_loss_rew': float(twm_loss_rew),
                     'twm_loss_ends': float(twm_loss_ends),
                     'buffer_size': int(buffer_count),
-                    'seq_buffer_size': int(seq_buffer_count),
                     'imagination_active': imagination_started,
                 })
                 wandb.log(log_dict)
@@ -939,7 +943,6 @@ if __name__ == "__main__":
     
     # Imagination / MBRL
     parser.add_argument("--buffer_size", type=int, default=128000)
-    parser.add_argument("--seq_buffer_size", type=int, default=5000)
     parser.add_argument("--background_planning_start", type=int, default=200000)
     parser.add_argument("--imagination_batch_size", type=int, default=48)
     parser.add_argument("--n_iters_ac", type=int, default=150,
@@ -979,7 +982,6 @@ if __name__ == "__main__":
         args.n_mb_wm = 1      # Reduced minibatches
         args.background_planning_start = 5000
         args.buffer_size = 5000
-        args.seq_buffer_size = 200
         args.twm_batch_size = 4
         args.imagination_batch_size = 8
         args.use_wandb = False
