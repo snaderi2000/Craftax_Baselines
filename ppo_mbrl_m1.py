@@ -741,19 +741,15 @@ def run_mbrl(config):
         )
         
         # Flashbax trajectory buffer update for TWM training
-        # traj fields are already (NUM_STEPS, NUM_ENVS, ...) — scan over timesteps
-        fbx_scan_data = {
-            'obs': traj.obs,                                  # (NUM_STEPS, NUM_ENVS, 63, 63, 3)
-            'action': traj.action.astype(jnp.int32),          # (NUM_STEPS, NUM_ENVS)
-            'reward': traj.reward,                             # (NUM_STEPS, NUM_ENVS)
-            'done': traj.done.astype(jnp.float32),            # (NUM_STEPS, NUM_ENVS)
+        # Transpose from (NUM_STEPS, NUM_ENVS, ...) to (NUM_ENVS, NUM_STEPS, ...)
+        # flashbax add expects (add_batch_size, sequence_length, ...)
+        fbx_add_data = {
+            'obs': traj.obs.transpose(1, 0, 2, 3, 4),        # (NUM_ENVS, NUM_STEPS, 63, 63, 3)
+            'action': traj.action.transpose(1, 0).astype(jnp.int32),  # (NUM_ENVS, NUM_STEPS)
+            'reward': traj.reward.transpose(1, 0),             # (NUM_ENVS, NUM_STEPS)
+            'done': traj.done.transpose(1, 0).astype(jnp.float32),    # (NUM_ENVS, NUM_STEPS)
         }
-        
-        def _add_one_timestep(fbx_state, step_data):
-            fbx_state = fbx_buffer.add(fbx_state, step_data)
-            return fbx_state, None
-        
-        fbx_buffer_state, _ = jax.lax.scan(_add_one_timestep, fbx_buffer_state, fbx_scan_data)
+        fbx_buffer_state = fbx_buffer.add(fbx_buffer_state, fbx_add_data)
         
         # ---------------------------------------------------------------------
         # Step 3: VQ-VAE Update (N_ITERS_TOK iterations, if not pretrained)
