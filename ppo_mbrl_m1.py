@@ -979,7 +979,11 @@ def run_mbrl(config):
         # ---------------------------------------------------------------------
         # Checkpointing
         # ---------------------------------------------------------------------
-        if (total_steps > 0 and total_steps % config["CHECKPOINT_FREQ"] == 0) or exit_requested:
+        # Check if we crossed a checkpoint threshold
+        prev_steps = total_steps - config["NUM_ENVS"] * config["NUM_STEPS"]
+        checkpoint_threshold_crossed = (total_steps // config["CHECKPOINT_FREQ"]) > (prev_steps // config["CHECKPOINT_FREQ"])
+        
+        if (total_steps > 0 and checkpoint_threshold_crossed) or exit_requested:
             print(f"\nSaving checkpoint at step {total_steps:,}...")
             buffer_data = (buffer_obs, buffer_actions, buffer_rewards, buffer_dones, buffer_ptr, buffer_count)
             metadata = {
