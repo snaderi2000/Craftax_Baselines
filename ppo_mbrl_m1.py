@@ -630,6 +630,14 @@ def _init_empty_fbx_buffer_state(config):
     return fbx_buffer.init(example_timestep)
 
 
+def _to_jax_arrays(tree):
+    """Convert NumPy arrays/scalars in a pytree to JAX arrays."""
+    return jax.tree.map(
+        lambda x: jnp.asarray(x) if isinstance(x, (np.ndarray, np.generic)) else x,
+        tree,
+    )
+
+
 def save_checkpoint(ckpt_dir, step, policy_state, vqvae_state, twm_state, 
                    fbx_buffer_state, buffer_data, metadata, max_checkpoints=2,
                    save_buffers=False, compress_buffers=True, buffer_gzip_level=1):
@@ -769,19 +777,19 @@ def load_checkpoint(ckpt_path, config, network, vqvae, twm):
 
     # Load params and opt_state
     with open(os.path.join(ckpt_path, "policy_params.pkl"), "rb") as f:
-        policy_state = policy_state.replace(params=pickle.load(f))
+        policy_state = policy_state.replace(params=_to_jax_arrays(pickle.load(f)))
     with open(os.path.join(ckpt_path, "policy_opt_state.pkl"), "rb") as f:
-        policy_state = policy_state.replace(opt_state=pickle.load(f))
+        policy_state = policy_state.replace(opt_state=_to_jax_arrays(pickle.load(f)))
         
     with open(os.path.join(ckpt_path, "vqvae_params.pkl"), "rb") as f:
-        vqvae_state = vqvae_state.replace(params=pickle.load(f))
+        vqvae_state = vqvae_state.replace(params=_to_jax_arrays(pickle.load(f)))
     with open(os.path.join(ckpt_path, "vqvae_opt_state.pkl"), "rb") as f:
-        vqvae_state = vqvae_state.replace(opt_state=pickle.load(f))
+        vqvae_state = vqvae_state.replace(opt_state=_to_jax_arrays(pickle.load(f)))
         
     with open(os.path.join(ckpt_path, "twm_params.pkl"), "rb") as f:
-        twm_state = twm_state.replace(params=pickle.load(f))
+        twm_state = twm_state.replace(params=_to_jax_arrays(pickle.load(f)))
     with open(os.path.join(ckpt_path, "twm_opt_state.pkl"), "rb") as f:
-        twm_state = twm_state.replace(opt_state=pickle.load(f))
+        twm_state = twm_state.replace(opt_state=_to_jax_arrays(pickle.load(f)))
         
     # Load metadata
     with open(os.path.join(ckpt_path, "metadata.pkl"), "rb") as f:
@@ -792,10 +800,10 @@ def load_checkpoint(ckpt_path, config, network, vqvae, twm):
     flat_buffer_path_gz = f"{flat_buffer_path}.gz"
     if os.path.exists(flat_buffer_path):
         with open(flat_buffer_path, "rb") as f:
-            buffer_data = pickle.load(f)
+            buffer_data = _to_jax_arrays(pickle.load(f))
     elif os.path.exists(flat_buffer_path_gz):
         with gzip.open(flat_buffer_path_gz, "rb") as f:
-            buffer_data = pickle.load(f)
+            buffer_data = _to_jax_arrays(pickle.load(f))
     else:
         print("Warning: flat_buffer.pkl missing. Initializing empty flat buffer.")
         buffer_data = _build_empty_flat_buffer(config)
@@ -804,10 +812,10 @@ def load_checkpoint(ckpt_path, config, network, vqvae, twm):
     fbx_buffer_path_gz = f"{fbx_buffer_path}.gz"
     if os.path.exists(fbx_buffer_path):
         with open(fbx_buffer_path, "rb") as f:
-            fbx_buffer_state = pickle.load(f)
+            fbx_buffer_state = _to_jax_arrays(pickle.load(f))
     elif os.path.exists(fbx_buffer_path_gz):
         with gzip.open(fbx_buffer_path_gz, "rb") as f:
-            fbx_buffer_state = pickle.load(f)
+            fbx_buffer_state = _to_jax_arrays(pickle.load(f))
     else:
         print("Warning: fbx_buffer.pkl missing. Initializing empty flashbax buffer.")
         fbx_buffer_state = _init_empty_fbx_buffer_state(config)
