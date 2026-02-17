@@ -575,12 +575,22 @@ def save_checkpoint(ckpt_dir, step, policy_state, vqvae_state, twm_state,
     
     # Save models
     # We use pickle for simplicity as it handles JAX arrays (pulling to host if needed)
-    with open(os.path.join(step_dir, "policy_state.pkl"), "wb") as f:
-        pickle.dump(policy_state, f)
-    with open(os.path.join(step_dir, "vqvae_state.pkl"), "wb") as f:
-        pickle.dump(vqvae_state, f)
-    with open(os.path.join(step_dir, "twm_state.pkl"), "wb") as f:
-        pickle.dump(twm_state, f)
+    # Use flax.serialization for TrainStates to avoid pickling local functions (like tx.init)
+    # We save only params and opt_state to avoid pickling the entire TrainState which contains functions
+    with open(os.path.join(step_dir, "policy_params.pkl"), "wb") as f:
+        pickle.dump(jax.device_get(policy_state.params), f)
+    with open(os.path.join(step_dir, "policy_opt_state.pkl"), "wb") as f:
+        pickle.dump(jax.device_get(policy_state.opt_state), f)
+        
+    with open(os.path.join(step_dir, "vqvae_params.pkl"), "wb") as f:
+        pickle.dump(jax.device_get(vqvae_state.params), f)
+    with open(os.path.join(step_dir, "vqvae_opt_state.pkl"), "wb") as f:
+        pickle.dump(jax.device_get(vqvae_state.opt_state), f)
+        
+    with open(os.path.join(step_dir, "twm_params.pkl"), "wb") as f:
+        pickle.dump(jax.device_get(twm_state.params), f)
+    with open(os.path.join(step_dir, "twm_opt_state.pkl"), "wb") as f:
+        pickle.dump(jax.device_get(twm_state.opt_state), f)
         
     # Save buffers
     # buffer_data is a dict or tuple
@@ -622,20 +632,52 @@ def save_checkpoint(ckpt_dir, step, policy_state, vqvae_state, twm_state,
         print(f"Warning: Failed to rotate checkpoints: {e}")
 
 
-def load_checkpoint(ckpt_path):
+def load_checkpoint(ckpt_path, config, network, vqvae, twm):
     """Load training state from checkpoint directory."""
     print(f"Loading checkpoint from {ckpt_path}...")
     
     if not os.path.exists(ckpt_path):
         raise ValueError(f"Checkpoint path {ckpt_path} does not exist")
 
-    # Load models
-    with open(os.path.join(ckpt_path, "policy_state.pkl"), "rb") as f:
-        policy_state = pickle.load(f)
-    with open(os.path.join(ckpt_path, "vqvae_state.pkl"), "rb") as f:
-        vqvae_state = pickle.load(f)
-    with open(os.path.join(ckpt_path, "twm_state.pkl"), "rb") as f:
-        twm_state = pickle.load(f)
+    # Re-create TrainStates (needed to restore optimizer structure)
+    # We need dummy data to init, but we'll overwrite params immediately
+    rng = jax.random.PRNGKey(0)
+    
+    # Policy
+    rng, net_rng = jax.random.split(rng)
+    init_x = (jnp.zeros((1, config["NUM_ENVS"], 63, 63, 3)), jnp.zeros((1, config["NUM_ENVS"])))
+    init_hstate = ScannedRNN.initialize_carry(config["NUM_ENVS"], 256)
+    network_params = network.init(net_rng, init_hstate, init_x)
+    tx = optax.chain(optax.clip_by_global_norm(config["MAX_GRAD_NORM"]), optax.adam(config["LR"], eps=1e-5))
+    policy_state = TrainState.create(apply_fn=network.apply, params=network_params, tx=tx)
+    
+    # VQ-VAE
+    rng, vqvae_rng = jax.random.split(rng)
+    vqvae_params = vqvae.init(vqvae_rng, jnp.zeros((1, 63, 63, 3)))
+    tx_vq = optax.chain(optax.clip_by_global_norm(config["MAX_GRAD_NORM"]), optax.adam(config["VQVAE_LR"]))
+    vqvae_state = TrainState.create(apply_fn=vqvae.apply, params=vqvae_params, tx=tx_vq)
+    
+    # TWM
+    rng, twm_rng = jax.random.split(rng)
+    twm_params = twm.init(twm_rng, jnp.zeros((1, config["TOKENS_PER_BLOCK"]), dtype=jnp.int32))
+    tx_twm = optax.chain(optax.clip_by_global_norm(config["TWM_MAX_GRAD_NORM"]), optax.adam(config["TWM_LR"]))
+    twm_state = TrainState.create(apply_fn=twm.apply, params=twm_params, tx=tx_twm)
+
+    # Load params and opt_state
+    with open(os.path.join(ckpt_path, "policy_params.pkl"), "rb") as f:
+        policy_state = policy_state.replace(params=pickle.load(f))
+    with open(os.path.join(ckpt_path, "policy_opt_state.pkl"), "rb") as f:
+        policy_state = policy_state.replace(opt_state=pickle.load(f))
+        
+    with open(os.path.join(ckpt_path, "vqvae_params.pkl"), "rb") as f:
+        vqvae_state = vqvae_state.replace(params=pickle.load(f))
+    with open(os.path.join(ckpt_path, "vqvae_opt_state.pkl"), "rb") as f:
+        vqvae_state = vqvae_state.replace(opt_state=pickle.load(f))
+        
+    with open(os.path.join(ckpt_path, "twm_params.pkl"), "rb") as f:
+        twm_state = twm_state.replace(params=pickle.load(f))
+    with open(os.path.join(ckpt_path, "twm_opt_state.pkl"), "rb") as f:
+        twm_state = twm_state.replace(opt_state=pickle.load(f))
         
     # Load buffers
     with open(os.path.join(ckpt_path, "flat_buffer.pkl"), "rb") as f:
@@ -798,7 +840,9 @@ def run_mbrl(config):
     imagination_started = False
     if config.get("RESUME_FROM"):
         print(f"\n*** Resuming from checkpoint: {config['RESUME_FROM']} ***\n")
-        policy_state, vqvae_state, twm_state, fbx_buffer_state, buffer_data, metadata = load_checkpoint(config['RESUME_FROM'])
+        policy_state, vqvae_state, twm_state, fbx_buffer_state, buffer_data, metadata = load_checkpoint(
+            config['RESUME_FROM'], config, network, vqvae, twm
+        )
         
         # Unpack flat buffer
         buffer_obs, buffer_actions, buffer_rewards, buffer_dones, buffer_ptr, buffer_count = buffer_data
