@@ -25,6 +25,8 @@ import os
 import sys
 import time
 import pickle
+import errno
+import gzip
 import functools
 import signal
 import shutil
@@ -567,69 +569,171 @@ def make_buffer_update_fn(config):
 # Checkpointing
 # =============================================================================
 
+def _is_disk_quota_error(exc: OSError) -> bool:
+    """Return True when an OSError indicates out-of-space/quota conditions."""
+    return exc.errno in (errno.ENOSPC, errno.EDQUOT, 122)
+
+
+def _rotate_checkpoints(ckpt_dir, max_checkpoints):
+    """Keep only the newest max_checkpoints directories named checkpoint_<step>."""
+    if max_checkpoints < 0:
+        return
+
+    checkpoints = []
+    if not os.path.exists(ckpt_dir):
+        return
+
+    for d in os.listdir(ckpt_dir):
+        if d.startswith("checkpoint_") and os.path.isdir(os.path.join(ckpt_dir, d)):
+            try:
+                step_num = int(d.split("_")[1])
+                checkpoints.append((step_num, d))
+            except ValueError:
+                continue
+
+    checkpoints.sort(key=lambda x: x[0])
+    while len(checkpoints) > max_checkpoints:
+        _, oldest_dir = checkpoints.pop(0)
+        oldest_path = os.path.join(ckpt_dir, oldest_dir)
+        print(f"Removing old checkpoint: {oldest_path}")
+        shutil.rmtree(oldest_path, ignore_errors=True)
+
+
+def _build_empty_flat_buffer(config):
+    """Create an empty flat replay buffer matching training shapes."""
+    flat_buffer_size = config["BUFFER_SIZE"]
+    buffer_obs = jnp.zeros((flat_buffer_size, 63, 63, 3))
+    buffer_actions = jnp.zeros((flat_buffer_size,), dtype=jnp.int32)
+    buffer_rewards = jnp.zeros((flat_buffer_size,))
+    buffer_dones = jnp.zeros((flat_buffer_size,))
+    buffer_ptr = jnp.array(0, dtype=jnp.int32)
+    buffer_count = jnp.array(0, dtype=jnp.int32)
+    return (buffer_obs, buffer_actions, buffer_rewards, buffer_dones, buffer_ptr, buffer_count)
+
+
+def _init_empty_fbx_buffer_state(config):
+    """Initialize an empty flashbax trajectory buffer state."""
+    fbx_buffer = fbx.make_trajectory_buffer(
+        max_length_time_axis=config["BUFFER_SIZE"] // config["NUM_ENVS"],
+        min_length_time_axis=config["TWM_SEQ_LEN"] + 1,
+        sample_batch_size=config["TWM_BATCH_SIZE"],
+        sample_sequence_length=config["TWM_SEQ_LEN"],
+        period=1,
+        add_batch_size=config["NUM_ENVS"],
+    )
+    example_timestep = {
+        'obs': jnp.zeros((63, 63, 3)),
+        'action': jnp.zeros((), dtype=jnp.int32),
+        'reward': jnp.zeros(()),
+        'done': jnp.zeros(()),
+    }
+    return fbx_buffer.init(example_timestep)
+
+
 def save_checkpoint(ckpt_dir, step, policy_state, vqvae_state, twm_state, 
-                   fbx_buffer_state, buffer_data, metadata, max_checkpoints=2):
-    """Save training state to checkpoint directory and rotate old checkpoints."""
+                   fbx_buffer_state, buffer_data, metadata, max_checkpoints=2,
+                   save_buffers=False, compress_buffers=True, buffer_gzip_level=1):
+    """
+    Save training state to checkpoint directory.
+    Returns True if checkpoint was written, False if skipped due to quota/disk pressure.
+    """
+    os.makedirs(ckpt_dir, exist_ok=True)
+
+    # Free space before writing new checkpoint.
+    try:
+        _rotate_checkpoints(ckpt_dir, max(0, max_checkpoints - 1))
+    except Exception as e:
+        print(f"Warning: Failed to pre-rotate checkpoints: {e}")
+
     step_dir = os.path.join(ckpt_dir, f"checkpoint_{step}")
     os.makedirs(step_dir, exist_ok=True)
-    
-    # Save models
-    # We use pickle for simplicity as it handles JAX arrays (pulling to host if needed)
-    # Use flax.serialization for TrainStates to avoid pickling local functions (like tx.init)
-    # We save only params and opt_state to avoid pickling the entire TrainState which contains functions
-    with open(os.path.join(step_dir, "policy_params.pkl"), "wb") as f:
-        pickle.dump(jax.device_get(policy_state.params), f)
-    with open(os.path.join(step_dir, "policy_opt_state.pkl"), "wb") as f:
-        pickle.dump(jax.device_get(policy_state.opt_state), f)
-        
-    with open(os.path.join(step_dir, "vqvae_params.pkl"), "wb") as f:
-        pickle.dump(jax.device_get(vqvae_state.params), f)
-    with open(os.path.join(step_dir, "vqvae_opt_state.pkl"), "wb") as f:
-        pickle.dump(jax.device_get(vqvae_state.opt_state), f)
-        
-    with open(os.path.join(step_dir, "twm_params.pkl"), "wb") as f:
-        pickle.dump(jax.device_get(twm_state.params), f)
-    with open(os.path.join(step_dir, "twm_opt_state.pkl"), "wb") as f:
-        pickle.dump(jax.device_get(twm_state.opt_state), f)
-        
-    # Save buffers
-    # buffer_data is a dict or tuple
-    with open(os.path.join(step_dir, "flat_buffer.pkl"), "wb") as f:
-        pickle.dump(buffer_data, f)
-        
-    # Save Flashbax buffer state
-    with open(os.path.join(step_dir, "fbx_buffer.pkl"), "wb") as f:
-        pickle.dump(fbx_buffer_state, f)
-        
-    # Save metadata
-    with open(os.path.join(step_dir, "metadata.pkl"), "wb") as f:
-        pickle.dump(metadata, f)
-        
-    print(f"Saved checkpoint to {step_dir}")
-    
-    # Rotate checkpoints: keep only the most recent `max_checkpoints`
+
+    def _dump_pickle(filename, payload, compress=False):
+        payload = jax.device_get(payload)
+        path = os.path.join(step_dir, filename)
+        if compress:
+            path = f"{path}.gz"
+            with gzip.open(path, "wb", compresslevel=buffer_gzip_level) as f:
+                pickle.dump(payload, f, protocol=pickle.HIGHEST_PROTOCOL)
+        else:
+            with open(path, "wb") as f:
+                pickle.dump(payload, f, protocol=pickle.HIGHEST_PROTOCOL)
+        return path
+
     try:
-        checkpoints = []
-        for d in os.listdir(ckpt_dir):
-            if d.startswith("checkpoint_") and os.path.isdir(os.path.join(ckpt_dir, d)):
+        # Save model params and optimizer state.
+        _dump_pickle("policy_params.pkl", policy_state.params)
+        _dump_pickle("policy_opt_state.pkl", policy_state.opt_state)
+        _dump_pickle("vqvae_params.pkl", vqvae_state.params)
+        _dump_pickle("vqvae_opt_state.pkl", vqvae_state.opt_state)
+        _dump_pickle("twm_params.pkl", twm_state.params)
+        _dump_pickle("twm_opt_state.pkl", twm_state.opt_state)
+    except OSError as e:
+        if _is_disk_quota_error(e):
+            print(f"Warning: Skipping checkpoint at step {step:,} (disk quota exceeded).")
+            shutil.rmtree(step_dir, ignore_errors=True)
+            return False
+        raise
+
+    buffers_saved = {
+        "flat_buffer": False,
+        "fbx_buffer": False,
+    }
+    if save_buffers:
+        flat_buffer_path = os.path.join(
+            step_dir, "flat_buffer.pkl.gz" if compress_buffers else "flat_buffer.pkl"
+        )
+        fbx_buffer_path = os.path.join(
+            step_dir, "fbx_buffer.pkl.gz" if compress_buffers else "fbx_buffer.pkl"
+        )
+        try:
+            _dump_pickle("flat_buffer.pkl", buffer_data, compress=compress_buffers)
+            buffers_saved["flat_buffer"] = True
+        except OSError as e:
+            if _is_disk_quota_error(e):
+                print("Warning: Could not save flat replay buffer (disk quota exceeded).")
                 try:
-                    step_num = int(d.split("_")[1])
-                    checkpoints.append((step_num, d))
-                except ValueError:
-                    continue
-        
-        # Sort by step number (ascending)
-        checkpoints.sort(key=lambda x: x[0])
-        
-        # Remove old checkpoints if we have more than max_checkpoints
-        while len(checkpoints) > max_checkpoints:
-            oldest_step, oldest_dir = checkpoints.pop(0)
-            oldest_path = os.path.join(ckpt_dir, oldest_dir)
-            print(f"Removing old checkpoint: {oldest_path}")
-            shutil.rmtree(oldest_path)
-            
+                    os.remove(flat_buffer_path)
+                except OSError:
+                    pass
+            else:
+                raise
+
+        try:
+            _dump_pickle("fbx_buffer.pkl", fbx_buffer_state, compress=compress_buffers)
+            buffers_saved["fbx_buffer"] = True
+        except OSError as e:
+            if _is_disk_quota_error(e):
+                print("Warning: Could not save flashbax buffer state (disk quota exceeded).")
+                try:
+                    os.remove(fbx_buffer_path)
+                except OSError:
+                    pass
+            else:
+                raise
+
+    metadata_to_save = dict(metadata)
+    metadata_to_save["buffers_saved"] = buffers_saved
+    metadata_to_save["save_buffers_enabled"] = bool(save_buffers)
+    metadata_to_save["compress_buffers_enabled"] = bool(compress_buffers)
+    metadata_to_save["buffer_gzip_level"] = int(buffer_gzip_level)
+    try:
+        _dump_pickle("metadata.pkl", metadata_to_save)
+    except OSError as e:
+        if _is_disk_quota_error(e):
+            print(f"Warning: Skipping checkpoint at step {step:,} (disk quota exceeded before metadata write).")
+            shutil.rmtree(step_dir, ignore_errors=True)
+            return False
+        raise
+
+    print(f"Saved checkpoint to {step_dir}")
+
+    try:
+        _rotate_checkpoints(ckpt_dir, max_checkpoints)
     except Exception as e:
         print(f"Warning: Failed to rotate checkpoints: {e}")
+
+    return True
 
 
 def load_checkpoint(ckpt_path, config, network, vqvae, twm):
@@ -679,16 +783,34 @@ def load_checkpoint(ckpt_path, config, network, vqvae, twm):
     with open(os.path.join(ckpt_path, "twm_opt_state.pkl"), "rb") as f:
         twm_state = twm_state.replace(opt_state=pickle.load(f))
         
-    # Load buffers
-    with open(os.path.join(ckpt_path, "flat_buffer.pkl"), "rb") as f:
-        buffer_data = pickle.load(f)
-        
-    with open(os.path.join(ckpt_path, "fbx_buffer.pkl"), "rb") as f:
-        fbx_buffer_state = pickle.load(f)
-        
     # Load metadata
     with open(os.path.join(ckpt_path, "metadata.pkl"), "rb") as f:
         metadata = pickle.load(f)
+
+    # Load buffers (optional for lightweight checkpoints)
+    flat_buffer_path = os.path.join(ckpt_path, "flat_buffer.pkl")
+    flat_buffer_path_gz = f"{flat_buffer_path}.gz"
+    if os.path.exists(flat_buffer_path):
+        with open(flat_buffer_path, "rb") as f:
+            buffer_data = pickle.load(f)
+    elif os.path.exists(flat_buffer_path_gz):
+        with gzip.open(flat_buffer_path_gz, "rb") as f:
+            buffer_data = pickle.load(f)
+    else:
+        print("Warning: flat_buffer.pkl missing. Initializing empty flat buffer.")
+        buffer_data = _build_empty_flat_buffer(config)
+
+    fbx_buffer_path = os.path.join(ckpt_path, "fbx_buffer.pkl")
+    fbx_buffer_path_gz = f"{fbx_buffer_path}.gz"
+    if os.path.exists(fbx_buffer_path):
+        with open(fbx_buffer_path, "rb") as f:
+            fbx_buffer_state = pickle.load(f)
+    elif os.path.exists(fbx_buffer_path_gz):
+        with gzip.open(fbx_buffer_path_gz, "rb") as f:
+            fbx_buffer_state = pickle.load(f)
+    else:
+        print("Warning: fbx_buffer.pkl missing. Initializing empty flashbax buffer.")
+        fbx_buffer_state = _init_empty_fbx_buffer_state(config)
         
     print(f"Loaded checkpoint from step {metadata['total_steps']}")
     return policy_state, vqvae_state, twm_state, fbx_buffer_state, buffer_data, metadata
@@ -736,6 +858,8 @@ def run_mbrl(config):
     print(f"Imagination rollout length: {config['TWM_ROLLOUT_LEN']}")
     print(f"Imagination batch size: {config['IMAGINATION_BATCH_SIZE']}")
     print(f"Buffer: flashbax trajectory buffer (max {config['BUFFER_SIZE']:,} transitions)")
+    print(f"Checkpoint includes replay buffers: {config['CHECKPOINT_SAVE_BUFFERS']}")
+    print(f"Checkpoint compresses replay buffers: {config['CHECKPOINT_COMPRESS_BUFFERS']} (gzip level={config['CHECKPOINT_GZIP_LEVEL']})")
     print("-"*70)
     print(f"Pre-trained tokenizer: {config['USE_PRETRAINED_TOKENIZER']}")
     if config['USE_PRETRAINED_TOKENIZER']:
@@ -807,13 +931,7 @@ def run_mbrl(config):
     last_done = jnp.zeros((config["NUM_ENVS"]), dtype=bool)
     
     # Flat buffer for VQ-VAE training and imagination starting states
-    flat_buffer_size = config["BUFFER_SIZE"]
-    buffer_obs = jnp.zeros((flat_buffer_size, 63, 63, 3))
-    buffer_actions = jnp.zeros((flat_buffer_size,), dtype=jnp.int32)
-    buffer_rewards = jnp.zeros((flat_buffer_size,))
-    buffer_dones = jnp.zeros((flat_buffer_size,))
-    buffer_ptr = jnp.array(0, dtype=jnp.int32)
-    buffer_count = jnp.array(0, dtype=jnp.int32)
+    buffer_obs, buffer_actions, buffer_rewards, buffer_dones, buffer_ptr, buffer_count = _build_empty_flat_buffer(config)
     
     # Flashbax trajectory buffer for TWM training (paper: flashbax with 128k max)
     # Stores (NUM_ENVS, time) and samples overlapping random windows of length TWM_SEQ_LEN
@@ -1037,7 +1155,11 @@ def run_mbrl(config):
                 'imagination_started': imagination_started,
             }
             save_checkpoint(config["CHECKPOINT_DIR"], total_steps, policy_state, vqvae_state, twm_state, 
-                           fbx_buffer_state, buffer_data, metadata, max_checkpoints=config["MAX_CHECKPOINTS"])
+                           fbx_buffer_state, buffer_data, metadata,
+                           max_checkpoints=config["MAX_CHECKPOINTS"],
+                           save_buffers=config["CHECKPOINT_SAVE_BUFFERS"],
+                           compress_buffers=config["CHECKPOINT_COMPRESS_BUFFERS"],
+                           buffer_gzip_level=config["CHECKPOINT_GZIP_LEVEL"])
             
             if exit_requested:
                 print(f"Exiting gracefully at step {total_steps:,}...")
@@ -1149,6 +1271,12 @@ if __name__ == "__main__":
     parser.add_argument("--checkpoint_dir", type=str, default="checkpoints")
     parser.add_argument("--max_checkpoints", type=int, default=2,
                         help="Maximum number of recent checkpoints to keep")
+    parser.add_argument("--checkpoint_save_buffers", action=argparse.BooleanOptionalAction, default=False,
+                        help="Save replay buffers inside checkpoints (large files; may exceed quota)")
+    parser.add_argument("--checkpoint_compress_buffers", action=argparse.BooleanOptionalAction, default=True,
+                        help="Gzip-compress replay buffer checkpoint files (recommended for quota-limited jobs)")
+    parser.add_argument("--checkpoint_gzip_level", type=int, default=1,
+                        help="Gzip compression level for replay buffers (1=fastest, 9=smallest)")
     parser.add_argument("--resume_from", type=str, default=None, 
                         help="Path to checkpoint directory to resume from (e.g. checkpoints/checkpoint_100000)")
     
@@ -1177,5 +1305,8 @@ if __name__ == "__main__":
     
     if args.seed is None:
         args.seed = np.random.randint(2**31)
+
+    # Clamp gzip level to valid range.
+    args.checkpoint_gzip_level = int(np.clip(args.checkpoint_gzip_level, 0, 9))
     
     run_mbrl(args)
