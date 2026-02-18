@@ -220,7 +220,7 @@ def create_vqvae(config):
 def create_twm(config):
     twm_config = TransformerConfig(
         tokens_per_block=config["TOKENS_PER_BLOCK"],
-        max_blocks=config["TWM_SEQ_LEN"],
+        max_blocks=config.get("TWM_MAX_BLOCKS", config["TWM_SEQ_LEN"]),
         attention='causal',
         num_layers=config["TWM_NUM_LAYERS"],
         num_heads=config["TWM_NUM_HEADS"],
@@ -429,7 +429,7 @@ def make_imagination_fn(network, vqvae, twm, config):
         return (policy_state, init_hstate, traj_batch, advantages, targets, rng), losses
     
     @jax.jit
-    def imagination_step(policy_state, vqvae_params, twm_state, start_obs, start_done, burnin_obs, burnin_done, rng):
+    def imagination_step(policy_state, vqvae_params, twm_state, start_obs, start_done, burnin_obs, burnin_done, burnin_actions, rng):
         """
         M1: Single imagination rollout + PPO update.
         Policy is trained ONLY on imagined data.
@@ -457,11 +457,28 @@ def make_imagination_fn(network, vqvae, twm, config):
         cache = KeysValues.init(
             n=N,
             num_heads=config["TWM_NUM_HEADS"],
-            max_tokens=config["TWM_SEQ_LEN"] * config["TOKENS_PER_BLOCK"],
+            max_tokens=config.get("TWM_MAX_BLOCKS", config["TWM_SEQ_LEN"]) * config["TOKENS_PER_BLOCK"],
             embed_dim=config["TWM_EMBED_DIM"],
             num_layers=config["TWM_NUM_LAYERS"],
         )
-        
+
+        # Burn in TWM cache with past (obs, action) context to match policy burn-in context.
+        if burnin_horizon > 0:
+            burnin_obs_flat = burnin_obs.reshape(N * burnin_horizon, 63, 63, 3)
+            burnin_tokens_flat = vqvae.apply(vqvae_params, burnin_obs_flat, method=vqvae.encode)
+            burnin_tokens = burnin_tokens_flat.reshape(N, burnin_horizon, -1)
+            burnin_tokens_t = jnp.swapaxes(burnin_tokens, 0, 1)                     # (M, N, 64)
+            burnin_actions_t = jnp.swapaxes(burnin_actions.astype(jnp.int32), 0, 1) # (M, N)
+
+            def _burnin_twm_step(cache, step_inputs):
+                obs_tok_t, act_t = step_inputs
+                _, cache = twm.apply(twm_state.params, obs_tok_t, past_keys_values=cache, deterministic=True)
+                action_tok_t = act_t.reshape(N, 1)
+                _, cache = twm.apply(twm_state.params, action_tok_t, past_keys_values=cache, deterministic=True)
+                return cache, None
+
+            cache, _ = jax.lax.scan(_burnin_twm_step, cache, (burnin_tokens_t, burnin_actions_t))
+
         # Feed initial observation to TWM
         _, cache = twm.apply(twm_state.params, start_tokens, past_keys_values=cache, deterministic=True)
         
@@ -856,6 +873,7 @@ def run_mbrl(config):
         print(f"WARNING: BURNIN_HORIZON={config['BURNIN_HORIZON']} too large for TWM_SEQ_LEN={config['TWM_SEQ_LEN']}. "
               f"Clamping to {max_rollout}.")
         config["BURNIN_HORIZON"] = max_rollout
+    config["TWM_MAX_BLOCKS"] = config["TWM_SEQ_LEN"] + config["BURNIN_HORIZON"]
 
     if config["USE_WANDB"]:
         wandb.init(
@@ -881,6 +899,7 @@ def run_mbrl(config):
     print(f"Imagination rollout length: {config['TWM_ROLLOUT_LEN']}")
     print(f"Imagination batch size: {config['IMAGINATION_BATCH_SIZE']}")
     print(f"Imagination burn-in horizon: {config['BURNIN_HORIZON']}")
+    print(f"TWM max blocks at inference: {config['TWM_MAX_BLOCKS']}")
     print(f"Binary reward target: {config['USE_BINARY_REWARD_TARGET']} (threshold={config['BINARY_REWARD_THRESHOLD']})")
     print(f"Buffer: flashbax trajectory buffer (max {config['BUFFER_SIZE']:,} transitions)")
     print(f"Checkpoint includes replay buffers: {config['CHECKPOINT_SAVE_BUFFERS']}")
@@ -1016,20 +1035,24 @@ def run_mbrl(config):
 
         obs_chunks = []
         done_chunks = []
+        action_chunks = []
         for _ in range(chunks):
             rng, sample_rng = jax.random.split(rng)
             fbx_batch = fbx_buffer.sample(fbx_state, sample_rng)
             obs_chunks.append(fbx_batch.experience["obs"])      # (B, T, 63, 63, 3)
             done_chunks.append(fbx_batch.experience["done"])    # (B, T)
+            action_chunks.append(fbx_batch.experience["action"])# (B, T)
 
         obs_all = jnp.concatenate(obs_chunks, axis=0)[:n]
         done_all = jnp.concatenate(done_chunks, axis=0)[:n].astype(jnp.float32)
+        action_all = jnp.concatenate(action_chunks, axis=0)[:n].astype(jnp.int32)
 
         burnin_obs = obs_all[:, :m]
         burnin_done = done_all[:, :m]
+        burnin_actions = action_all[:, :m]
         start_obs = obs_all[:, m]
         start_done = done_all[:, m]
-        return start_obs, start_done, burnin_obs, burnin_done, rng
+        return start_obs, start_done, burnin_obs, burnin_done, burnin_actions, rng
 
     # =========================================================================
     # Training Loop (Python outer loop - not JIT traced!)
@@ -1136,12 +1159,12 @@ def run_mbrl(config):
             if can_sample_twm:
                 # M1: Policy is trained ONLY on imagined data
                 for ac_iter in range(config["N_ITERS_AC"]):
-                    start_obs, start_done, burnin_obs, burnin_done, rng = sample_imagination_context(
+                    start_obs, start_done, burnin_obs, burnin_done, burnin_actions, rng = sample_imagination_context(
                         fbx_buffer_state, rng
                     )
                     policy_state, rng = imagination_step(
                         policy_state, vqvae_state.params, twm_state,
-                        start_obs, start_done, burnin_obs, burnin_done, rng
+                        start_obs, start_done, burnin_obs, burnin_done, burnin_actions, rng
                     )
         
         # ---------------------------------------------------------------------
