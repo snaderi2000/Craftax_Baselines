@@ -233,6 +233,8 @@ def create_twm(config):
         obs_vocab_size=config["VQVAE_CODEBOOK_SIZE"],
         act_vocab_size=config["NUM_ACTIONS"],
         config=twm_config,
+        reward_num_classes=2 if config.get("USE_BINARY_REWARD_TARGET", True) else 3,
+        binary_reward_threshold=config.get("BINARY_REWARD_THRESHOLD", 0.5),
     )
 
 
@@ -315,7 +317,7 @@ def make_twm_update_fn(twm, vqvae, config):
     
     Uses WorldModel.compute_loss which trains ALL three heads:
       1. Observation prediction (cross-entropy on codebook tokens)
-      2. Reward prediction (cross-entropy on {-1, 0, +1} → {0, 1, 2})
+      2. Reward prediction (cross-entropy; binary for Craftax M1 by default)
       3. Termination prediction (cross-entropy on {continue, end})
     """
     
@@ -365,6 +367,8 @@ def make_imagination_fn(network, vqvae, twm, config):
     # Use paper's settings for imagination PPO
     n_mb_imagination = config.get("N_MB_IMAGINATION", 1)
     n_epoch_imagination = config.get("N_EPOCH_IMAGINATION", 1)
+    burnin_horizon = config.get("BURNIN_HORIZON", 5)
+    use_binary_reward_target = config.get("USE_BINARY_REWARD_TARGET", True)
     
     def _calculate_gae(traj_batch, last_val, last_done):
         def _get_advantages(carry, transition):
@@ -425,19 +429,23 @@ def make_imagination_fn(network, vqvae, twm, config):
         return (policy_state, init_hstate, traj_batch, advantages, targets, rng), losses
     
     @jax.jit
-    def imagination_step(policy_state, vqvae_params, twm_state, buffer_obs, buffer_size, rng):
+    def imagination_step(policy_state, vqvae_params, twm_state, start_obs, start_done, burnin_obs, burnin_done, rng):
         """
         M1: Single imagination rollout + PPO update.
         Policy is trained ONLY on imagined data.
         """
         N = config["IMAGINATION_BATCH_SIZE"]
-        rng, sample_rng, imagine_rng = jax.random.split(rng, 3)
-        
-        # Sample starting states from buffer
-        sample_idx = jax.random.randint(sample_rng, (N,), 0, jnp.maximum(buffer_size, 1))
-        start_obs = buffer_obs[sample_idx]
-        start_done = jnp.zeros(N)
+        rng, imagine_rng = jax.random.split(rng)
+
         start_hstate = ScannedRNN.initialize_carry(N, 256)
+        if burnin_horizon > 0:
+            burnin_obs_t = jnp.swapaxes(burnin_obs, 0, 1)    # (M, N, ...)
+            burnin_done_t = jnp.swapaxes(burnin_done, 0, 1)  # (M, N)
+            start_hstate, _, _ = network.apply(
+                policy_state.params,
+                start_hstate,
+                (burnin_obs_t, burnin_done_t),
+            )
         
         # Tokenize starting observation
         start_tokens = vqvae.apply(vqvae_params, start_obs, method=vqvae.encode)
@@ -477,9 +485,12 @@ def make_imagination_fn(network, vqvae, twm, config):
             rew_logits = output.logits_rewards[:, -1, :]
             done_logits = output.logits_ends[:, -1, :]
             
-            # Reward: sample from 3-class categorical {0,1,2} -> {-1,0,+1}
+            # Reward: binary targets (paper's Craftax setup) or legacy 3-class mapping.
             sampled_rew_class = jax.random.categorical(rew_rng, rew_logits, axis=-1)
-            reward = (sampled_rew_class - 1).astype(jnp.float32)
+            if use_binary_reward_target:
+                reward = sampled_rew_class.astype(jnp.float32)
+            else:
+                reward = (sampled_rew_class - 1).astype(jnp.float32)
             
             # Done: sample from 2-class categorical (class 0=continue, class 1=done)
             done_prob = jax.nn.softmax(done_logits)[:, 1]
@@ -841,6 +852,10 @@ def run_mbrl(config):
         print(f"WARNING: TWM_ROLLOUT_LEN={config['TWM_ROLLOUT_LEN']} too large for TWM_SEQ_LEN={config['TWM_SEQ_LEN']}. "
               f"Clamping to {max_rollout} (initial obs uses 64 of 65 tokens in first block).")
         config["TWM_ROLLOUT_LEN"] = max_rollout
+    if config["BURNIN_HORIZON"] > max_rollout:
+        print(f"WARNING: BURNIN_HORIZON={config['BURNIN_HORIZON']} too large for TWM_SEQ_LEN={config['TWM_SEQ_LEN']}. "
+              f"Clamping to {max_rollout}.")
+        config["BURNIN_HORIZON"] = max_rollout
 
     if config["USE_WANDB"]:
         wandb.init(
@@ -865,6 +880,8 @@ def run_mbrl(config):
     print(f"Imagination policy updates: {config['N_ITERS_AC']}")
     print(f"Imagination rollout length: {config['TWM_ROLLOUT_LEN']}")
     print(f"Imagination batch size: {config['IMAGINATION_BATCH_SIZE']}")
+    print(f"Imagination burn-in horizon: {config['BURNIN_HORIZON']}")
+    print(f"Binary reward target: {config['USE_BINARY_REWARD_TARGET']} (threshold={config['BINARY_REWARD_THRESHOLD']})")
     print(f"Buffer: flashbax trajectory buffer (max {config['BUFFER_SIZE']:,} transitions)")
     print(f"Checkpoint includes replay buffers: {config['CHECKPOINT_SAVE_BUFFERS']}")
     print(f"Checkpoint compresses replay buffers: {config['CHECKPOINT_COMPRESS_BUFFERS']} (gzip level={config['CHECKPOINT_GZIP_LEVEL']})")
@@ -987,6 +1004,33 @@ def run_mbrl(config):
     imagination_step = make_imagination_fn(network, vqvae, twm, config)
     update_buffer = make_buffer_update_fn(config)
 
+    def sample_imagination_context(fbx_state, rng):
+        """
+        Sample contiguous (burn-in + start) windows from flashbax trajectories.
+        This avoids using interleaved flat-buffer ordering for RNN burn-in.
+        """
+        n = config["IMAGINATION_BATCH_SIZE"]
+        m = config["BURNIN_HORIZON"]
+        b = config["TWM_BATCH_SIZE"]
+        chunks = (n + b - 1) // b
+
+        obs_chunks = []
+        done_chunks = []
+        for _ in range(chunks):
+            rng, sample_rng = jax.random.split(rng)
+            fbx_batch = fbx_buffer.sample(fbx_state, sample_rng)
+            obs_chunks.append(fbx_batch.experience["obs"])      # (B, T, 63, 63, 3)
+            done_chunks.append(fbx_batch.experience["done"])    # (B, T)
+
+        obs_all = jnp.concatenate(obs_chunks, axis=0)[:n]
+        done_all = jnp.concatenate(done_chunks, axis=0)[:n].astype(jnp.float32)
+
+        burnin_obs = obs_all[:, :m]
+        burnin_done = done_all[:, :m]
+        start_obs = obs_all[:, m]
+        start_done = done_all[:, m]
+        return start_obs, start_done, burnin_obs, burnin_done, rng
+
     # =========================================================================
     # Training Loop (Python outer loop - not JIT traced!)
     # =========================================================================
@@ -1089,11 +1133,16 @@ def run_mbrl(config):
                 print(f"\n*** Starting imagination-based policy training at step {total_steps:,} ***\n")
                 imagination_started = True
             
-            # M1: Policy is trained ONLY on imagined data
-            for ac_iter in range(config["N_ITERS_AC"]):
-                policy_state, rng = imagination_step(
-                    policy_state, vqvae_state.params, twm_state, buffer_obs, buffer_count, rng
-                )
+            if can_sample_twm:
+                # M1: Policy is trained ONLY on imagined data
+                for ac_iter in range(config["N_ITERS_AC"]):
+                    start_obs, start_done, burnin_obs, burnin_done, rng = sample_imagination_context(
+                        fbx_buffer_state, rng
+                    )
+                    policy_state, rng = imagination_step(
+                        policy_state, vqvae_state.params, twm_state,
+                        start_obs, start_done, burnin_obs, burnin_done, rng
+                    )
         
         # ---------------------------------------------------------------------
         # Logging with achievements/score
@@ -1247,6 +1296,10 @@ if __name__ == "__main__":
                         help="Imagination rollout length. Must be <= twm_seq_len-1 (initial obs uses ~1 block)")
     parser.add_argument("--twm_temperature", type=float, default=1.0)
     parser.add_argument("--twm_batch_size", type=int, default=16)
+    parser.add_argument("--use_binary_reward_target", action=argparse.BooleanOptionalAction, default=True,
+                        help="Use binary TWM reward targets (1=achievement reward event, 0=otherwise)")
+    parser.add_argument("--binary_reward_threshold", type=float, default=0.5,
+                        help="Threshold for binary reward targets; rewards >= threshold map to class 1")
     parser.add_argument("--n_iters_twm", type=int, default=500,
                         help="Number of TWM update iterations per step (paper: 500)")
     parser.add_argument("--n_mb_wm", type=int, default=3,
@@ -1262,6 +1315,8 @@ if __name__ == "__main__":
                         help="Number of minibatches for imagination PPO (paper: 1)")
     parser.add_argument("--n_epoch_imagination", type=int, default=1,
                         help="Number of epochs for imagination PPO (paper: 1)")
+    parser.add_argument("--burnin_horizon", type=int, default=5,
+                        help="RNN burn-in horizon for imagination rollout starts (paper: 5)")
     
     # Misc
     parser.add_argument("--seed", type=int, default=0)

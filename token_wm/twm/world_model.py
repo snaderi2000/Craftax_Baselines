@@ -32,6 +32,8 @@ class WorldModel(nn.Module):
     obs_vocab_size: int
     act_vocab_size: int
     config: TransformerConfig
+    reward_num_classes: int = 3
+    binary_reward_threshold: float = 0.5
 
     def setup(self):
         # 1. Define Patterns matching PyTorch exactly
@@ -70,7 +72,7 @@ class WorldModel(nn.Module):
 
         self.head_rewards = Head(
             embed_dim=self.config.embed_dim,
-            output_dim=3,
+            output_dim=self.reward_num_classes,
             block_mask=act_mask,
         )
 
@@ -240,7 +242,7 @@ class WorldModel(nn.Module):
         logits_obs_flat = logits_obs[:, :-1, :].reshape(-1, self.obs_vocab_size)
         
         # Reward/ends logits: NO shift (transition-level prediction at action position)
-        logits_rew_flat = logits_rew.reshape(-1, 3)
+        logits_rew_flat = logits_rew.reshape(-1, self.reward_num_classes)
         logits_ends_flat = logits_ends.reshape(-1, 2)
 
         # ------------------------------------------------------------------
@@ -254,7 +256,7 @@ class WorldModel(nn.Module):
         total_tokens = B * T * self.config.tokens_per_block  # common denominator
 
         obs_sum, obs_valid = compute_masked_loss_sum(logits_obs_flat, labels_obs_flat, self.obs_vocab_size)
-        rew_sum, rew_valid = compute_masked_loss_sum(logits_rew_flat, labels_rew_flat, 3)
+        rew_sum, rew_valid = compute_masked_loss_sum(logits_rew_flat, labels_rew_flat, self.reward_num_classes)
         ends_sum, ends_valid = compute_masked_loss_sum(logits_ends_flat, labels_ends_flat, 2)
 
         # Total loss: sum of all masked losses / total tokens
@@ -285,7 +287,7 @@ class WorldModel(nn.Module):
         
         Returns:
             labels_obs: (B*L*K,) flattened observation labels, -100 for ignored
-            labels_rew: (B*L,) flattened reward labels (0,1,2), -100 for ignored
+            labels_rew: (B*L,) flattened reward labels, -100 for ignored
             labels_ends: (B*L,) flattened end labels (0,1), -100 for ignored
         """
         # mask_padding: True = Padding (Ignore)
@@ -298,8 +300,13 @@ class WorldModel(nn.Module):
         mask_flat = jnp.repeat(mask_valid, K, axis=1)
         labels_obs = jnp.where(mask_flat, flat_obs, -100).reshape(-1)
         
-        # 2. Reward Labels: {-1, 0, 1} -> {0, 1, 2}
-        rewards_cls = jnp.sign(rewards).astype(jnp.int32) + 1
+        # 2. Reward Labels
+        # Paper's Craftax setup uses a binary reward target that ignores damage/heal shaping.
+        if self.reward_num_classes == 2:
+            rewards_cls = (rewards >= self.binary_reward_threshold).astype(jnp.int32)
+        else:
+            # Backward-compatible 3-class mapping: {-1, 0, +1} -> {0, 1, 2}
+            rewards_cls = jnp.sign(rewards).astype(jnp.int32) + 1
         labels_rew = jnp.where(mask_valid, rewards_cls, -100).reshape(-1)
         
         # 3. Ends Labels: ensure integer type
