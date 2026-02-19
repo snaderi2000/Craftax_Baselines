@@ -873,6 +873,8 @@ def run_mbrl(config):
         print(f"WARNING: BURNIN_HORIZON={config['BURNIN_HORIZON']} too large for TWM_SEQ_LEN={config['TWM_SEQ_LEN']}. "
               f"Clamping to {max_rollout}.")
         config["BURNIN_HORIZON"] = max_rollout
+    config["BURNIN_OVERSAMPLE_FACTOR"] = max(1, int(config.get("BURNIN_OVERSAMPLE_FACTOR", 4)))
+    config["BURNIN_MAX_SAMPLING_ATTEMPTS"] = max(1, int(config.get("BURNIN_MAX_SAMPLING_ATTEMPTS", 4)))
     config["TWM_MAX_BLOCKS"] = config["TWM_SEQ_LEN"] + config["BURNIN_HORIZON"]
 
     if config["USE_WANDB"]:
@@ -899,6 +901,11 @@ def run_mbrl(config):
     print(f"Imagination rollout length: {config['TWM_ROLLOUT_LEN']}")
     print(f"Imagination batch size: {config['IMAGINATION_BATCH_SIZE']}")
     print(f"Imagination burn-in horizon: {config['BURNIN_HORIZON']}")
+    print(f"Burn-in oversample factor: {config['BURNIN_OVERSAMPLE_FACTOR']}")
+    print(f"Burn-in max sampling attempts: {config['BURNIN_MAX_SAMPLING_ATTEMPTS']}")
+    print(f"Burn-in require no-done context: {config['BURNIN_REQUIRE_NO_DONE_CONTEXT']}")
+    print(f"Burn-in require start not-done: {config['BURNIN_REQUIRE_START_NOT_DONE']}")
+    print(f"Burn-in fallback allowed: {config['BURNIN_ALLOW_FALLBACK']}")
     print(f"TWM max blocks at inference: {config['TWM_MAX_BLOCKS']}")
     print(f"Binary reward target: {config['USE_BINARY_REWARD_TARGET']} (threshold={config['BINARY_REWARD_THRESHOLD']})")
     print(f"Buffer: flashbax trajectory buffer (max {config['BUFFER_SIZE']:,} transitions)")
@@ -1023,36 +1030,116 @@ def run_mbrl(config):
     imagination_step = make_imagination_fn(network, vqvae, twm, config)
     update_buffer = make_buffer_update_fn(config)
 
-    def sample_imagination_context(fbx_state, rng):
-        """
-        Sample contiguous (burn-in + start) windows from flashbax trajectories.
-        This avoids using interleaved flat-buffer ordering for RNN burn-in.
-        """
-        n = config["IMAGINATION_BATCH_SIZE"]
-        m = config["BURNIN_HORIZON"]
+    def _sample_candidate_windows(fbx_state, rng, num_candidates):
+        """Sample candidate contiguous windows from flashbax."""
         b = config["TWM_BATCH_SIZE"]
-        chunks = (n + b - 1) // b
-
+        chunks = max(1, (num_candidates + b - 1) // b)
         obs_chunks = []
         done_chunks = []
         action_chunks = []
         for _ in range(chunks):
             rng, sample_rng = jax.random.split(rng)
             fbx_batch = fbx_buffer.sample(fbx_state, sample_rng)
-            obs_chunks.append(fbx_batch.experience["obs"])      # (B, T, 63, 63, 3)
-            done_chunks.append(fbx_batch.experience["done"])    # (B, T)
-            action_chunks.append(fbx_batch.experience["action"])# (B, T)
+            obs_chunks.append(fbx_batch.experience["obs"])       # (B, T, 63, 63, 3)
+            done_chunks.append(fbx_batch.experience["done"])     # (B, T)
+            action_chunks.append(fbx_batch.experience["action"]) # (B, T)
+        obs_all = jnp.concatenate(obs_chunks, axis=0)[:num_candidates]
+        done_all = jnp.concatenate(done_chunks, axis=0)[:num_candidates].astype(jnp.float32)
+        action_all = jnp.concatenate(action_chunks, axis=0)[:num_candidates].astype(jnp.int32)
+        return obs_all, done_all, action_all, rng
 
-        obs_all = jnp.concatenate(obs_chunks, axis=0)[:n]
-        done_all = jnp.concatenate(done_chunks, axis=0)[:n].astype(jnp.float32)
-        action_all = jnp.concatenate(action_chunks, axis=0)[:n].astype(jnp.int32)
+    def sample_imagination_context(fbx_state, rng):
+        """
+        Sample contiguous (burn-in + start) windows from flashbax trajectories,
+        filtering invalid windows that cross episode boundaries.
+        """
+        n = config["IMAGINATION_BATCH_SIZE"]
+        m = config["BURNIN_HORIZON"]
+        require_no_done_context = config["BURNIN_REQUIRE_NO_DONE_CONTEXT"]
+        require_start_not_done = config["BURNIN_REQUIRE_START_NOT_DONE"]
+        oversample_factor = config["BURNIN_OVERSAMPLE_FACTOR"]
+        max_attempts = config["BURNIN_MAX_SAMPLING_ATTEMPTS"]
+        allow_fallback = config["BURNIN_ALLOW_FALLBACK"]
+
+        selected_obs = []
+        selected_done = []
+        selected_action = []
+        selected_count = 0
+
+        total_candidates = 0
+        total_valid = 0
+        total_done_in_context = 0
+        total_start_done = 0
+
+        for _ in range(max_attempts):
+            if selected_count >= n:
+                break
+
+            remaining = n - selected_count
+            num_candidates = max(remaining, remaining * oversample_factor)
+            cand_obs, cand_done, cand_action, rng = _sample_candidate_windows(
+                fbx_state, rng, num_candidates
+            )
+
+            start_done = cand_done[:, m]
+            if m > 0:
+                done_in_context = jnp.any(cand_done[:, :m] > 0.5, axis=1)
+            else:
+                done_in_context = jnp.zeros((num_candidates,), dtype=bool)
+            start_is_done = start_done > 0.5
+
+            valid_mask = jnp.ones((num_candidates,), dtype=bool)
+            if require_no_done_context and m > 0:
+                valid_mask = jnp.logical_and(valid_mask, ~done_in_context)
+            if require_start_not_done:
+                valid_mask = jnp.logical_and(valid_mask, ~start_is_done)
+
+            valid_idx = np.where(np.asarray(valid_mask))[0]
+            take = min(remaining, int(valid_idx.shape[0]))
+            if take > 0:
+                idx = jnp.asarray(valid_idx[:take], dtype=jnp.int32)
+                selected_obs.append(cand_obs[idx])
+                selected_done.append(cand_done[idx])
+                selected_action.append(cand_action[idx])
+                selected_count += take
+
+            total_candidates += int(num_candidates)
+            total_valid += int(valid_idx.shape[0])
+            total_done_in_context += int(np.asarray(done_in_context).sum())
+            total_start_done += int(np.asarray(start_is_done).sum())
+
+        fallback_count = max(0, n - selected_count)
+        if fallback_count > 0:
+            if not allow_fallback:
+                raise RuntimeError(
+                    "Insufficient valid burn-in windows and fallback is disabled. "
+                    "Try reducing burn-in constraints or increasing sampling attempts."
+                )
+            fb_obs, fb_done, fb_action, rng = _sample_candidate_windows(
+                fbx_state, rng, fallback_count
+            )
+            selected_obs.append(fb_obs)
+            selected_done.append(fb_done)
+            selected_action.append(fb_action)
+
+        obs_all = jnp.concatenate(selected_obs, axis=0)[:n]
+        done_all = jnp.concatenate(selected_done, axis=0)[:n]
+        action_all = jnp.concatenate(selected_action, axis=0)[:n]
 
         burnin_obs = obs_all[:, :m]
         burnin_done = done_all[:, :m]
         burnin_actions = action_all[:, :m]
         start_obs = obs_all[:, m]
         start_done = done_all[:, m]
-        return start_obs, start_done, burnin_obs, burnin_done, burnin_actions, rng
+
+        denom = max(1, total_candidates)
+        diagnostics = {
+            "burnin_valid_fraction": float(total_valid) / float(denom),
+            "burnin_fallback_fraction": float(fallback_count) / float(max(1, n)),
+            "burnin_done_in_context_fraction": float(total_done_in_context) / float(denom),
+            "burnin_start_done_fraction": float(total_start_done) / float(denom),
+        }
+        return start_obs, start_done, burnin_obs, burnin_done, burnin_actions, diagnostics, rng
 
     # =========================================================================
     # Training Loop (Python outer loop - not JIT traced!)
@@ -1151,21 +1238,34 @@ def run_mbrl(config):
         # Step 5: Imagination + Policy Update (M1: ONLY source of policy training)
         # Paper: N_ITERS_AC = 150 policy updates per iteration after T_BP
         # ---------------------------------------------------------------------
+        burnin_metrics = {
+            "burnin_valid_fraction": 0.0,
+            "burnin_fallback_fraction": 0.0,
+            "burnin_done_in_context_fraction": 0.0,
+            "burnin_start_done_fraction": 0.0,
+        }
         if total_steps >= config["BACKGROUND_PLANNING_START"]:
             if not imagination_started:
                 print(f"\n*** Starting imagination-based policy training at step {total_steps:,} ***\n")
                 imagination_started = True
             
             if can_sample_twm:
+                burnin_metric_sums = {k: 0.0 for k in burnin_metrics.keys()}
                 # M1: Policy is trained ONLY on imagined data
                 for ac_iter in range(config["N_ITERS_AC"]):
-                    start_obs, start_done, burnin_obs, burnin_done, burnin_actions, rng = sample_imagination_context(
+                    start_obs, start_done, burnin_obs, burnin_done, burnin_actions, burnin_diag, rng = sample_imagination_context(
                         fbx_buffer_state, rng
                     )
                     policy_state, rng = imagination_step(
                         policy_state, vqvae_state.params, twm_state,
                         start_obs, start_done, burnin_obs, burnin_done, burnin_actions, rng
                     )
+                    for k in burnin_metric_sums.keys():
+                        burnin_metric_sums[k] += float(burnin_diag[k])
+                burnin_metrics = {
+                    k: v / float(max(1, config["N_ITERS_AC"]))
+                    for k, v in burnin_metric_sums.items()
+                }
         
         # ---------------------------------------------------------------------
         # Logging with achievements/score
@@ -1215,6 +1315,10 @@ def run_mbrl(config):
                     'twm_loss_ends': float(twm_loss_ends),
                     'buffer_size': int(buffer_count),
                     'imagination_active': imagination_started,
+                    'burnin_valid_fraction': burnin_metrics["burnin_valid_fraction"],
+                    'burnin_fallback_fraction': burnin_metrics["burnin_fallback_fraction"],
+                    'burnin_done_in_context_fraction': burnin_metrics["burnin_done_in_context_fraction"],
+                    'burnin_start_done_fraction': burnin_metrics["burnin_start_done_fraction"],
                 })
                 wandb.log(log_dict)
         
@@ -1340,6 +1444,16 @@ if __name__ == "__main__":
                         help="Number of epochs for imagination PPO (paper: 1)")
     parser.add_argument("--burnin_horizon", type=int, default=5,
                         help="RNN burn-in horizon for imagination rollout starts (paper: 5)")
+    parser.add_argument("--burnin_oversample_factor", type=int, default=4,
+                        help="Oversampling factor for candidate burn-in windows before filtering")
+    parser.add_argument("--burnin_max_sampling_attempts", type=int, default=4,
+                        help="Maximum retries to gather valid burn-in windows")
+    parser.add_argument("--burnin_require_no_done_context", action=argparse.BooleanOptionalAction, default=True,
+                        help="Require burn-in context frames to contain no done flags")
+    parser.add_argument("--burnin_require_start_not_done", action=argparse.BooleanOptionalAction, default=True,
+                        help="Require the sampled start frame to not be terminal")
+    parser.add_argument("--burnin_allow_fallback", action=argparse.BooleanOptionalAction, default=True,
+                        help="Allow fallback to unfiltered windows if valid burn-in windows are insufficient")
     
     # Misc
     parser.add_argument("--seed", type=int, default=0)
