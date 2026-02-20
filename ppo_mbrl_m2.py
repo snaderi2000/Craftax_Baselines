@@ -1424,6 +1424,8 @@ def run_mbrl(config):
             # This averages values over completed episodes only
             returned = traj.info["returned_episode"]
             num_returned = returned.sum()
+            traj_reward_mean = float(traj.reward.mean())
+            traj_done_mean = float(traj.done.mean())
             
             if num_returned > 0:
                 # Average all info values over completed episodes
@@ -1460,6 +1462,9 @@ def run_mbrl(config):
                     'twm_loss_obs': float(twm_loss_obs),
                     'twm_loss_rew': float(twm_loss_rew),
                     'twm_loss_ends': float(twm_loss_ends),
+                    'num_returned_episodes': int(num_returned),
+                    'traj_reward_mean': traj_reward_mean,
+                    'traj_done_mean': traj_done_mean,
                     'buffer_size': int(buffer_count),
                     'real_policy_updates_active': int(real_updates_active),
                     'real_policy_update_iters': int(real_update_iters),
