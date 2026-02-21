@@ -1260,6 +1260,8 @@ def run_mbrl(config):
     total_steps = start_step
     start_update = start_step // (config["NUM_ENVS"] * config["NUM_STEPS"])
     t0 = time.time()
+    last_update_time = t0
+    last_update_steps = start_step
     
     # Signal handler for graceful exit
     exit_requested = False
@@ -1412,6 +1414,15 @@ def run_mbrl(config):
         # Logging with achievements/score
         # ---------------------------------------------------------------------
         if True:
+            now = time.time()
+            update_time_sec = max(1e-9, now - last_update_time)
+            steps_since_last = total_steps - last_update_steps
+            sps_inst = float(steps_since_last) / update_time_sec
+            elapsed_total = max(1e-9, now - t0)
+            sps_avg = float(total_steps - start_step) / elapsed_total
+            last_update_time = now
+            last_update_steps = total_steps
+
             status = "WM-only"
             if real_updates_active and imagination_started:
                 status = "Dyna"
@@ -1448,6 +1459,7 @@ def run_mbrl(config):
                 'steps': f'{total_steps:,}',
                 'return': f'{float(avg_return):.2f}',
                 'score': f'{float(score):.2f}',
+                'sps': f'{float(sps_inst):.0f}',
                 'vq': f'{float(vqvae_loss):.3f}',
                 'twm': f'{float(twm_loss):.3f}',
                 'twm_r': f'{float(twm_loss_rew):.3f}',
@@ -1465,6 +1477,9 @@ def run_mbrl(config):
                     'num_returned_episodes': int(num_returned),
                     'traj_reward_mean': traj_reward_mean,
                     'traj_done_mean': traj_done_mean,
+                    'sps_inst': sps_inst,
+                    'sps_avg': sps_avg,
+                    'update_time_sec': float(update_time_sec),
                     'buffer_size': int(buffer_count),
                     'real_policy_updates_active': int(real_updates_active),
                     'real_policy_update_iters': int(real_update_iters),
