@@ -306,16 +306,16 @@ def make_vqvae_update_fn(vqvae, config):
     """Create JIT-compiled VQ-VAE single update function."""
     
     def _vqvae_loss_fn(params, obs_batch):
-        recon, tokens, total_loss, metrics = vqvae.apply(params, obs_batch, method=vqvae.get_vq_loss)
+        _, _, total_loss, metrics = vqvae.apply(params, obs_batch, method=vqvae.get_vq_loss)
         return total_loss, metrics
     
     @jax.jit
     def vqvae_update_single(vqvae_state, obs_batch):
         """Single VQ-VAE update step."""
         grad_fn = jax.value_and_grad(_vqvae_loss_fn, has_aux=True)
-        (loss, metrics), grads = grad_fn(vqvae_state.params, obs_batch)
+        (_, metrics), grads = grad_fn(vqvae_state.params, obs_batch)
         vqvae_state = vqvae_state.apply_gradients(grads=grads)
-        return vqvae_state, loss
+        return vqvae_state, metrics
     
     return vqvae_update_single
 
@@ -1345,8 +1345,16 @@ def run_mbrl(config):
         # Step 3: VQ-VAE Update (N_ITERS_TOK iterations, if not pretrained)
         # Paper: 500 iterations with 3 minibatches each
         # ---------------------------------------------------------------------
-        vqvae_loss = 0.0
+        vqvae_metrics = {
+            "total_loss": 0.0,
+            "l1": 0.0,
+            "l2": 0.0,
+            "codebook": 0.0,
+            "commitment": 0.0,
+        }
+        vqvae_updates = 0
         if not config["USE_PRETRAINED_TOKENIZER"] and config["N_ITERS_TOK"] > 0:
+            vqvae_metric_sums = {k: 0.0 for k in vqvae_metrics.keys()}
             for tok_iter in range(config["N_ITERS_TOK"]):
                 for mb in range(config["N_MB_WM"]):
                     # Sample minibatch from buffer
@@ -1355,7 +1363,16 @@ def run_mbrl(config):
                     if mb_size > 0:
                         mb_idx = jax.random.randint(sample_rng, (mb_size,), 0, int(buffer_count))
                         obs_mb = buffer_obs[mb_idx]
-                        vqvae_state, vqvae_loss = vqvae_update_single(vqvae_state, obs_mb)
+                        vqvae_state, vq_metrics = vqvae_update_single(vqvae_state, obs_mb)
+                        for k in vqvae_metric_sums.keys():
+                            vqvae_metric_sums[k] += float(vq_metrics[k])
+                        vqvae_updates += 1
+            if vqvae_updates > 0:
+                vqvae_metrics = {
+                    k: v / float(vqvae_updates)
+                    for k, v in vqvae_metric_sums.items()
+                }
+        vqvae_loss = float(vqvae_metrics["total_loss"])
         
         # ---------------------------------------------------------------------
         # Step 4: TWM Update (N_ITERS_TWM iterations from step 0)
@@ -1503,6 +1520,11 @@ def run_mbrl(config):
                 log_dict.update({
                     'step': total_steps,
                     'vqvae_loss': float(vqvae_loss),
+                    'vqvae_loss_l1': float(vqvae_metrics["l1"]),
+                    'vqvae_loss_l2': float(vqvae_metrics["l2"]),
+                    'vqvae_loss_codebook': float(vqvae_metrics["codebook"]),
+                    'vqvae_loss_commitment': float(vqvae_metrics["commitment"]),
+                    'vqvae_update_steps': int(vqvae_updates),
                     'twm_loss': float(twm_loss),
                     'twm_loss_obs': float(twm_loss_obs),
                     'twm_loss_rew': float(twm_loss_rew),
