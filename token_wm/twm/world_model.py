@@ -59,7 +59,7 @@ class WorldModel(nn.Module):
         )
         
         # 3. Heads
-        tpb = self.config.tokens_per_block  # 65
+        tpb = self.config.tokens_per_block
 
         act_mask = jnp.zeros((tpb,), dtype=jnp.float32).at[-1].set(1.0)
         all_but_last_obs = jnp.ones((tpb,), dtype=jnp.float32).at[-2].set(0.0)
@@ -143,14 +143,19 @@ class WorldModel(nn.Module):
         Calculates loss. Must be called via model.apply(..., method=model.compute_loss)
         """
         # 1. Prepare Inputs (Interleave Obs and Actions)
-        # obs_tokens: [B, T, 64]
         obs_tokens = batch['obs_tokens'] 
         act_tokens = batch['actions'][..., None] # [B, T, 1]
+        obs_tokens_per_step = obs_tokens.shape[-1]
+        tokens_per_block = self.config.tokens_per_block
+        if obs_tokens_per_step + 1 != tokens_per_block:
+            raise ValueError(
+                f"obs token count mismatch: got {obs_tokens_per_step}, expected {tokens_per_block - 1}"
+            )
         
-        # Concatenate to [B, T, 65] then flatten
+        # Concatenate to [B, T, tokens_per_block] then flatten
         B, T, _ = obs_tokens.shape
         tokens_block = jnp.concatenate([obs_tokens, act_tokens], axis=2)
-        tokens_flat = tokens_block.reshape(B, -1) # [B, T*65]
+        tokens_flat = tokens_block.reshape(B, -1) # [B, T*tokens_per_block]
 
         # Debug prints (comment out for cleaner output)
         # print("tokens_flat.shape:", tokens_flat.shape)
@@ -169,32 +174,32 @@ class WorldModel(nn.Module):
         )
         
         # 4. EXPAND LABELS & ALIGN SHAPES
-        # We need to map the sparse labels onto the dense (B, T, 65) grid.
+        # We need to map sparse labels onto a dense (B, T, tokens_per_block) grid.
         
-        # --- A. Prepare Rewards & Ends (Located at Index 64 / Action Token) ---
+        # --- A. Prepare Rewards & Ends (Located at action-token index) ---
         labels_rew_reshaped = labels_rew.reshape(B, T, 1)
         labels_ends_reshaped = labels_ends.reshape(B, T, 1)
         
-        target_rew_grid = jnp.full((B, T, 65), -100, dtype=jnp.int32)
+        target_rew_grid = jnp.full((B, T, tokens_per_block), -100, dtype=jnp.int32)
         target_rew_grid = target_rew_grid.at[:, :, -1].set(labels_rew_reshaped.squeeze(-1))
         
-        target_ends_grid = jnp.full((B, T, 65), -100, dtype=jnp.int32)
+        target_ends_grid = jnp.full((B, T, tokens_per_block), -100, dtype=jnp.int32)
         target_ends_grid = target_ends_grid.at[:, :, -1].set(labels_ends_reshaped.squeeze(-1))
         
-        # --- B. Prepare Observations (Located at Indices 0..63) ---
-        target_obs_grid = jnp.full((B, T, 65), -100, dtype=jnp.int32)
+        # --- B. Prepare Observations (Located at indices 0..tokens_per_block-2) ---
+        target_obs_grid = jnp.full((B, T, tokens_per_block), -100, dtype=jnp.int32)
         
         # Robustly place obs labels
-        target_len = B * T * 64
+        target_len = B * T * obs_tokens_per_step
         if labels_obs.size < target_len:
              labels_obs = jnp.pad(labels_obs, (0, target_len - labels_obs.size), constant_values=-100)
         elif labels_obs.size > target_len:
              labels_obs = labels_obs[:target_len]
         
-        target_obs_grid = target_obs_grid.at[:, :, :-1].set(labels_obs.reshape(B, T, 64))
+        target_obs_grid = target_obs_grid.at[:, :, :-1].set(labels_obs.reshape(B, T, obs_tokens_per_step))
 
         # --- C. CRITICAL FIX: Flatten First, Then Slice ---
-        # 1. Flatten to (Batch, Total_Tokens) e.g. (32, 1300)
+        # 1. Flatten to (Batch, Total_Tokens)
         flat_rew = target_rew_grid.reshape(B, -1)
         flat_obs = target_obs_grid.reshape(B, -1)
         flat_ends = target_ends_grid.reshape(B, -1)
@@ -249,8 +254,8 @@ class WorldModel(nn.Module):
         # 8. Compute losses with COMMON DENOMINATOR
         #    All three losses are divided by total_tokens so that each
         #    token position contributes equally to the gradient, regardless
-        #    of which head it belongs to. Obs naturally dominates (~63 tokens
-        #    per block) vs reward/done (1 token per block).
+        #    of which head it belongs to. Observation tokens dominate because
+        #    there are many more of them than reward/done tokens per block.
         # ------------------------------------------------------------------
 
         total_tokens = B * T * self.config.tokens_per_block  # common denominator
@@ -280,7 +285,7 @@ class WorldModel(nn.Module):
         Compute labels for the world model training.
         
         Args:
-            obs_tokens: (B, L, K) observation tokens where K=64
+            obs_tokens: (B, L, K) observation tokens
             rewards: (B, L) reward values
             ends: (B, L) episode end flags (0 or 1)
             mask_padding: (B, L) boolean mask, True = padding (ignore)

@@ -1074,6 +1074,8 @@ def run_mbrl(config):
     # VQ-VAE
     rng, vqvae_rng = jax.random.split(rng)
     vqvae_state = create_vqvae_train_state(config, vqvae_rng, jnp.zeros((1, 63, 63, 3)))
+    vqvae_param_count = sum(x.size for x in jax.tree.leaves(vqvae_state.params))
+    print(f"VQ-VAE parameter count: {vqvae_param_count:,}")
     
     # Load pre-trained tokenizer if specified
     if config["USE_PRETRAINED_TOKENIZER"]:
@@ -1086,6 +1088,8 @@ def run_mbrl(config):
     # TWM
     rng, twm_rng = jax.random.split(rng)
     twm_state = create_twm_train_state(config, twm_rng, jnp.zeros((1, config["TOKENS_PER_BLOCK"]), dtype=jnp.int32))
+    twm_param_count = sum(x.size for x in jax.tree.leaves(twm_state.params))
+    print(f"TWM parameter count: {twm_param_count:,}")
     
     # Environment
     rng, env_rng = jax.random.split(rng)

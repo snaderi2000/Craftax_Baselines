@@ -1,13 +1,14 @@
 """
-M1 Model-Based RL Implementation for Craftax
+M3 Model-Based RL (Dyna + Patch-Factorized VQ-VAE) for Craftax
 Based on "Improving Transformer World Models for Data-Efficient RL"
 
 Uses the RNN-based IMPALA policy from ppo_m1_best.py (ActorCriticRNN)
 
-PURE M1 (NOT Dyna):
+M3 (M2 + patches):
 - From step 0: Collect data, train VQ-VAE AND TWM
-- After T_BP: Train policy ONLY on imagined data from TWM
-- Real environment data is ONLY used to train the world model, NOT the policy
+- Policy can be trained on real environment rollouts (PPO)
+- After T_BP: Policy is additionally trained on imagined data from TWM
+- Tokenizer is patch-factorized (9x9 patches of size 7x7 -> 81 tokens/frame)
 
 Paper's training counts per iteration:
 - N_iters_tok = 500 (tokenizer updates)
@@ -62,7 +63,7 @@ from wrappers import (
 from logz.batch_logging import create_log_dict, batch_log
 
 # World model modules
-from token_wm.tokenizer.vqvae import VQVAE
+from token_wm.tokenizer.patch_vqvae import PatchVQVAE
 from token_wm.twm.world_model import WorldModel
 from token_wm.twm.transformer import TransformerConfig
 from token_wm.twm.kv_caching import KeysValues
@@ -211,9 +212,16 @@ class Transition(NamedTuple):
 # =============================================================================
 
 def create_vqvae(config):
-    return VQVAE(
+    return PatchVQVAE(
         num_embeddings=config["VQVAE_CODEBOOK_SIZE"],
         embedding_dim=config["VQVAE_EMBED_DIM"],
+        encoder_hidden_dim=config["PATCH_ENCODER_HIDDEN_DIM"],
+        patch_size=config["PATCH_SIZE"],
+        image_size=config["OBS_IMAGE_SIZE"],
+        lambda_l1=config["VQVAE_LAMBDA_L1"],
+        lambda_l2=config["VQVAE_LAMBDA_L2"],
+        lambda_codebook=config["VQVAE_LAMBDA_CODEBOOK"],
+        lambda_commitment=config["VQVAE_LAMBDA_COMMITMENT"],
     )
 
 
@@ -325,7 +333,7 @@ def make_twm_update_fn(twm, vqvae, config):
         """Compute TWM loss using proper compute_loss (obs + reward + termination)."""
         B, T, K = obs_tokens.shape
         batch = {
-            'obs_tokens': obs_tokens,       # (B, T, 64)
+            'obs_tokens': obs_tokens,       # (B, T, TOKENS_PER_OBS)
             'actions': actions,              # (B, T)
             'rewards': rewards,              # (B, T)
             'ends': dones,                   # (B, T)
@@ -361,13 +369,121 @@ def make_twm_update_fn(twm, vqvae, config):
     return twm_update_single
 
 
+def make_real_policy_update_fn(network, config):
+    """Create JIT-compiled PPO update on real environment trajectories."""
+    num_minibatches = config["NUM_MINIBATCHES"]
+    update_epochs = config["UPDATE_EPOCHS"]
+
+    def _calculate_gae(traj_batch, last_val, last_done):
+        def _get_advantages(carry, transition):
+            gae, next_value, next_done = carry
+            done, value, reward = transition.done, transition.value, transition.reward
+            delta = reward + config["GAMMA"] * next_value * (1 - next_done) - value
+            gae = delta + config["GAMMA"] * config["GAE_LAMBDA"] * (1 - next_done) * gae
+            return (gae, value, done), gae
+
+        _, advantages = jax.lax.scan(
+            _get_advantages, (jnp.zeros_like(last_val), last_val, last_done),
+            traj_batch, reverse=True, unroll=16,
+        )
+        return advantages, advantages + traj_batch.value
+
+    def _ppo_loss_fn(params, init_hstate, traj_batch, gae, targets):
+        _, pi, value = network.apply(params, init_hstate[0], (traj_batch.obs, traj_batch.done))
+        log_prob = pi.log_prob(traj_batch.action)
+
+        value_pred_clipped = traj_batch.value + (value - traj_batch.value).clip(-config["CLIP_EPS"], config["CLIP_EPS"])
+        value_losses = jnp.square(value - targets)
+        value_losses_clipped = jnp.square(value_pred_clipped - targets)
+        value_loss = 0.5 * jnp.maximum(value_losses, value_losses_clipped).mean()
+
+        ratio = jnp.exp(log_prob - traj_batch.log_prob)
+        loss_actor1 = ratio * gae
+        loss_actor2 = jnp.clip(ratio, 1.0 - config["CLIP_EPS"], 1.0 + config["CLIP_EPS"]) * gae
+        loss_actor = -jnp.minimum(loss_actor1, loss_actor2).mean()
+
+        entropy = pi.entropy().mean()
+        total_loss = loss_actor + config["VF_COEF"] * value_loss - config["ENT_COEF"] * entropy
+        return total_loss, (value_loss, loss_actor, entropy)
+
+    def _ppo_update_minbatch(train_state, batch_info):
+        init_hstate, traj_batch, advantages, targets = batch_info
+        grad_fn = jax.value_and_grad(_ppo_loss_fn, has_aux=True)
+        (loss, aux), grads = grad_fn(train_state.params, init_hstate, traj_batch, advantages, targets)
+        train_state = train_state.apply_gradients(grads=grads)
+        return train_state, (loss, aux)
+
+    def _ppo_update_epoch(update_state, _):
+        policy_state, init_hstate, traj_batch, advantages, targets, rng = update_state
+        advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
+
+        rng, perm_rng = jax.random.split(rng)
+        n_envs = traj_batch.obs.shape[1]
+        permutation = jax.random.permutation(perm_rng, n_envs)
+        batch = (init_hstate, traj_batch, advantages, targets)
+        shuffled_batch = jax.tree.map(lambda x: jnp.take(x, permutation, axis=1), batch)
+
+        minibatches = jax.tree.map(
+            lambda x: jnp.swapaxes(
+                jnp.reshape(x, [x.shape[0], num_minibatches, -1] + list(x.shape[2:])),
+                1,
+                0,
+            ),
+            shuffled_batch,
+        )
+        policy_state, losses = jax.lax.scan(_ppo_update_minbatch, policy_state, minibatches)
+
+        epoch_total_loss = losses[0].mean()
+        epoch_value_loss = losses[1][0].mean()
+        epoch_actor_loss = losses[1][1].mean()
+        epoch_entropy = losses[1][2].mean()
+        epoch_metrics = (epoch_total_loss, epoch_value_loss, epoch_actor_loss, epoch_entropy)
+        return (policy_state, init_hstate, traj_batch, advantages, targets, rng), epoch_metrics
+
+    @jax.jit
+    def real_policy_step(policy_state, traj, initial_hstate, final_hstate, last_obs, last_done, rng):
+        """Apply PPO updates on one real rollout trajectory."""
+        traj_for_ppo = Transition(
+            done=traj.done,
+            action=traj.action,
+            value=traj.value,
+            reward=traj.reward,
+            log_prob=traj.log_prob,
+            obs=traj.obs,
+            info=None,
+        )
+
+        ac_in = (last_obs[jnp.newaxis, :], last_done[jnp.newaxis, :])
+        _, _, last_val = network.apply(policy_state.params, final_hstate, ac_in)
+        last_val = last_val.squeeze(0)
+
+        advantages, targets = _calculate_gae(traj_for_ppo, last_val, last_done)
+        init_hstate_batch = initial_hstate[None, :]
+
+        rng, ppo_rng = jax.random.split(rng)
+        ppo_state = (policy_state, init_hstate_batch, traj_for_ppo, advantages, targets, ppo_rng)
+        ppo_state, epoch_metrics = jax.lax.scan(_ppo_update_epoch, ppo_state, None, update_epochs)
+        policy_state = ppo_state[0]
+
+        metrics = {
+            "real_ppo_total_loss": epoch_metrics[0].mean(),
+            "real_ppo_value_loss": epoch_metrics[1].mean(),
+            "real_ppo_actor_loss": epoch_metrics[2].mean(),
+            "real_ppo_entropy": epoch_metrics[3].mean(),
+        }
+        return policy_state, metrics, rng
+
+    return real_policy_step
+
+
 def make_imagination_fn(network, vqvae, twm, config):
-    """Create JIT-compiled imagination rollout + PPO function (M1 style)."""
+    """Create JIT-compiled imagination rollout + PPO function."""
     
     # Use paper's settings for imagination PPO
     n_mb_imagination = config.get("N_MB_IMAGINATION", 1)
     n_epoch_imagination = config.get("N_EPOCH_IMAGINATION", 1)
     burnin_horizon = config.get("BURNIN_HORIZON", 5)
+    obs_tokens_per_step = config["TOKENS_PER_OBS"]
     use_binary_reward_target = config.get("USE_BINARY_REWARD_TARGET", True)
     
     def _calculate_gae(traj_batch, last_val, last_done):
@@ -430,10 +546,7 @@ def make_imagination_fn(network, vqvae, twm, config):
     
     @jax.jit
     def imagination_step(policy_state, vqvae_params, twm_state, start_obs, start_done, burnin_obs, burnin_done, burnin_actions, rng):
-        """
-        M1: Single imagination rollout + PPO update.
-        Policy is trained ONLY on imagined data.
-        """
+        """Single imagination rollout + PPO update."""
         N = config["IMAGINATION_BATCH_SIZE"]
         rng, imagine_rng = jax.random.split(rng)
 
@@ -451,8 +564,8 @@ def make_imagination_fn(network, vqvae, twm, config):
         start_tokens = vqvae.apply(vqvae_params, start_obs, method=vqvae.encode)
         
         # Initialize KV cache
-        # Must match transformer's internal causal mask size = TWM_SEQ_LEN * TOKENS_PER_BLOCK
-        # The initial obs frame (64 tokens) + TWM_ROLLOUT_LEN * 65 must fit within this.
+        # Must match transformer's internal causal mask size = TWM_SEQ_LEN * TOKENS_PER_BLOCK.
+        # The initial obs frame (TOKENS_PER_OBS tokens) + TWM_ROLLOUT_LEN * TOKENS_PER_BLOCK must fit.
         # This is enforced by setting TWM_ROLLOUT_LEN = TWM_SEQ_LEN - 1.
         cache = KeysValues.init(
             n=N,
@@ -467,7 +580,7 @@ def make_imagination_fn(network, vqvae, twm, config):
             burnin_obs_flat = burnin_obs.reshape(N * burnin_horizon, 63, 63, 3)
             burnin_tokens_flat = vqvae.apply(vqvae_params, burnin_obs_flat, method=vqvae.encode)
             burnin_tokens = burnin_tokens_flat.reshape(N, burnin_horizon, -1)
-            burnin_tokens_t = jnp.swapaxes(burnin_tokens, 0, 1)                     # (M, N, 64)
+            burnin_tokens_t = jnp.swapaxes(burnin_tokens, 0, 1)                     # (M, N, TOKENS_PER_OBS)
             burnin_actions_t = jnp.swapaxes(burnin_actions.astype(jnp.int32), 0, 1) # (M, N)
 
             def _burnin_twm_step(cache, step_inputs):
@@ -527,7 +640,7 @@ def make_imagination_fn(network, vqvae, twm, config):
                 return (next_tok, cache, rng), next_tok
             
             (last_token, cache, rng), generated_tokens = jax.lax.scan(
-                _gen_token, (next_token, cache, rng), None, 63
+                _gen_token, (next_token, cache, rng), None, obs_tokens_per_step - 1
             )
             
             # Feed last token to complete frame
@@ -857,22 +970,43 @@ def load_checkpoint(ckpt_path, config, network, vqvae, twm):
 # =============================================================================
 
 def run_mbrl(config):
-    """Run M1 MBRL training (pure imagination, NOT Dyna)."""
+    """Run M3 MBRL training (Dyna + patch-factorized tokenizer)."""
     config = {k.upper(): v for k, v in config.__dict__.items()}
-    config["TOKENS_PER_BLOCK"] = 65
+    if config["OBS_IMAGE_SIZE"] != 63:
+        raise ValueError(
+            f"OBS_IMAGE_SIZE={config['OBS_IMAGE_SIZE']} is not supported in this pipeline yet; expected 63."
+        )
+    if config["OBS_IMAGE_SIZE"] % config["PATCH_SIZE"] != 0:
+        raise ValueError(
+            f"OBS_IMAGE_SIZE ({config['OBS_IMAGE_SIZE']}) must be divisible by PATCH_SIZE ({config['PATCH_SIZE']})."
+        )
+    computed_tokens_per_obs = (config["OBS_IMAGE_SIZE"] // config["PATCH_SIZE"]) ** 2
+    tokens_per_obs_override = config.get("TOKENS_PER_OBS")
+    if tokens_per_obs_override is None:
+        config["TOKENS_PER_OBS"] = int(computed_tokens_per_obs)
+    else:
+        config["TOKENS_PER_OBS"] = int(tokens_per_obs_override)
+        if config["TOKENS_PER_OBS"] != computed_tokens_per_obs:
+            raise ValueError(
+                f"TOKENS_PER_OBS={config['TOKENS_PER_OBS']} is inconsistent with patch config "
+                f"(expected {computed_tokens_per_obs} for {config['OBS_IMAGE_SIZE']}x{config['OBS_IMAGE_SIZE']} "
+                f"and PATCH_SIZE={config['PATCH_SIZE']})."
+            )
+    config["TOKENS_PER_BLOCK"] = config["TOKENS_PER_OBS"] + 1
     config["NUM_UPDATES"] = config["TOTAL_TIMESTEPS"] // config["NUM_STEPS"] // config["NUM_ENVS"]
     config["MINIBATCH_SIZE"] = config["NUM_ENVS"] * config["NUM_STEPS"] // config["NUM_MINIBATCHES"]
 
-    # Validate: initial obs (64 tokens) + rollout_len * 65 must fit in TWM_SEQ_LEN * 65
+    # Validate: initial obs (TOKENS_PER_OBS tokens) + rollout_len * TOKENS_PER_BLOCK fits sequence budget.
     max_rollout = config["TWM_SEQ_LEN"] - 1  # initial frame uses ~1 block
     if config["TWM_ROLLOUT_LEN"] > max_rollout:
         print(f"WARNING: TWM_ROLLOUT_LEN={config['TWM_ROLLOUT_LEN']} too large for TWM_SEQ_LEN={config['TWM_SEQ_LEN']}. "
-              f"Clamping to {max_rollout} (initial obs uses 64 of 65 tokens in first block).")
+              f"Clamping to {max_rollout} (initial obs uses {config['TOKENS_PER_OBS']} of {config['TOKENS_PER_BLOCK']} tokens).")
         config["TWM_ROLLOUT_LEN"] = max_rollout
     if config["BURNIN_HORIZON"] > max_rollout:
         print(f"WARNING: BURNIN_HORIZON={config['BURNIN_HORIZON']} too large for TWM_SEQ_LEN={config['TWM_SEQ_LEN']}. "
               f"Clamping to {max_rollout}.")
         config["BURNIN_HORIZON"] = max_rollout
+    config["N_ITERS_REAL_AC"] = max(0, int(config.get("N_ITERS_REAL_AC", 1)))
     config["BURNIN_OVERSAMPLE_FACTOR"] = max(1, int(config.get("BURNIN_OVERSAMPLE_FACTOR", 4)))
     config["BURNIN_MAX_SAMPLING_ATTEMPTS"] = max(1, int(config.get("BURNIN_MAX_SAMPLING_ATTEMPTS", 4)))
     config["TWM_MAX_BLOCKS"] = config["TWM_SEQ_LEN"] + config["BURNIN_HORIZON"]
@@ -882,11 +1016,11 @@ def run_mbrl(config):
             project=config["WANDB_PROJECT"],
             entity=config["WANDB_ENTITY"],
             config=config,
-            name=f"M1-MBRL-{config['ENV_NAME']}-{int(config['TOTAL_TIMESTEPS']//1e6)}M",
+            name=f"M3-PATCH-{config['ENV_NAME']}-{int(config['TOTAL_TIMESTEPS']//1e6)}M",
         )
 
     print("\n" + "="*70)
-    print("M1 MBRL Training (Pure Imagination - NOT Dyna)")
+    print("M3 MBRL Training (Dyna + Patch-Factorized VQ-VAE)")
     print("="*70)
     print(f"Environment: {config['ENV_NAME']}")
     print(f"Total timesteps: {config['TOTAL_TIMESTEPS']:,}")
@@ -895,8 +1029,15 @@ def run_mbrl(config):
     print(f"Background planning starts at: {config['BACKGROUND_PLANNING_START']:,}")
     print("-"*70)
     print(f"Tokenizer iters per update: {config['N_ITERS_TOK']}")
+    print(f"Patch size / obs image size: {config['PATCH_SIZE']} / {config['OBS_IMAGE_SIZE']}")
+    print(f"Tokens per observation: {config['TOKENS_PER_OBS']}")
+    print(f"Tokens per block (obs+action): {config['TOKENS_PER_BLOCK']}")
     print(f"TWM iters per update: {config['N_ITERS_TWM']}")
     print(f"WM minibatches: {config['N_MB_WM']}")
+    print(f"Real policy updates enabled: {config['DYNA_ENABLE_REAL_UPDATES']}")
+    print(f"Real policy updates after T_BP only: {config['DYNA_REAL_UPDATES_AFTER_BP_ONLY']}")
+    print(f"Real policy update repeats per outer update: {config['N_ITERS_REAL_AC']}")
+    print(f"Real PPO epochs/minibatches: {config['UPDATE_EPOCHS']}/{config['NUM_MINIBATCHES']}")
     print(f"Imagination policy updates: {config['N_ITERS_AC']}")
     print(f"Imagination rollout length: {config['TWM_ROLLOUT_LEN']}")
     print(f"Imagination batch size: {config['IMAGINATION_BATCH_SIZE']}")
@@ -916,8 +1057,8 @@ def run_mbrl(config):
     if config['USE_PRETRAINED_TOKENIZER']:
         print(f"  Path: {config['TOKENIZER_PATH']}")
     print("="*70)
-    print("NOTE: Policy is trained ONLY on imagined data (after T_BP)")
-    print("      Real data is used ONLY for world model training")
+    print("NOTE: Dyna mode can train policy on real rollouts + imagined rollouts.")
+    print("      Real data is always used for world model training.")
     print("="*70 + "\n")
 
     # =========================================================================
@@ -1031,6 +1172,7 @@ def run_mbrl(config):
     env_rollout = make_env_rollout_fn(env, env_params, network, config)
     vqvae_update_single = make_vqvae_update_fn(vqvae, config)
     twm_update_single = make_twm_update_fn(twm, vqvae, config)
+    real_policy_step = make_real_policy_update_fn(network, config)
     imagination_step = make_imagination_fn(network, vqvae, twm, config)
     update_buffer = make_buffer_update_fn(config)
 
@@ -1151,6 +1293,8 @@ def run_mbrl(config):
     total_steps = start_step
     start_update = start_step // (config["NUM_ENVS"] * config["NUM_STEPS"])
     t0 = time.time()
+    last_update_time = t0
+    last_update_steps = start_step
     
     # Signal handler for graceful exit
     exit_requested = False
@@ -1239,15 +1383,42 @@ def run_mbrl(config):
                     )
         
         # ---------------------------------------------------------------------
-        # Step 5: Imagination + Policy Update (M1: ONLY source of policy training)
-        # Paper: N_ITERS_AC = 150 policy updates per iteration after T_BP
+        # Step 5: Policy Update (Dyna: real updates + imagination updates)
         # ---------------------------------------------------------------------
+        real_policy_metrics = {
+            "real_ppo_total_loss": 0.0,
+            "real_ppo_value_loss": 0.0,
+            "real_ppo_actor_loss": 0.0,
+            "real_ppo_entropy": 0.0,
+        }
+        real_updates_active = False
+        real_update_iters = 0
+        if config["DYNA_ENABLE_REAL_UPDATES"]:
+            real_updates_active = (
+                (not config["DYNA_REAL_UPDATES_AFTER_BP_ONLY"])
+                or (total_steps >= config["BACKGROUND_PLANNING_START"])
+            )
+        if real_updates_active:
+            real_metric_sums = {k: 0.0 for k in real_policy_metrics.keys()}
+            for _ in range(config["N_ITERS_REAL_AC"]):
+                policy_state, real_diag, rng = real_policy_step(
+                    policy_state, traj, initial_hstate, hstate, obsv, last_done, rng
+                )
+                for k in real_metric_sums.keys():
+                    real_metric_sums[k] += float(real_diag[k])
+                real_update_iters += 1
+            real_policy_metrics = {
+                k: v / float(max(1, real_update_iters))
+                for k, v in real_metric_sums.items()
+            }
+
         burnin_metrics = {
             "burnin_valid_fraction": 0.0,
             "burnin_fallback_fraction": 0.0,
             "burnin_done_in_context_fraction": 0.0,
             "burnin_start_done_fraction": 0.0,
         }
+        imag_update_iters = 0
         if total_steps >= config["BACKGROUND_PLANNING_START"]:
             if not imagination_started:
                 print(f"\n*** Starting imagination-based policy training at step {total_steps:,} ***\n")
@@ -1255,7 +1426,7 @@ def run_mbrl(config):
             
             if can_sample_twm:
                 burnin_metric_sums = {k: 0.0 for k in burnin_metrics.keys()}
-                # M1: Policy is trained ONLY on imagined data
+                # Imagined policy updates
                 for ac_iter in range(config["N_ITERS_AC"]):
                     start_obs, start_done, burnin_obs, burnin_done, burnin_actions, burnin_diag, rng = sample_imagination_context(
                         fbx_buffer_state, rng
@@ -1266,8 +1437,9 @@ def run_mbrl(config):
                     )
                     for k in burnin_metric_sums.keys():
                         burnin_metric_sums[k] += float(burnin_diag[k])
+                    imag_update_iters += 1
                 burnin_metrics = {
-                    k: v / float(max(1, config["N_ITERS_AC"]))
+                    k: v / float(max(1, imag_update_iters))
                     for k, v in burnin_metric_sums.items()
                 }
         
@@ -1275,12 +1447,29 @@ def run_mbrl(config):
         # Logging with achievements/score
         # ---------------------------------------------------------------------
         if True:
-            status = "WM-only" if not imagination_started else "Imagination"
+            now = time.time()
+            update_time_sec = max(1e-9, now - last_update_time)
+            steps_since_last = total_steps - last_update_steps
+            sps_inst = float(steps_since_last) / update_time_sec
+            elapsed_total = max(1e-9, now - t0)
+            sps_avg = float(total_steps - start_step) / elapsed_total
+            last_update_time = now
+            last_update_steps = total_steps
+
+            status = "WM-only"
+            if real_updates_active and imagination_started:
+                status = "Dyna"
+            elif real_updates_active:
+                status = "Real-only"
+            elif imagination_started:
+                status = "Imagination"
             
             # Compute episode-averaged metrics (like ppo_rnn.py)
             # This averages values over completed episodes only
             returned = traj.info["returned_episode"]
             num_returned = returned.sum()
+            traj_reward_mean = float(traj.reward.mean())
+            traj_done_mean = float(traj.done.mean())
             
             if num_returned > 0:
                 # Average all info values over completed episodes
@@ -1303,6 +1492,7 @@ def run_mbrl(config):
                 'steps': f'{total_steps:,}',
                 'return': f'{float(avg_return):.2f}',
                 'score': f'{float(score):.2f}',
+                'sps': f'{float(sps_inst):.0f}',
                 'vq': f'{float(vqvae_loss):.3f}',
                 'twm': f'{float(twm_loss):.3f}',
                 'twm_r': f'{float(twm_loss_rew):.3f}',
@@ -1317,8 +1507,21 @@ def run_mbrl(config):
                     'twm_loss_obs': float(twm_loss_obs),
                     'twm_loss_rew': float(twm_loss_rew),
                     'twm_loss_ends': float(twm_loss_ends),
+                    'num_returned_episodes': int(num_returned),
+                    'traj_reward_mean': traj_reward_mean,
+                    'traj_done_mean': traj_done_mean,
+                    'sps_inst': sps_inst,
+                    'sps_avg': sps_avg,
+                    'update_time_sec': float(update_time_sec),
                     'buffer_size': int(buffer_count),
+                    'real_policy_updates_active': int(real_updates_active),
+                    'real_policy_update_iters': int(real_update_iters),
+                    'real_ppo_total_loss': real_policy_metrics["real_ppo_total_loss"],
+                    'real_ppo_value_loss': real_policy_metrics["real_ppo_value_loss"],
+                    'real_ppo_actor_loss': real_policy_metrics["real_ppo_actor_loss"],
+                    'real_ppo_entropy': real_policy_metrics["real_ppo_entropy"],
                     'imagination_active': imagination_started,
+                    'imagination_update_iters': int(imag_update_iters),
                     'burnin_valid_fraction': burnin_metrics["burnin_valid_fraction"],
                     'burnin_fallback_fraction': burnin_metrics["burnin_fallback_fraction"],
                     'burnin_done_in_context_fraction': burnin_metrics["burnin_done_in_context_fraction"],
@@ -1360,7 +1563,7 @@ def run_mbrl(config):
     
     # Save checkpoints
     if config["SAVE_POLICY"]:
-        save_dir = f"checkpoints/m1_mbrl_{config['ENV_NAME']}_{config['SEED']}"
+        save_dir = f"checkpoints/m3_mbrl_{config['ENV_NAME']}_{config['SEED']}"
         os.makedirs(save_dir, exist_ok=True)
         
         with open(f"{save_dir}/policy_params.pkl", 'wb') as f:
@@ -1383,7 +1586,7 @@ def run_mbrl(config):
 # =============================================================================
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="M1 MBRL for Craftax (Pure Imagination)")
+    parser = argparse.ArgumentParser(description="M3 MBRL for Craftax (Dyna + Patch-Factorized VQ-VAE)")
     
     # Environment
     parser.add_argument("--env_name", type=str, default="Craftax-Classic-Pixels-v1")
@@ -1406,11 +1609,27 @@ if __name__ == "__main__":
     # VQ-VAE / Tokenizer
     parser.add_argument("--vqvae_codebook_size", type=int, default=512)
     parser.add_argument("--vqvae_embed_dim", type=int, default=128)
+    parser.add_argument("--patch_encoder_hidden_dim", type=int, default=128,
+                        help="Hidden size of the 2-layer patch encoder MLP (paper: 128)")
+    parser.add_argument("--patch_size", type=int, default=7,
+                        help="Patch size for factorized tokenizer (paper: 7)")
+    parser.add_argument("--obs_image_size", type=int, default=63,
+                        help="Observation image size in pixels (currently must be 63 for Craftax-classic)")
+    parser.add_argument("--tokens_per_obs", type=int, default=None,
+                        help="Override number of tokens per observation (default derives from image/patch: (obs_image_size/patch_size)^2)")
+    parser.add_argument("--vqvae_lambda_l1", type=float, default=0.1,
+                        help="Weight for L1 reconstruction term (paper: 0.1)")
+    parser.add_argument("--vqvae_lambda_l2", type=float, default=1.0,
+                        help="Weight for L2 reconstruction term (paper: 1.0)")
+    parser.add_argument("--vqvae_lambda_codebook", type=float, default=1.0,
+                        help="Weight for codebook loss term (paper: 1.0)")
+    parser.add_argument("--vqvae_lambda_commitment", type=float, default=0.02,
+                        help="Weight for commitment loss term (paper: 0.02)")
     parser.add_argument("--vqvae_lr", type=float, default=0.001)
     parser.add_argument("--vqvae_batch_size", type=int, default=256)
     parser.add_argument("--use_pretrained_tokenizer", action="store_true", 
-                        help="Use pre-trained VQ-VAE tokenizer (frozen)")
-    parser.add_argument("--tokenizer_path", type=str, default="token_wm/tokenizer/vqvae_params.pkl",
+                        help="Use pre-trained patch VQ-VAE tokenizer (frozen)")
+    parser.add_argument("--tokenizer_path", type=str, default="token_wm/tokenizer/patch_vqvae_params.pkl",
                         help="Path to pre-trained tokenizer params")
     parser.add_argument("--n_iters_tok", type=int, default=500,
                         help="Number of tokenizer update iterations per step (paper: 500)")
@@ -1446,6 +1665,12 @@ if __name__ == "__main__":
                         help="Number of minibatches for imagination PPO (paper: 1)")
     parser.add_argument("--n_epoch_imagination", type=int, default=1,
                         help="Number of epochs for imagination PPO (paper: 1)")
+    parser.add_argument("--dyna_enable_real_updates", action=argparse.BooleanOptionalAction, default=True,
+                        help="Enable PPO policy updates on real environment trajectories (Dyna)")
+    parser.add_argument("--dyna_real_updates_after_bp_only", action=argparse.BooleanOptionalAction, default=False,
+                        help="If true, delay real policy updates until background_planning_start")
+    parser.add_argument("--n_iters_real_ac", type=int, default=1,
+                        help="Number of repeated real PPO updates per outer training iteration")
     parser.add_argument("--burnin_horizon", type=int, default=5,
                         help="RNN burn-in horizon for imagination rollout starts (paper: 5)")
     parser.add_argument("--burnin_oversample_factor", type=int, default=4,
@@ -1492,14 +1717,20 @@ if __name__ == "__main__":
         print(f"Warning: Unknown args: {rest}")
     
     if args.smoke_test:
-        print("\n*** SMOKE TEST MODE (with pre-trained tokenizer) ***\n")
+        print("\n*** SMOKE TEST MODE (M3 patch tokenizer) ***\n")
         args.total_timesteps = 50000
         args.num_envs = 8
         args.num_steps = 32
-        args.use_pretrained_tokenizer = True  # Use pre-trained tokenizer
-        args.n_iters_tok = 0  # Skip tokenizer training
+        if os.path.exists(args.tokenizer_path):
+            args.use_pretrained_tokenizer = True
+            args.n_iters_tok = 0
+        else:
+            print(f"Tokenizer not found at {args.tokenizer_path}; smoke test will train tokenizer briefly.")
+            args.use_pretrained_tokenizer = False
+            args.n_iters_tok = 1
         args.n_iters_twm = 5  # Reduced TWM iterations
         args.n_iters_ac = 3   # Reduced imagination iterations
+        args.n_iters_real_ac = 1
         args.n_mb_wm = 1      # Reduced minibatches
         args.background_planning_start = 5000
         args.buffer_size = 5000
