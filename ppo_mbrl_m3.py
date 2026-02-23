@@ -314,8 +314,25 @@ def make_vqvae_update_fn(vqvae, config):
         """Single VQ-VAE update step."""
         grad_fn = jax.value_and_grad(_vqvae_loss_fn, has_aux=True)
         (_, metrics), grads = grad_fn(vqvae_state.params, obs_batch)
-        vqvae_state = vqvae_state.apply_gradients(grads=grads)
-        return vqvae_state, metrics
+
+        grad_leaves = jax.tree.leaves(grads)
+        grad_is_finite = jnp.array(True, dtype=jnp.bool_)
+        for g in grad_leaves:
+            if jnp.issubdtype(g.dtype, jnp.floating):
+                grad_is_finite = jnp.logical_and(grad_is_finite, jnp.all(jnp.isfinite(g)))
+
+        metric_is_finite = jnp.array(True, dtype=jnp.bool_)
+        for v in metrics.values():
+            metric_is_finite = jnp.logical_and(metric_is_finite, jnp.all(jnp.isfinite(v)))
+
+        update_is_finite = jnp.logical_and(grad_is_finite, metric_is_finite)
+        vqvae_state = jax.lax.cond(
+            update_is_finite,
+            lambda s: s.apply_gradients(grads=grads),
+            lambda s: s,
+            vqvae_state,
+        )
+        return vqvae_state, metrics, update_is_finite
     
     return vqvae_update_single
 
@@ -1353,6 +1370,7 @@ def run_mbrl(config):
             "commitment": 0.0,
         }
         vqvae_updates = 0
+        vqvae_nonfinite_updates = 0
         if not config["USE_PRETRAINED_TOKENIZER"] and config["N_ITERS_TOK"] > 0:
             vqvae_metric_sums = {k: 0.0 for k in vqvae_metrics.keys()}
             for tok_iter in range(config["N_ITERS_TOK"]):
@@ -1363,10 +1381,13 @@ def run_mbrl(config):
                     if mb_size > 0:
                         mb_idx = jax.random.randint(sample_rng, (mb_size,), 0, int(buffer_count))
                         obs_mb = buffer_obs[mb_idx]
-                        vqvae_state, vq_metrics = vqvae_update_single(vqvae_state, obs_mb)
-                        for k in vqvae_metric_sums.keys():
-                            vqvae_metric_sums[k] += float(vq_metrics[k])
-                        vqvae_updates += 1
+                        vqvae_state, vq_metrics, update_is_finite = vqvae_update_single(vqvae_state, obs_mb)
+                        if bool(update_is_finite):
+                            for k in vqvae_metric_sums.keys():
+                                vqvae_metric_sums[k] += float(vq_metrics[k])
+                            vqvae_updates += 1
+                        else:
+                            vqvae_nonfinite_updates += 1
             if vqvae_updates > 0:
                 vqvae_metrics = {
                     k: v / float(vqvae_updates)
@@ -1525,6 +1546,7 @@ def run_mbrl(config):
                     'vqvae_loss_codebook': float(vqvae_metrics["codebook"]),
                     'vqvae_loss_commitment': float(vqvae_metrics["commitment"]),
                     'vqvae_update_steps': int(vqvae_updates),
+                    'vqvae_nonfinite_updates': int(vqvae_nonfinite_updates),
                     'twm_loss': float(twm_loss),
                     'twm_loss_obs': float(twm_loss_obs),
                     'twm_loss_rew': float(twm_loss_rew),

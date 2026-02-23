@@ -3,6 +3,11 @@ import jax.numpy as jnp
 from flax import linen as nn
 
 
+def _safe_l2_normalize(x, axis=-1, eps=1e-6):
+    denom = jnp.maximum(jnp.linalg.norm(x, axis=axis, keepdims=True), eps)
+    return x / denom
+
+
 class PatchVectorQuantizer(nn.Module):
     num_embeddings: int = 512
     embedding_dim: int = 128
@@ -16,20 +21,25 @@ class PatchVectorQuantizer(nn.Module):
 
     def __call__(self, z):
         # z: (B, L, D), one embedding per patch token.
-        z_norm = z / (jnp.linalg.norm(z, axis=-1, keepdims=True) + 1e-10)
-        emb_norm = self.embedding / (jnp.linalg.norm(self.embedding, axis=-1, keepdims=True) + 1e-10)
+        # Use normalized vectors for nearest-neighbor lookup.
+        z_lookup = _safe_l2_normalize(z)
+        emb_norm = _safe_l2_normalize(self.embedding)
 
-        b, l, d = z_norm.shape
-        z_flat = z_norm.reshape(-1, d)
+        b, l, d = z_lookup.shape
+        z_flat = z_lookup.reshape(-1, d)
 
         # Nearest-neighbor lookup via cosine distance on normalized vectors.
         dist = 2.0 - 2.0 * jnp.dot(z_flat, emb_norm.T)
         indices = jnp.argmin(dist, axis=-1)
         z_q = emb_norm[indices].reshape(b, l, d)
 
-        codebook_loss = jnp.mean((jax.lax.stop_gradient(z_norm) - z_q) ** 2)
-        commitment_loss = jnp.mean((z_norm - jax.lax.stop_gradient(z_q)) ** 2)
-        z_q_st = z_norm + jax.lax.stop_gradient(z_q - z_norm)
+        # Eq. (5)-style losses on latent space with stop-gradient.
+        codebook_loss = jnp.mean((jax.lax.stop_gradient(z) - z_q) ** 2)
+        commitment_loss = jnp.mean((z - jax.lax.stop_gradient(z_q)) ** 2)
+
+        # Straight-through estimator: forward uses quantized embedding, backward
+        # passes through the pre-quantized encoder output z.
+        z_q_st = z + jax.lax.stop_gradient(z_q - z)
         return z_q_st, codebook_loss, commitment_loss, indices.reshape(b, l)
 
 
@@ -98,7 +108,7 @@ class PatchVQVAE(nn.Module):
 
     def decode_tokens(self, tokens):
         emb = self.quantizer.embedding
-        emb_norm = emb / (jnp.linalg.norm(emb, axis=-1, keepdims=True) + 1e-10)
+        emb_norm = _safe_l2_normalize(emb)
         z_q = emb_norm[tokens]
         recon_patches = self.decoder_fc(z_q)
         return self._unpatchify(recon_patches)
