@@ -15,15 +15,13 @@ from typing import Dict, List, Tuple
 import jax
 import jax.numpy as jnp
 import numpy as np
-import flax.linen as nn
-import distrax
-from flax.linen.initializers import orthogonal
 
 from craftax.craftax_env import make_craftax_env_from_name
 from token_wm.tokenizer.patch_vqvae import PatchVQVAE
 from token_wm.twm.world_model import WorldModel
 from token_wm.twm.transformer import TransformerConfig
 from token_wm.twm.kv_caching import KeysValues
+from ppo_mbrl_m3 import ActorCriticRNN, ScannedRNN
 
 try:
     import pygame
@@ -137,108 +135,6 @@ def build_contact_sheet(rows: List[List[np.ndarray]], scale: int, gap: int, mark
             sheet[y:y + gap] = 24
             y += gap
     return sheet
-
-
-class ImpalaResBlock(nn.Module):
-    channels: int
-    groups: int = 32
-
-    @nn.compact
-    def __call__(self, x):
-        residual = x
-        x = nn.relu(x)
-        x = nn.GroupNorm(num_groups=self.groups, epsilon=1e-5)(x)
-        x = nn.Conv(self.channels, kernel_size=(3, 3), strides=(1, 1), padding="SAME")(x)
-        return x + residual
-
-
-class ImpalaStack(nn.Module):
-    channels: int
-    groups: int = 32
-
-    @nn.compact
-    def __call__(self, x):
-        x = nn.Conv(self.channels, (3, 3), strides=(1, 1), padding="SAME")(x)
-        x = nn.GroupNorm(num_groups=self.groups, epsilon=1e-5)(x)
-        x = nn.max_pool(x, window_shape=(3, 3), strides=(2, 2), padding="SAME")
-        x = ImpalaResBlock(self.channels)(x)
-        x = ImpalaResBlock(self.channels)(x)
-        return x
-
-
-class DenseResBlock(nn.Module):
-    width: int
-
-    @nn.compact
-    def __call__(self, x):
-        residual = x
-        x = nn.Dense(self.width, kernel_init=orthogonal(2))(x)
-        return x + residual
-
-
-class ScannedRNN(nn.Module):
-    @nn.compact
-    def __call__(self, carry, x):
-        ins, resets = x
-        carry = jnp.where(
-            resets[:, np.newaxis],
-            self.initialize_carry(ins.shape[0], ins.shape[1]),
-            carry,
-        )
-        new_carry, y = nn.GRUCell(features=ins.shape[1])(carry, ins)
-        return new_carry, y
-
-    @staticmethod
-    def initialize_carry(batch_size: int, hidden_size: int):
-        cell = nn.GRUCell(features=hidden_size)
-        return cell.initialize_carry(jax.random.PRNGKey(0), (batch_size, hidden_size))
-
-
-class ActorCriticRNN(nn.Module):
-    action_dim: int
-    config: Dict
-
-    @nn.compact
-    def __call__(self, hidden, x):
-        obs, dones = x
-        T, B, H, W, C = obs.shape
-        x_enc = obs.astype(jnp.float32).reshape((T * B, H, W, C))
-
-        x_enc = ImpalaStack(16)(x_enc)
-        x_enc = ImpalaStack(32)(x_enc)
-        x_enc = ImpalaStack(32)(x_enc)
-        x_enc = nn.relu(x_enc)
-        x_enc = x_enc.reshape((T * B, -1))
-        x_enc = nn.Dense(256, kernel_init=orthogonal(np.sqrt(2)))(x_enc)
-        x_enc = nn.relu(x_enc)
-
-        actor_feat, critic_feat = jnp.split(x_enc, 2, axis=-1)
-        actor_feat = actor_feat.reshape((T, B, -1))
-        critic_feat = critic_feat.reshape((T, B, -1))
-
-        rnn_in = (jnp.concatenate([actor_feat, critic_feat], axis=-1), dones)
-        h, rnn_out = ScannedRNN()(hidden, rnn_in)
-        shared = rnn_out.reshape((T * B, -1))
-
-        h_actor = nn.LayerNorm()(shared)
-        h_actor = nn.Dense(self.config["LAYER_SIZE"], kernel_init=orthogonal(2))(h_actor)
-        h_actor = nn.relu(h_actor)
-        h_actor = DenseResBlock(self.config["LAYER_SIZE"])(h_actor)
-        h_actor = DenseResBlock(self.config["LAYER_SIZE"])(h_actor)
-        h_actor = nn.relu(h_actor)
-        h_actor = nn.LayerNorm()(h_actor)
-        actor_logits = nn.Dense(self.action_dim, kernel_init=orthogonal(0.01))(h_actor)
-        pi = distrax.Categorical(logits=actor_logits)
-
-        h_critic = nn.LayerNorm()(shared)
-        h_critic = nn.Dense(self.config["LAYER_SIZE"], kernel_init=orthogonal(2))(h_critic)
-        h_critic = nn.relu(h_critic)
-        h_critic = DenseResBlock(self.config["LAYER_SIZE"])(h_critic)
-        h_critic = DenseResBlock(self.config["LAYER_SIZE"])(h_critic)
-        h_critic = nn.relu(h_critic)
-        h_critic = nn.LayerNorm()(h_critic)
-        value = nn.Dense(1, kernel_init=orthogonal(1.0))(h_critic)
-        return h, pi, jnp.squeeze(value, axis=-1)
 
 
 @dataclass
