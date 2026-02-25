@@ -235,6 +235,16 @@ class WorldModelPlayer:
             else:
                 obs_tokens = tok0[:, None]
 
+            # Keep cache aligned with training-time rollout by feeding
+            # the final observation token before the next action.
+            final_tok = obs_tokens[:, -1].reshape(1, 1)
+            _, cache = self.twm.apply(
+                self.twm_params,
+                final_tok,
+                past_keys_values=cache,
+                deterministic=True,
+            )
+
             next_obs = self.vqvae.apply(self.vqvae_params, obs_tokens, method=self.vqvae.decode_tokens)
             next_obs = next_obs[0]
 

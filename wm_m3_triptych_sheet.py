@@ -153,6 +153,7 @@ def parse_args():
     p.add_argument("--env_name", type=str, default="Craftax-Classic-Pixels-v1")
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--horizon", type=int, default=20)
+    p.add_argument("--burnin_horizon", type=int, default=5)
     p.add_argument("--scale", type=int, default=4)
     p.add_argument("--gap", type=int, default=2)
 
@@ -253,13 +254,28 @@ def make_wm_step_fn(vqvae, twm, vqvae_vars, twm_vars, args, tokens_per_obs: int)
         else:
             obs_tokens = tok0[:, None]
 
+        # Keep cache aligned with training-time rollout:
+        # feed the final observation token so next step starts at block boundary.
+        final_tok = obs_tokens[:, -1].reshape(1, 1)
+        _, cache = twm.apply(twm_vars, final_tok, past_keys_values=cache, deterministic=True)
+
         next_obs = vqvae.apply(vqvae_vars, obs_tokens, method=vqvae.decode_tokens)[0]
         return cache, next_obs, reward[0], done[0], done_prob[0], rew_cls[0], rng
 
     return step_wm
 
 
-def prime_cache(vqvae, twm, vqvae_vars, twm_vars, max_tokens: int, args, start_obs: jnp.ndarray):
+def prime_cache_with_context(
+    vqvae,
+    twm,
+    vqvae_vars,
+    twm_vars,
+    max_tokens: int,
+    args,
+    burnin_obs_seq: List[np.ndarray],
+    burnin_action_seq: List[int],
+    start_obs: jnp.ndarray,
+):
     cache = KeysValues.init(
         n=1,
         num_heads=args.twm_num_heads,
@@ -267,6 +283,16 @@ def prime_cache(vqvae, twm, vqvae_vars, twm_vars, max_tokens: int, args, start_o
         embed_dim=args.twm_embed_dim,
         num_layers=args.twm_num_layers,
     )
+
+    # Burn-in cache with (obs_t, action_t) context, matching training rollout setup.
+    for obs_np, act in zip(burnin_obs_seq, burnin_action_seq):
+        obs_t = jnp.asarray(obs_np, dtype=jnp.float32)
+        obs_tokens = vqvae.apply(vqvae_vars, obs_t[jnp.newaxis, ...], method=vqvae.encode)
+        _, cache = twm.apply(twm_vars, obs_tokens, past_keys_values=cache, deterministic=True)
+        act_tok = jnp.array([[int(act)]], dtype=jnp.int32)
+        _, cache = twm.apply(twm_vars, act_tok, past_keys_values=cache, deterministic=True)
+
+    # Feed rollout starting observation.
     obs_tokens = vqvae.apply(vqvae_vars, start_obs[jnp.newaxis, ...], method=vqvae.encode)
     _, cache = twm.apply(twm_vars, obs_tokens, past_keys_values=cache, deterministic=True)
     return cache
@@ -278,6 +304,8 @@ def main():
         raise ValueError("obs_image_size must be divisible by patch_size")
     if args.horizon <= 0:
         raise ValueError("horizon must be >= 1")
+    if args.burnin_horizon < 0:
+        raise ValueError("burnin_horizon must be >= 0")
 
     policy_params, vqvae_params, twm_params = load_params(args.checkpoint_dir)
     policy_vars = ensure_apply_vars(policy_params)
@@ -333,18 +361,57 @@ def main():
 
     # Initial states.
     h_real = ScannedRNN.initialize_carry(1, 256)
-    h_open = ScannedRNN.initialize_carry(1, 256)
     real_done = jnp.array([False])
-    open_done = jnp.array([False])
+
+    # Burn-in phase from real environment to match training-time context usage.
+    burnin_obs_seq: List[np.ndarray] = []
+    burnin_action_seq: List[int] = []
+    burnin_done_seq: List[bool] = []
+    for _ in range(args.burnin_horizon):
+        burnin_obs_seq.append(np.asarray(real_obs))
+        burnin_done_seq.append(bool(np.asarray(real_done[0])))
+
+        rng, pol_rng = jax.random.split(rng)
+        h_real, action_burn = select_action(
+            network,
+            policy_vars,
+            h_real,
+            real_obs[jnp.newaxis, ...],
+            real_done,
+            pol_rng,
+            args.policy_greedy,
+        )
+        action_burn = int(np.clip(action_burn, 0, num_actions - 1))
+        burnin_action_seq.append(action_burn)
+
+        rng, step_rng = jax.random.split(rng)
+        next_obs, env_state, _r, d, _info = env.step(step_rng, env_state, jnp.array(action_burn, dtype=jnp.int32), env_params)
+        if bool(d):
+            rng, r = jax.random.split(rng)
+            next_obs, env_state = env.reset(r, env_params)
+        real_obs = jnp.asarray(next_obs, dtype=jnp.float32)
+        real_done = jnp.array([bool(d)])
+
+    # Open-loop policy hidden state receives same burn-in observation/done context.
+    h_open = ScannedRNN.initialize_carry(1, 256)
+    if args.burnin_horizon > 0:
+        burn_obs_t = jnp.asarray(np.stack(burnin_obs_seq, axis=0), dtype=jnp.float32)[:, jnp.newaxis, ...]
+        burn_done_t = jnp.asarray(np.array(burnin_done_seq), dtype=bool)[:, jnp.newaxis]
+        h_open, _, _ = network.apply(policy_vars, h_open, (burn_obs_t, burn_done_t))
+    open_done = real_done
 
     wm_teacher = WMState(
-        cache=prime_cache(vqvae, twm, vqvae_vars, twm_vars, max_tokens, args, real_obs),
+        cache=prime_cache_with_context(
+            vqvae, twm, vqvae_vars, twm_vars, max_tokens, args, burnin_obs_seq, burnin_action_seq, real_obs
+        ),
         obs=real_obs,
         done=jnp.array(0.0),
         rng=jax.random.PRNGKey(args.seed + 11),
     )
     wm_open = WMState(
-        cache=prime_cache(vqvae, twm, vqvae_vars, twm_vars, max_tokens, args, real_obs),
+        cache=prime_cache_with_context(
+            vqvae, twm, vqvae_vars, twm_vars, max_tokens, args, burnin_obs_seq, burnin_action_seq, real_obs
+        ),
         obs=real_obs,
         done=jnp.array(0.0),
         rng=jax.random.PRNGKey(args.seed + 29),
@@ -356,6 +423,7 @@ def main():
 
     log_lines = []
     log_lines.append("row0=real_env, row1=wm_teacher_forced, row2=wm_open_loop")
+    log_lines.append(f"burnin_horizon={args.burnin_horizon}")
     log_lines.append("t,real_action,real_reward,real_done,wm_tf_reward,wm_tf_done_prob,wm_tf_done,wm_open_action,wm_open_reward,wm_open_done_prob,wm_open_done")
 
     for t in range(args.horizon):
