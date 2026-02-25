@@ -64,6 +64,21 @@ def to_jax_tree(tree):
     )
 
 
+def ensure_apply_vars(params_or_vars):
+    """
+    Normalize checkpoint payload to Flax apply vars dict: {"params": ...}.
+    Handles both saved formats:
+      1) raw params pytree
+      2) already-wrapped {"params": ...}
+    """
+    obj = params_or_vars
+    if hasattr(obj, "keys"):
+        keys = list(obj.keys())
+        if keys == ["params"] or set(keys) == {"params"}:
+            return obj
+    return {"params": obj}
+
+
 def to_uint8_frame(obs: np.ndarray) -> np.ndarray:
     x = np.asarray(obs)
     if x.dtype != np.uint8:
@@ -283,13 +298,9 @@ def load_params(ckpt_dir: str):
     return to_jax_tree(policy), to_jax_tree(vq), to_jax_tree(twm)
 
 
-def select_action(network, policy_params, hstate, obs_batched, done_batched, rng, greedy: bool):
+def select_action(network, policy_vars, hstate, obs_batched, done_batched, rng, greedy: bool):
     # obs_batched: (1,63,63,3), done_batched: (1,)
-    hstate, pi, _ = network.apply(
-        {"params": policy_params},
-        hstate,
-        (obs_batched[jnp.newaxis, :], done_batched[jnp.newaxis, :]),
-    )
+    hstate, pi, _ = network.apply(policy_vars, hstate, (obs_batched[jnp.newaxis, :], done_batched[jnp.newaxis, :]))
     if greedy:
         action = pi.mode().squeeze(0)
     else:
@@ -297,7 +308,7 @@ def select_action(network, policy_params, hstate, obs_batched, done_batched, rng
     return hstate, int(np.asarray(action[0]))
 
 
-def make_wm_step_fn(vqvae, twm, vqvae_params, twm_params, args, tokens_per_obs: int):
+def make_wm_step_fn(vqvae, twm, vqvae_vars, twm_vars, args, tokens_per_obs: int):
     temperature = float(args.wm_temperature)
     use_binary = bool(args.use_binary_reward_target)
     wm_greedy = bool(args.wm_greedy)
@@ -315,7 +326,7 @@ def make_wm_step_fn(vqvae, twm, vqvae_params, twm_params, args, tokens_per_obs: 
     def step_wm(cache: KeysValues, action_id: jnp.ndarray, rng: jnp.ndarray):
         rng, rew_rng, done_rng, tok_rng = jax.random.split(rng, 4)
         act = action_id.reshape(1, 1).astype(jnp.int32)
-        output, cache = twm.apply({"params": twm_params}, act, past_keys_values=cache, deterministic=True)
+        output, cache = twm.apply(twm_vars, act, past_keys_values=cache, deterministic=True)
 
         rew_logits = output.logits_rewards[:, -1, :]
         rew_cls = sample_tok(rew_logits, rew_rng)
@@ -335,7 +346,7 @@ def make_wm_step_fn(vqvae, twm, vqvae_params, twm_params, args, tokens_per_obs: 
             def _scan(carry, _):
                 cache_scan, prev_tok, rng_scan = carry
                 inp = prev_tok.reshape(1, 1)
-                out, cache_scan = twm.apply({"params": twm_params}, inp, past_keys_values=cache_scan, deterministic=True)
+                out, cache_scan = twm.apply(twm_vars, inp, past_keys_values=cache_scan, deterministic=True)
                 rng_scan, tr = jax.random.split(rng_scan)
                 nt = sample_tok(out.logits_observations[:, -1, :], tr)
                 return (cache_scan, nt, rng_scan), nt
@@ -346,13 +357,13 @@ def make_wm_step_fn(vqvae, twm, vqvae_params, twm_params, args, tokens_per_obs: 
         else:
             obs_tokens = tok0[:, None]
 
-        next_obs = vqvae.apply({"params": vqvae_params}, obs_tokens, method=vqvae.decode_tokens)[0]
+        next_obs = vqvae.apply(vqvae_vars, obs_tokens, method=vqvae.decode_tokens)[0]
         return cache, next_obs, reward[0], done[0], done_prob[0], rew_cls[0], rng
 
     return step_wm
 
 
-def prime_cache(vqvae, twm, vqvae_params, twm_params, max_tokens: int, args, start_obs: jnp.ndarray):
+def prime_cache(vqvae, twm, vqvae_vars, twm_vars, max_tokens: int, args, start_obs: jnp.ndarray):
     cache = KeysValues.init(
         n=1,
         num_heads=args.twm_num_heads,
@@ -360,8 +371,8 @@ def prime_cache(vqvae, twm, vqvae_params, twm_params, max_tokens: int, args, sta
         embed_dim=args.twm_embed_dim,
         num_layers=args.twm_num_layers,
     )
-    obs_tokens = vqvae.apply({"params": vqvae_params}, start_obs[jnp.newaxis, ...], method=vqvae.encode)
-    _, cache = twm.apply({"params": twm_params}, obs_tokens, past_keys_values=cache, deterministic=True)
+    obs_tokens = vqvae.apply(vqvae_vars, start_obs[jnp.newaxis, ...], method=vqvae.encode)
+    _, cache = twm.apply(twm_vars, obs_tokens, past_keys_values=cache, deterministic=True)
     return cache
 
 
@@ -373,6 +384,9 @@ def main():
         raise ValueError("horizon must be >= 1")
 
     policy_params, vqvae_params, twm_params = load_params(args.checkpoint_dir)
+    policy_vars = ensure_apply_vars(policy_params)
+    vqvae_vars = ensure_apply_vars(vqvae_params)
+    twm_vars = ensure_apply_vars(twm_params)
 
     env = make_craftax_env_from_name(args.env_name, True)
     env_params = env.default_params
@@ -413,7 +427,7 @@ def main():
     )
 
     max_tokens = args.play_max_blocks * tokens_per_block
-    wm_step = make_wm_step_fn(vqvae, twm, vqvae_params, twm_params, args, tokens_per_obs)
+    wm_step = make_wm_step_fn(vqvae, twm, vqvae_vars, twm_vars, args, tokens_per_obs)
 
     # Initial real observation.
     rng = jax.random.PRNGKey(args.seed)
@@ -428,13 +442,13 @@ def main():
     open_done = jnp.array([False])
 
     wm_teacher = WMState(
-        cache=prime_cache(vqvae, twm, vqvae_params, twm_params, max_tokens, args, real_obs),
+        cache=prime_cache(vqvae, twm, vqvae_vars, twm_vars, max_tokens, args, real_obs),
         obs=real_obs,
         done=jnp.array(0.0),
         rng=jax.random.PRNGKey(args.seed + 11),
     )
     wm_open = WMState(
-        cache=prime_cache(vqvae, twm, vqvae_params, twm_params, max_tokens, args, real_obs),
+        cache=prime_cache(vqvae, twm, vqvae_vars, twm_vars, max_tokens, args, real_obs),
         obs=real_obs,
         done=jnp.array(0.0),
         rng=jax.random.PRNGKey(args.seed + 29),
@@ -451,7 +465,7 @@ def main():
     for t in range(args.horizon):
         # Real policy action on real observation.
         rng, pol_rng = jax.random.split(rng)
-        h_real, action_real = select_action(network, policy_params, h_real, real_obs[jnp.newaxis, ...], real_done, pol_rng, args.policy_greedy)
+        h_real, action_real = select_action(network, policy_vars, h_real, real_obs[jnp.newaxis, ...], real_done, pol_rng, args.policy_greedy)
         action_real = int(np.clip(action_real, 0, num_actions - 1))
 
         # Real env transition.
@@ -480,7 +494,7 @@ def main():
         rng, pol_open_rng = jax.random.split(rng)
         h_open, action_open = select_action(
             network,
-            policy_params,
+            policy_vars,
             h_open,
             wm_open.obs[jnp.newaxis, ...],
             jnp.array([bool(float(np.asarray(wm_open.done)) >= 0.5)]),
@@ -530,4 +544,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
