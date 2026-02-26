@@ -134,9 +134,11 @@ def build_contact_sheet(rows: List[List[np.ndarray]], scale: int, gap: int, mark
         if ridx == 0:
             marker[:] = np.array([220, 60, 60], dtype=np.uint8)   # red-ish: real
         elif ridx == 1:
-            marker[:] = np.array([60, 220, 120], dtype=np.uint8)  # green-ish: teacher WM
+            marker[:] = np.array([60, 220, 120], dtype=np.uint8)  # green-ish: tokenizer recon / teacher WM
+        elif ridx == 2:
+            marker[:] = np.array([70, 130, 240], dtype=np.uint8)  # blue-ish: teacher WM / open-loop WM
         else:
-            marker[:] = np.array([70, 130, 240], dtype=np.uint8)  # blue-ish: open-loop WM
+            marker[:] = np.array([240, 170, 70], dtype=np.uint8)  # orange-ish: open-loop WM when 4th row exists
         row = np.concatenate([marker, np.full((h, gap, 3), 20, dtype=np.uint8), row], axis=1)
         row_imgs.append(row)
 
@@ -220,6 +222,14 @@ class WMState:
     rng: jnp.ndarray
 
 
+def batch_tokenizer_recon(vqvae, vqvae_vars, frames: List[np.ndarray]) -> np.ndarray:
+    """Encode/decode a list of frames using tokenizer only."""
+    arr = jnp.asarray(np.stack(frames, axis=0), dtype=jnp.float32)
+    tok = vqvae.apply(vqvae_vars, arr, method=vqvae.encode)
+    recon = vqvae.apply(vqvae_vars, tok, method=vqvae.decode_tokens)
+    return np.asarray(recon)
+
+
 def parse_args():
     p = argparse.ArgumentParser(description="Create M3 WM triptych PNG sheet.")
     p.add_argument("--checkpoint_dir", type=str, required=True)
@@ -234,6 +244,7 @@ def parse_args():
     p.add_argument("--annotate_actions", action=argparse.BooleanOptionalAction, default=True)
     p.add_argument("--annotate_action_ids", action=argparse.BooleanOptionalAction, default=True)
     p.add_argument("--action_font_size", type=int, default=14)
+    p.add_argument("--include_tokenizer_recon_row", action=argparse.BooleanOptionalAction, default=True)
     p.add_argument("--debug_wm", action=argparse.BooleanOptionalAction, default=False)
     p.add_argument("--debug_print_every", type=int, default=1)
     p.add_argument("--black_pixel_threshold", type=int, default=5)
@@ -502,6 +513,9 @@ def main():
     )
 
     real_frames = [np.asarray(real_obs)]
+    real_tok0 = vqvae.apply(vqvae_vars, real_obs[jnp.newaxis, ...], method=vqvae.encode)
+    real_recon0 = vqvae.apply(vqvae_vars, real_tok0, method=vqvae.decode_tokens)[0]
+    tokenizer_recon_frames = [np.asarray(real_recon0)]
     wm_teacher_frames = [np.asarray(real_obs)]
     wm_open_frames = [np.asarray(real_obs)]
     teacher_action_names: List[str] = []
@@ -510,10 +524,14 @@ def main():
     warned_open_black = False
 
     log_lines = []
-    log_lines.append("row0=real_env, row1=wm_teacher_forced, row2=wm_open_loop")
+    if args.include_tokenizer_recon_row:
+        log_lines.append("row0=real_env, row1=tokenizer_recon_on_real, row2=wm_teacher_forced, row3=wm_open_loop")
+    else:
+        log_lines.append("row0=real_env, row1=wm_teacher_forced, row2=wm_open_loop")
     log_lines.append(f"burnin_horizon={args.burnin_horizon}")
     log_lines.append(
-        "t,real_action,real_reward,real_done,wm_tf_reward,wm_tf_done_prob,wm_tf_done,wm_tf_obs_min,wm_tf_obs_max,wm_tf_obs_mean,wm_tf_obs_std,wm_tf_black_frac,"
+        "t,real_action,real_reward,real_done,recon_mae_vs_real,wm_tf_mae_vs_real,"
+        "wm_tf_reward,wm_tf_done_prob,wm_tf_done,wm_tf_obs_min,wm_tf_obs_max,wm_tf_obs_mean,wm_tf_obs_std,wm_tf_black_frac,"
         "wm_open_action,wm_open_reward,wm_open_done_prob,wm_open_done,wm_open_obs_min,wm_open_obs_max,wm_open_obs_mean,wm_open_obs_std,wm_open_black_frac"
     )
 
@@ -530,8 +548,15 @@ def main():
         rng, step_rng = jax.random.split(rng)
         next_real_obs, env_state, real_reward, real_done_scalar, _info = env.step(step_rng, env_state, jnp.array(action_real, dtype=jnp.int32), env_params)
         real_frames.append(np.asarray(next_real_obs))
+        next_real_obs_f = jnp.asarray(next_real_obs, dtype=jnp.float32)
         real_reward_f = float(np.asarray(real_reward))
         real_done_f = float(np.asarray(real_done_scalar))
+
+        # Tokenizer-only reconstruction error on the same real frame.
+        real_tok = vqvae.apply(vqvae_vars, next_real_obs_f[jnp.newaxis, ...], method=vqvae.encode)
+        real_recon = vqvae.apply(vqvae_vars, real_tok, method=vqvae.decode_tokens)[0]
+        tokenizer_recon_frames.append(np.asarray(real_recon))
+        recon_mae = float(jnp.mean(jnp.abs(real_recon - next_real_obs_f)))
 
         if bool(real_done_scalar):
             rng, r = jax.random.split(rng)
@@ -547,6 +572,7 @@ def main():
         wm_teacher.obs = obs_tf
         wm_teacher.done = done_tf
         wm_teacher_frames.append(np.asarray(obs_tf))
+        wm_tf_mae = float(jnp.mean(jnp.abs(obs_tf - next_real_obs_f)))
 
         # WM open-loop: policy action on WM observation.
         rng, pol_open_rng = jax.random.split(rng)
@@ -590,7 +616,7 @@ def main():
                 warned_open_black = True
 
         log_lines.append(
-            f"{t},{action_real_name}({action_real}),{real_reward_f:.3f},{int(real_done_f)},"
+            f"{t},{action_real_name}({action_real}),{real_reward_f:.3f},{int(real_done_f)},{recon_mae:.6f},{wm_tf_mae:.6f},"
             f"{float(np.asarray(rew_tf)):.3f},{float(np.asarray(done_prob_tf)):.3f},{int(float(np.asarray(done_tf)) >= 0.5)},"
             f"{tf_stats['min']:.6f},{tf_stats['max']:.6f},{tf_stats['mean']:.6f},{tf_stats['std']:.6f},{tf_stats['black_frac']:.6f},"
             f"{action_open_name}({action_open}),{float(np.asarray(rew_open)):.3f},{float(np.asarray(done_prob_open)):.3f},{int(float(np.asarray(done_open)) >= 0.5)},"
@@ -598,8 +624,12 @@ def main():
         )
 
     marker_w = 14
+    rows = [real_frames]
+    if args.include_tokenizer_recon_row:
+        rows.append(tokenizer_recon_frames)
+    rows.extend([wm_teacher_frames, wm_open_frames])
     sheet = build_contact_sheet(
-        [real_frames, wm_teacher_frames, wm_open_frames],
+        rows,
         scale=args.scale,
         gap=args.gap,
         marker_w=marker_w,
@@ -638,7 +668,10 @@ def main():
 
     print(f"Saved sheet: {args.output_png}")
     print(f"Saved metadata: {out_meta}")
-    print("Row legend: red=real env, green=WM teacher-forced, blue=WM open-loop")
+    if args.include_tokenizer_recon_row:
+        print("Row legend: row0=real env, row1=tokenizer recon, row2=WM teacher-forced, row3=WM open-loop")
+    else:
+        print("Row legend: row0=real env, row1=WM teacher-forced, row2=WM open-loop")
 
 
 if __name__ == "__main__":
