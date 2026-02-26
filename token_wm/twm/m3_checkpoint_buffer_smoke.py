@@ -47,6 +47,13 @@ def _load_pickle_maybe_gz(base_path):
     raise FileNotFoundError(f"Could not find {base_path} or {gz_path}")
 
 
+def _load_pickle_maybe_gz_optional(base_path):
+    try:
+        return _load_pickle_maybe_gz(base_path)
+    except FileNotFoundError:
+        return None
+
+
 def _to_jax(tree):
     return jax.tree.map(
         lambda x: jnp.asarray(x) if isinstance(x, (np.ndarray, np.generic)) else x,
@@ -140,8 +147,10 @@ def main():
     policy_params = _to_jax(_load_pickle_maybe_gz(os.path.join(ckpt, "policy_params.pkl")))
     vqvae_params = _to_jax(_load_pickle_maybe_gz(os.path.join(ckpt, "vqvae_params.pkl")))
     twm_params = _to_jax(_load_pickle_maybe_gz(os.path.join(ckpt, "twm_params.pkl")))
-    vqvae_opt_state = _to_jax(_load_pickle_maybe_gz(os.path.join(ckpt, "vqvae_opt_state.pkl")))
-    twm_opt_state = _to_jax(_load_pickle_maybe_gz(os.path.join(ckpt, "twm_opt_state.pkl")))
+    vqvae_opt_state_raw = _load_pickle_maybe_gz_optional(os.path.join(ckpt, "vqvae_opt_state.pkl"))
+    twm_opt_state_raw = _load_pickle_maybe_gz_optional(os.path.join(ckpt, "twm_opt_state.pkl"))
+    vqvae_opt_state = _to_jax(vqvae_opt_state_raw) if vqvae_opt_state_raw is not None else None
+    twm_opt_state = _to_jax(twm_opt_state_raw) if twm_opt_state_raw is not None else None
     flat_buffer = _to_jax(_load_pickle_maybe_gz(os.path.join(ckpt, "flat_buffer.pkl")))
     fbx_state = _to_jax(_load_pickle_maybe_gz(os.path.join(ckpt, "fbx_buffer.pkl")))
 
@@ -182,12 +191,16 @@ def main():
         optax.clip_by_global_norm(cfg["TWM_MAX_GRAD_NORM"]),
         optax.adam(cfg["TWM_LR"]),
     )
-    vqvae_state = TrainState.create(apply_fn=vqvae.apply, params=vqvae_params, tx=vq_tx).replace(
-        opt_state=vqvae_opt_state
-    )
-    twm_state = TrainState.create(apply_fn=twm.apply, params=twm_params, tx=twm_tx).replace(
-        opt_state=twm_opt_state
-    )
+    vqvae_state = TrainState.create(apply_fn=vqvae.apply, params=vqvae_params, tx=vq_tx)
+    twm_state = TrainState.create(apply_fn=twm.apply, params=twm_params, tx=twm_tx)
+    if vqvae_opt_state is not None:
+        vqvae_state = vqvae_state.replace(opt_state=vqvae_opt_state)
+    else:
+        print("Info: vqvae_opt_state not found in checkpoint; using freshly initialized optimizer state.")
+    if twm_opt_state is not None:
+        twm_state = twm_state.replace(opt_state=twm_opt_state)
+    else:
+        print("Info: twm_opt_state not found in checkpoint; using freshly initialized optimizer state.")
 
     vq_update = make_vqvae_update_fn(vqvae, cfg)
     twm_update = make_twm_update_fn(twm, vqvae, cfg)
