@@ -49,9 +49,21 @@ ACTION_ORDER = [
 ]
 
 
-def action_name(aid: int) -> str:
-    if 0 <= aid < len(ACTION_ORDER):
-        return ACTION_ORDER[aid]
+def get_action_names(num_actions: int) -> List[str]:
+    # Prefer ground-truth enum names from Craftax when available.
+    try:
+        from craftax.craftax.constants import Action as CraftaxAction  # type: ignore
+
+        enum_map = {int(a.value): str(a.name).lower() for a in CraftaxAction}
+        return [enum_map.get(i, f"action_{i}") for i in range(num_actions)]
+    except Exception:
+        names = [ACTION_ORDER[i] if i < len(ACTION_ORDER) else f"action_{i}" for i in range(num_actions)]
+        return names
+
+
+def action_name(aid: int, action_names: List[str]) -> str:
+    if 0 <= aid < len(action_names):
+        return action_names[aid]
     return f"action_{aid}"
 
 
@@ -220,6 +232,7 @@ def parse_args():
     p.add_argument("--scale", type=int, default=4)
     p.add_argument("--gap", type=int, default=2)
     p.add_argument("--annotate_actions", action=argparse.BooleanOptionalAction, default=True)
+    p.add_argument("--annotate_action_ids", action=argparse.BooleanOptionalAction, default=True)
     p.add_argument("--action_font_size", type=int, default=14)
     p.add_argument("--debug_wm", action=argparse.BooleanOptionalAction, default=False)
     p.add_argument("--debug_print_every", type=int, default=1)
@@ -384,6 +397,9 @@ def main():
     env_params = env.default_params
     num_actions = int(env.action_space(env_params).n)
     print(f"Loaded env with {num_actions} actions.")
+    action_names = get_action_names(num_actions)
+    print("Action id mapping:")
+    print("  " + ", ".join(f"{i}:{name}" for i, name in enumerate(action_names)))
 
     network = ActorCriticRNN(num_actions, config={"LAYER_SIZE": args.layer_size})
     vqvae = PatchVQVAE(
@@ -506,8 +522,9 @@ def main():
         rng, pol_rng = jax.random.split(rng)
         h_real, action_real = select_action(network, policy_vars, h_real, real_obs[jnp.newaxis, ...], real_done, pol_rng, args.policy_greedy)
         action_real = int(np.clip(action_real, 0, num_actions - 1))
-        action_real_name = action_name(action_real)
-        teacher_action_names.append(action_real_name)
+        action_real_name = action_name(action_real, action_names)
+        action_real_label = f"{action_real_name}[{action_real}]" if args.annotate_action_ids else action_real_name
+        teacher_action_names.append(action_real_label)
 
         # Real env transition.
         rng, step_rng = jax.random.split(rng)
@@ -543,8 +560,9 @@ def main():
             args.policy_greedy,
         )
         action_open = int(np.clip(action_open, 0, num_actions - 1))
-        action_open_name = action_name(action_open)
-        open_action_names.append(action_open_name)
+        action_open_name = action_name(action_open, action_names)
+        action_open_label = f"{action_open_name}[{action_open}]" if args.annotate_action_ids else action_open_name
+        open_action_names.append(action_open_label)
         aid_open = jnp.array(action_open, dtype=jnp.int32)
         wm_open.cache, obs_open, rew_open, done_open, done_prob_open, _rc_open, wm_open.rng = wm_step(
             wm_open.cache, aid_open, wm_open.rng
