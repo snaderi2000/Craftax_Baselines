@@ -137,6 +137,65 @@ def build_contact_sheet(rows: List[List[np.ndarray]], scale: int, gap: int, mark
     return sheet
 
 
+def summarize_frame(obs: np.ndarray, black_pixel_threshold: int) -> Dict[str, float]:
+    f = np.asarray(obs, dtype=np.float32)
+    u8 = to_uint8_frame(f)
+    return {
+        "min": float(np.min(f)),
+        "max": float(np.max(f)),
+        "mean": float(np.mean(f)),
+        "std": float(np.std(f)),
+        "black_frac": float(np.mean(u8 <= np.uint8(black_pixel_threshold))),
+    }
+
+
+def add_action_tracks(
+    sheet: np.ndarray,
+    teacher_actions: List[str],
+    open_actions: List[str],
+    frame_w: int,
+    gap: int,
+    marker_w: int,
+    font_size: int,
+) -> "pygame.Surface":
+    # pygame must be initialized by caller.
+    base = pygame.surfarray.make_surface(np.swapaxes(sheet, 0, 1))
+    sw, sh = base.get_size()
+    top_pad = max(22, font_size + 8)
+    bot_pad = max(22, font_size + 8)
+    canvas = pygame.Surface((sw, sh + top_pad + bot_pad))
+    canvas.fill((10, 10, 14))
+    canvas.blit(base, (0, top_pad))
+
+    font = pygame.font.SysFont("monospace", font_size)
+    hdr_font = pygame.font.SysFont("monospace", max(12, font_size - 1), bold=True)
+
+    teacher_hdr = hdr_font.render("Teacher-forced actions (real env actions):", True, (140, 230, 160))
+    open_hdr = hdr_font.render("Open-loop actions (policy on WM obs):", True, (120, 170, 250))
+    canvas.blit(teacher_hdr, (6, 2))
+    canvas.blit(open_hdr, (6, top_pad + sh + 2))
+
+    x0 = marker_w + gap
+
+    # Label the first frame as start.
+    start_txt = font.render("start", True, (200, 200, 200))
+    x_start = x0 + frame_w // 2 - start_txt.get_width() // 2
+    canvas.blit(start_txt, (x_start, top_pad - start_txt.get_height()))
+    canvas.blit(start_txt, (x_start, top_pad + sh + 2))
+
+    for i, act in enumerate(teacher_actions, start=1):
+        x_center = x0 + i * (frame_w + gap) + frame_w // 2
+        txt = font.render(act, True, (220, 255, 230))
+        canvas.blit(txt, (x_center - txt.get_width() // 2, top_pad - txt.get_height()))
+
+    for i, act in enumerate(open_actions, start=1):
+        x_center = x0 + i * (frame_w + gap) + frame_w // 2
+        txt = font.render(act, True, (210, 230, 255))
+        canvas.blit(txt, (x_center - txt.get_width() // 2, top_pad + sh + 2))
+
+    return canvas
+
+
 @dataclass
 class WMState:
     cache: KeysValues
@@ -156,6 +215,11 @@ def parse_args():
     p.add_argument("--burnin_horizon", type=int, default=5)
     p.add_argument("--scale", type=int, default=4)
     p.add_argument("--gap", type=int, default=2)
+    p.add_argument("--annotate_actions", action=argparse.BooleanOptionalAction, default=True)
+    p.add_argument("--action_font_size", type=int, default=14)
+    p.add_argument("--debug_wm", action=argparse.BooleanOptionalAction, default=False)
+    p.add_argument("--debug_print_every", type=int, default=1)
+    p.add_argument("--black_pixel_threshold", type=int, default=5)
 
     p.add_argument("--policy_greedy", action=argparse.BooleanOptionalAction, default=False)
     p.add_argument("--wm_greedy", action=argparse.BooleanOptionalAction, default=False)
@@ -420,17 +484,26 @@ def main():
     real_frames = [np.asarray(real_obs)]
     wm_teacher_frames = [np.asarray(real_obs)]
     wm_open_frames = [np.asarray(real_obs)]
+    teacher_action_names: List[str] = []
+    open_action_names: List[str] = []
+    warned_tf_black = False
+    warned_open_black = False
 
     log_lines = []
     log_lines.append("row0=real_env, row1=wm_teacher_forced, row2=wm_open_loop")
     log_lines.append(f"burnin_horizon={args.burnin_horizon}")
-    log_lines.append("t,real_action,real_reward,real_done,wm_tf_reward,wm_tf_done_prob,wm_tf_done,wm_open_action,wm_open_reward,wm_open_done_prob,wm_open_done")
+    log_lines.append(
+        "t,real_action,real_reward,real_done,wm_tf_reward,wm_tf_done_prob,wm_tf_done,wm_tf_obs_min,wm_tf_obs_max,wm_tf_obs_mean,wm_tf_obs_std,wm_tf_black_frac,"
+        "wm_open_action,wm_open_reward,wm_open_done_prob,wm_open_done,wm_open_obs_min,wm_open_obs_max,wm_open_obs_mean,wm_open_obs_std,wm_open_black_frac"
+    )
 
     for t in range(args.horizon):
         # Real policy action on real observation.
         rng, pol_rng = jax.random.split(rng)
         h_real, action_real = select_action(network, policy_vars, h_real, real_obs[jnp.newaxis, ...], real_done, pol_rng, args.policy_greedy)
         action_real = int(np.clip(action_real, 0, num_actions - 1))
+        action_real_name = action_name(action_real)
+        teacher_action_names.append(action_real_name)
 
         # Real env transition.
         rng, step_rng = jax.random.split(rng)
@@ -466,6 +539,8 @@ def main():
             args.policy_greedy,
         )
         action_open = int(np.clip(action_open, 0, num_actions - 1))
+        action_open_name = action_name(action_open)
+        open_action_names.append(action_open_name)
         aid_open = jnp.array(action_open, dtype=jnp.int32)
         wm_open.cache, obs_open, rew_open, done_open, done_prob_open, _rc_open, wm_open.rng = wm_step(
             wm_open.cache, aid_open, wm_open.rng
@@ -474,19 +549,57 @@ def main():
         wm_open.done = done_open
         wm_open_frames.append(np.asarray(obs_open))
 
+        tf_stats = summarize_frame(np.asarray(obs_tf), args.black_pixel_threshold)
+        open_stats = summarize_frame(np.asarray(obs_open), args.black_pixel_threshold)
+
+        if args.debug_wm:
+            should_print = (t % max(1, args.debug_print_every) == 0)
+            if should_print:
+                print(
+                    f"[t={t:02d}] tf_black={tf_stats['black_frac']:.3f} tf_minmax=({tf_stats['min']:.4f},{tf_stats['max']:.4f}) "
+                    f"open_black={open_stats['black_frac']:.3f} open_minmax=({open_stats['min']:.4f},{open_stats['max']:.4f}) "
+                    f"tf_done_p={float(np.asarray(done_prob_tf)):.3f} open_done_p={float(np.asarray(done_prob_open)):.3f}"
+                )
+            if (not warned_tf_black) and tf_stats["black_frac"] > 0.98:
+                print(f"[warn] teacher-forced frame nearly black at t={t}")
+                warned_tf_black = True
+            if (not warned_open_black) and open_stats["black_frac"] > 0.98:
+                print(f"[warn] open-loop frame nearly black at t={t}")
+                warned_open_black = True
+
         log_lines.append(
-            f"{t},{action_name(action_real)}({action_real}),{real_reward_f:.3f},{int(real_done_f)},"
+            f"{t},{action_real_name}({action_real}),{real_reward_f:.3f},{int(real_done_f)},"
             f"{float(np.asarray(rew_tf)):.3f},{float(np.asarray(done_prob_tf)):.3f},{int(float(np.asarray(done_tf)) >= 0.5)},"
-            f"{action_name(action_open)}({action_open}),{float(np.asarray(rew_open)):.3f},{float(np.asarray(done_prob_open)):.3f},{int(float(np.asarray(done_open)) >= 0.5)}"
+            f"{tf_stats['min']:.6f},{tf_stats['max']:.6f},{tf_stats['mean']:.6f},{tf_stats['std']:.6f},{tf_stats['black_frac']:.6f},"
+            f"{action_open_name}({action_open}),{float(np.asarray(rew_open)):.3f},{float(np.asarray(done_prob_open)):.3f},{int(float(np.asarray(done_open)) >= 0.5)},"
+            f"{open_stats['min']:.6f},{open_stats['max']:.6f},{open_stats['mean']:.6f},{open_stats['std']:.6f},{open_stats['black_frac']:.6f}"
         )
 
-    sheet = build_contact_sheet([real_frames, wm_teacher_frames, wm_open_frames], scale=args.scale, gap=args.gap)
+    marker_w = 14
+    sheet = build_contact_sheet(
+        [real_frames, wm_teacher_frames, wm_open_frames],
+        scale=args.scale,
+        gap=args.gap,
+        marker_w=marker_w,
+    )
 
     if "DISPLAY" not in os.environ:
         os.environ.setdefault("SDL_VIDEODRIVER", "dummy")
     pygame.init()
     try:
-        surf = pygame.surfarray.make_surface(np.swapaxes(sheet, 0, 1))
+        if args.annotate_actions:
+            frame_w = int(real_frames[0].shape[1]) * int(args.scale)
+            surf = add_action_tracks(
+                sheet,
+                teacher_actions=teacher_action_names,
+                open_actions=open_action_names,
+                frame_w=frame_w,
+                gap=args.gap,
+                marker_w=marker_w,
+                font_size=args.action_font_size,
+            )
+        else:
+            surf = pygame.surfarray.make_surface(np.swapaxes(sheet, 0, 1))
         out_dir = os.path.dirname(args.output_png)
         if out_dir:
             os.makedirs(out_dir, exist_ok=True)
