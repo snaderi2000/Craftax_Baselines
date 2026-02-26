@@ -81,9 +81,13 @@ def to_uint8_frame(obs: np.ndarray) -> np.ndarray:
     x = np.asarray(obs)
     if x.dtype != np.uint8:
         x = x.astype(np.float32)
-        if float(np.nanmax(x)) <= 1.0 + 1e-6:
-            x = x * 255.0
         x = np.nan_to_num(x, nan=0.0, posinf=255.0, neginf=0.0)
+        x_min = float(np.nanmin(x))
+        x_max = float(np.nanmax(x))
+        # Decoder outputs are often slightly outside [0,1], e.g. [-0.06, 1.09].
+        # Treat those as normalized images for rendering.
+        if np.isfinite(x_min) and np.isfinite(x_max) and x_max <= 2.0 and x_min >= -1.0:
+            x = np.clip(x, 0.0, 1.0) * 255.0
         x = np.clip(x, 0.0, 255.0).astype(np.uint8)
     return x
 
