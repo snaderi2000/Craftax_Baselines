@@ -96,6 +96,10 @@ def main():
     p.add_argument("--checkpoint_dir", type=str, required=True)
     p.add_argument("--output_dir", type=str, default="checkpoints/smoke_m3")
     p.add_argument("--seed", type=int, default=0)
+    p.add_argument("--fresh_tokenizer", action=argparse.BooleanOptionalAction, default=False,
+                   help="Initialize tokenizer params/optimizer from scratch instead of loading checkpoint state.")
+    p.add_argument("--fresh_twm", action=argparse.BooleanOptionalAction, default=False,
+                   help="Initialize TWM params/optimizer from scratch instead of loading checkpoint state.")
 
     p.add_argument("--n_iters_tok", type=int, default=100)
     p.add_argument("--n_iters_twm", type=int, default=100)
@@ -145,10 +149,10 @@ def main():
 
     print(f"Loading checkpoint buffer state from: {ckpt}")
     policy_params = _to_jax(_load_pickle_maybe_gz(os.path.join(ckpt, "policy_params.pkl")))
-    vqvae_params = _to_jax(_load_pickle_maybe_gz(os.path.join(ckpt, "vqvae_params.pkl")))
-    twm_params = _to_jax(_load_pickle_maybe_gz(os.path.join(ckpt, "twm_params.pkl")))
-    vqvae_opt_state_raw = _load_pickle_maybe_gz_optional(os.path.join(ckpt, "vqvae_opt_state.pkl"))
-    twm_opt_state_raw = _load_pickle_maybe_gz_optional(os.path.join(ckpt, "twm_opt_state.pkl"))
+    vqvae_params = None if args.fresh_tokenizer else _to_jax(_load_pickle_maybe_gz(os.path.join(ckpt, "vqvae_params.pkl")))
+    twm_params = None if args.fresh_twm else _to_jax(_load_pickle_maybe_gz(os.path.join(ckpt, "twm_params.pkl")))
+    vqvae_opt_state_raw = None if args.fresh_tokenizer else _load_pickle_maybe_gz_optional(os.path.join(ckpt, "vqvae_opt_state.pkl"))
+    twm_opt_state_raw = None if args.fresh_twm else _load_pickle_maybe_gz_optional(os.path.join(ckpt, "twm_opt_state.pkl"))
     vqvae_opt_state = _to_jax(vqvae_opt_state_raw) if vqvae_opt_state_raw is not None else None
     twm_opt_state = _to_jax(twm_opt_state_raw) if twm_opt_state_raw is not None else None
     flat_buffer = _to_jax(_load_pickle_maybe_gz(os.path.join(ckpt, "flat_buffer.pkl")))
@@ -183,6 +187,8 @@ def main():
 
     vqvae = create_vqvae(cfg)
     twm = create_twm(cfg)
+    rng, vq_init_rng = jax.random.split(rng)
+    rng, twm_init_rng = jax.random.split(rng)
     vq_tx = optax.chain(
         optax.clip_by_global_norm(cfg["MAX_GRAD_NORM"]),
         optax.adam(cfg["VQVAE_LR"]),
@@ -191,16 +197,30 @@ def main():
         optax.clip_by_global_norm(cfg["TWM_MAX_GRAD_NORM"]),
         optax.adam(cfg["TWM_LR"]),
     )
-    vqvae_state = TrainState.create(apply_fn=vqvae.apply, params=vqvae_params, tx=vq_tx)
-    twm_state = TrainState.create(apply_fn=twm.apply, params=twm_params, tx=twm_tx)
-    if vqvae_opt_state is not None:
+    if args.fresh_tokenizer:
+        print("Using fresh tokenizer initialization.")
+        vq_params_init = vqvae.init(vq_init_rng, jnp.zeros((1, cfg["OBS_IMAGE_SIZE"], cfg["OBS_IMAGE_SIZE"], 3), dtype=jnp.float32))
+        vqvae_state = TrainState.create(apply_fn=vqvae.apply, params=vq_params_init, tx=vq_tx)
+    else:
+        vqvae_state = TrainState.create(apply_fn=vqvae.apply, params=vqvae_params, tx=vq_tx)
+    if args.fresh_twm:
+        print("Using fresh TWM initialization.")
+        twm_params_init = twm.init(twm_init_rng, jnp.zeros((1, cfg["TOKENS_PER_BLOCK"]), dtype=jnp.int32))
+        twm_state = TrainState.create(apply_fn=twm.apply, params=twm_params_init, tx=twm_tx)
+    else:
+        twm_state = TrainState.create(apply_fn=twm.apply, params=twm_params, tx=twm_tx)
+
+    if (not args.fresh_tokenizer) and vqvae_opt_state is not None:
         vqvae_state = vqvae_state.replace(opt_state=vqvae_opt_state)
     else:
-        print("Info: vqvae_opt_state not found in checkpoint; using freshly initialized optimizer state.")
-    if twm_opt_state is not None:
+        print("Info: tokenizer optimizer state not loaded; using freshly initialized optimizer state.")
+    if (not args.fresh_twm) and twm_opt_state is not None:
         twm_state = twm_state.replace(opt_state=twm_opt_state)
     else:
-        print("Info: twm_opt_state not found in checkpoint; using freshly initialized optimizer state.")
+        print("Info: TWM optimizer state not loaded; using freshly initialized optimizer state.")
+
+    if args.fresh_tokenizer and (not args.fresh_twm) and args.n_iters_twm > 0:
+        print("Warning: fresh tokenizer + old TWM with twm updates can be unstable; prefer running with --n_iters_twm 0 first.")
 
     vq_update = make_vqvae_update_fn(vqvae, cfg)
     twm_update = make_twm_update_fn(twm, vqvae, cfg)
