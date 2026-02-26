@@ -11,7 +11,6 @@ import argparse
 import gzip
 import os
 import pickle
-import shutil
 import subprocess
 import sys
 import time
@@ -22,6 +21,17 @@ import jax.numpy as jnp
 import numpy as np
 import optax
 from flax.training.train_state import TrainState
+
+CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
+REPO_ROOT = CURRENT_DIR
+for _ in range(4):
+    if os.path.exists(os.path.join(REPO_ROOT, "ppo_mbrl_m3.py")):
+        break
+    REPO_ROOT = os.path.dirname(REPO_ROOT)
+if not os.path.exists(os.path.join(REPO_ROOT, "ppo_mbrl_m3.py")):
+    raise RuntimeError("Could not locate repo root containing ppo_mbrl_m3.py")
+if REPO_ROOT not in sys.path:
+    sys.path.insert(0, REPO_ROOT)
 
 from ppo_mbrl_m3 import create_twm, create_vqvae, make_twm_update_fn, make_vqvae_update_fn
 
