@@ -1179,7 +1179,7 @@ def run_mbrl(config):
         buffer_obs, buffer_actions, buffer_rewards, buffer_dones, buffer_ptr, buffer_count = buffer_data
         
         start_step = metadata['total_steps']
-        # rng = metadata.get('rng', rng) # Restore RNG if available (optional)
+        rng = metadata.get('rng', rng)
         imagination_started = metadata.get('imagination_started', False)
         print(f"Resumed at step {start_step:,}")
 
