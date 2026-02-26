@@ -104,6 +104,10 @@ def main():
     p.add_argument("--n_iters_tok", type=int, default=100)
     p.add_argument("--n_iters_twm", type=int, default=100)
     p.add_argument("--n_mb_wm", type=int, default=3)
+    p.add_argument("--print_each_iter", action=argparse.BooleanOptionalAction, default=True,
+                   help="Print per-iteration tokenizer/TWM losses.")
+    p.add_argument("--print_every", type=int, default=1,
+                   help="Print cadence for iterations when --print_each_iter is enabled.")
     p.add_argument("--vqvae_batch_size", type=int, default=256)
     p.add_argument("--twm_batch_size", type=int, default=16)
     p.add_argument("--twm_seq_len", type=int, default=20)
@@ -233,7 +237,9 @@ def main():
 
     vq_loss_acc = 0.0
     vq_updates = 0
-    for _ in range(args.n_iters_tok):
+    for tok_iter in range(args.n_iters_tok):
+        vq_iter_loss = 0.0
+        vq_iter_updates = 0
         for _ in range(args.n_mb_wm):
             rng, sample_rng = jax.random.split(rng)
             mb_size = min(args.vqvae_batch_size, buffer_count)
@@ -241,14 +247,32 @@ def main():
             obs_mb = buffer_obs[mb_idx]
             vqvae_state, vq_metrics, is_finite = vq_update(vqvae_state, obs_mb)
             if bool(is_finite):
-                vq_loss_acc += float(vq_metrics["total_loss"])
+                loss_val = float(vq_metrics["total_loss"])
+                vq_loss_acc += loss_val
                 vq_updates += 1
+                vq_iter_loss += loss_val
+                vq_iter_updates += 1
+        if args.print_each_iter and (
+            ((tok_iter + 1) % max(1, args.print_every) == 0)
+            or (tok_iter == 0)
+            or (tok_iter + 1 == args.n_iters_tok)
+        ):
+            mean_iter = vq_iter_loss / float(max(1, vq_iter_updates))
+            print(
+                f"[tok {tok_iter + 1:04d}/{args.n_iters_tok}] "
+                f"loss={mean_iter:.6f} finite_mb={vq_iter_updates}/{args.n_mb_wm}",
+                flush=True,
+            )
 
     twm_loss_acc = 0.0
     twm_rew_acc = 0.0
     twm_done_acc = 0.0
     twm_updates = 0
-    for _ in range(args.n_iters_twm):
+    for twm_iter in range(args.n_iters_twm):
+        twm_iter_loss = 0.0
+        twm_iter_rew = 0.0
+        twm_iter_done = 0.0
+        twm_iter_updates = 0
         for _ in range(args.n_mb_wm):
             rng, sample_rng = jax.random.split(rng)
             fbx_batch = fbx_buffer.sample(fbx_state, sample_rng)
@@ -267,6 +291,24 @@ def main():
             twm_rew_acc += float(twm_loss_rew)
             twm_done_acc += float(twm_loss_done)
             twm_updates += 1
+            twm_iter_loss += float(twm_loss)
+            twm_iter_rew += float(twm_loss_rew)
+            twm_iter_done += float(twm_loss_done)
+            twm_iter_updates += 1
+        if args.print_each_iter and (
+            ((twm_iter + 1) % max(1, args.print_every) == 0)
+            or (twm_iter == 0)
+            or (twm_iter + 1 == args.n_iters_twm)
+        ):
+            mean_twm = twm_iter_loss / float(max(1, twm_iter_updates))
+            mean_rew = twm_iter_rew / float(max(1, twm_iter_updates))
+            mean_done = twm_iter_done / float(max(1, twm_iter_updates))
+            print(
+                f"[twm {twm_iter + 1:04d}/{args.n_iters_twm}] "
+                f"loss={mean_twm:.6f} rew={mean_rew:.6f} ends={mean_done:.6f} "
+                f"mb={twm_iter_updates}/{args.n_mb_wm}",
+                flush=True,
+            )
 
     elapsed = time.time() - t0
     print(f"Smoke updates complete in {elapsed:.2f}s")
