@@ -783,7 +783,8 @@ def _init_empty_fbx_buffer_state(config):
         'obs': jnp.zeros((63, 63, 3)),
         'action': jnp.zeros((), dtype=jnp.int32),
         'reward': jnp.zeros(()),
-        'done': jnp.zeros(()),
+        'done': jnp.zeros(()),       # pre-action done/reset flag for policy burn-in context
+        'done_after': jnp.zeros(()), # post-action terminal flag for TWM end targets
     }
     return fbx_buffer.init(example_timestep)
 
@@ -1188,7 +1189,8 @@ def run_mbrl(config):
         'obs': jnp.zeros((63, 63, 3)),
         'action': jnp.zeros((), dtype=jnp.int32),
         'reward': jnp.zeros(()),
-        'done': jnp.zeros(()),
+        'done': jnp.zeros(()),       # pre-action done/reset flag for policy burn-in context
+        'done_after': jnp.zeros(()), # post-action terminal flag for TWM end targets
     }
     fbx_buffer_state = fbx_buffer.init(example_timestep)
 
@@ -1221,6 +1223,19 @@ def run_mbrl(config):
         else:
             print("Rollout state not found in checkpoint; resuming with fresh env rollout state.")
         print(f"Resumed at step {start_step:,}")
+
+    # Backward compatibility: older checkpoints may not have done_after in flashbax state.
+    fbx_supports_done_after = False
+    try:
+        exp_state = fbx_buffer_state.experience
+        if hasattr(exp_state, "keys"):
+            fbx_supports_done_after = "done_after" in exp_state
+        else:
+            fbx_supports_done_after = "done_after" in exp_state
+    except Exception:
+        fbx_supports_done_after = False
+    if not fbx_supports_done_after:
+        print("Warning: flashbax state has no done_after field; using legacy done targets for TWM ends.")
 
     # =========================================================================
     # Create JIT Functions
@@ -1389,12 +1404,18 @@ def run_mbrl(config):
         # Flashbax trajectory buffer update for TWM training
         # Transpose from (NUM_STEPS, NUM_ENVS, ...) to (NUM_ENVS, NUM_STEPS, ...)
         # flashbax add expects (add_batch_size, sequence_length, ...)
+        # traj.done stores pre-action done flag (RNN reset signal at obs_t).
+        # TWM end-head should learn post-action terminal done_{t+1}, so derive it by shifting.
+        traj_done_after = jnp.concatenate([traj.done[1:], last_done[jnp.newaxis, :]], axis=0)
+
         fbx_add_data = {
             'obs': traj.obs.transpose(1, 0, 2, 3, 4),        # (NUM_ENVS, NUM_STEPS, 63, 63, 3)
             'action': traj.action.transpose(1, 0).astype(jnp.int32),  # (NUM_ENVS, NUM_STEPS)
             'reward': traj.reward.transpose(1, 0),             # (NUM_ENVS, NUM_STEPS)
-            'done': traj.done.transpose(1, 0).astype(jnp.float32),    # (NUM_ENVS, NUM_STEPS)
+            'done': traj.done.transpose(1, 0).astype(jnp.float32),    # pre-action done/reset
         }
+        if fbx_supports_done_after:
+            fbx_add_data['done_after'] = traj_done_after.transpose(1, 0).astype(jnp.float32)
         fbx_buffer_state = fbx_buffer.add(fbx_buffer_state, fbx_add_data)
         
         # ---------------------------------------------------------------------
@@ -1465,7 +1486,9 @@ def run_mbrl(config):
                     batch_obs = fbx_batch.experience['obs']
                     batch_actions = fbx_batch.experience['action']
                     batch_rewards = fbx_batch.experience['reward']
-                    batch_dones = fbx_batch.experience['done']
+                    exp = fbx_batch.experience
+                    has_done_after = hasattr(exp, "keys") and ("done_after" in exp)
+                    batch_dones = exp['done_after'] if has_done_after else exp['done']
                     
                     twm_state, twm_loss, (twm_loss_obs, twm_loss_rew, twm_loss_ends), rng = twm_update_single(
                         twm_state, vqvae_state.params, batch_obs, batch_actions, batch_rewards, batch_dones, rng
