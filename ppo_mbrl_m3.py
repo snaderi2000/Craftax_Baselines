@@ -798,7 +798,8 @@ def _to_jax_arrays(tree):
 
 def save_checkpoint(ckpt_dir, step, policy_state, vqvae_state, twm_state, 
                    fbx_buffer_state, buffer_data, metadata, max_checkpoints=2,
-                   save_buffers=False, compress_buffers=True, buffer_gzip_level=1):
+                   save_buffers=False, compress_buffers=True, buffer_gzip_level=1,
+                   rollout_state=None):
     """
     Save training state to checkpoint directory.
     Returns True if checkpoint was written, False if skipped due to quota/disk pressure.
@@ -879,6 +880,20 @@ def save_checkpoint(ckpt_dir, step, policy_state, vqvae_state, twm_state,
                 raise
 
     metadata_to_save = dict(metadata)
+    metadata_to_save["rollout_state_saved"] = False
+    if rollout_state is not None:
+        try:
+            _dump_pickle("rollout_state.pkl", rollout_state, compress=False)
+            metadata_to_save["rollout_state_saved"] = True
+        except OSError as e:
+            if _is_disk_quota_error(e):
+                print("Warning: Could not save rollout_state.pkl (disk quota exceeded).")
+                try:
+                    os.remove(os.path.join(step_dir, "rollout_state.pkl"))
+                except OSError:
+                    pass
+            else:
+                raise
     metadata_to_save["buffers_saved"] = buffers_saved
     metadata_to_save["save_buffers_enabled"] = bool(save_buffers)
     metadata_to_save["compress_buffers_enabled"] = bool(compress_buffers)
@@ -978,8 +993,14 @@ def load_checkpoint(ckpt_path, config, network, vqvae, twm):
         print("Warning: fbx_buffer.pkl missing. Initializing empty flashbax buffer.")
         fbx_buffer_state = _init_empty_fbx_buffer_state(config)
         
+    rollout_state = None
+    rollout_state_path = os.path.join(ckpt_path, "rollout_state.pkl")
+    if os.path.exists(rollout_state_path):
+        with open(rollout_state_path, "rb") as f:
+            rollout_state = _to_jax_arrays(pickle.load(f))
+
     print(f"Loaded checkpoint from step {metadata['total_steps']}")
-    return policy_state, vqvae_state, twm_state, fbx_buffer_state, buffer_data, metadata
+    return policy_state, vqvae_state, twm_state, fbx_buffer_state, buffer_data, metadata, rollout_state
 
 
 # =============================================================================
@@ -1024,6 +1045,11 @@ def run_mbrl(config):
               f"Clamping to {max_rollout}.")
         config["BURNIN_HORIZON"] = max_rollout
     config["N_ITERS_REAL_AC"] = max(0, int(config.get("N_ITERS_REAL_AC", 1)))
+    tokenizer_iters_after_bp = config.get("TOKENIZER_ITERS_AFTER_BP")
+    if tokenizer_iters_after_bp is not None:
+        tokenizer_iters_after_bp = max(0, int(tokenizer_iters_after_bp))
+    config["TOKENIZER_ITERS_AFTER_BP"] = tokenizer_iters_after_bp
+    config["TOKENIZER_STOP_AFTER_STEP"] = int(config.get("TOKENIZER_STOP_AFTER_STEP", -1))
     config["BURNIN_OVERSAMPLE_FACTOR"] = max(1, int(config.get("BURNIN_OVERSAMPLE_FACTOR", 4)))
     config["BURNIN_MAX_SAMPLING_ATTEMPTS"] = max(1, int(config.get("BURNIN_MAX_SAMPLING_ATTEMPTS", 4)))
     config["TWM_MAX_BLOCKS"] = config["TWM_SEQ_LEN"] + config["BURNIN_HORIZON"]
@@ -1046,6 +1072,8 @@ def run_mbrl(config):
     print(f"Background planning starts at: {config['BACKGROUND_PLANNING_START']:,}")
     print("-"*70)
     print(f"Tokenizer iters per update: {config['N_ITERS_TOK']}")
+    print(f"Tokenizer iters after T_BP: {config['TOKENIZER_ITERS_AFTER_BP']}")
+    print(f"Tokenizer stop after step: {config['TOKENIZER_STOP_AFTER_STEP']}")
     print(f"Patch size / obs image size: {config['PATCH_SIZE']} / {config['OBS_IMAGE_SIZE']}")
     print(f"Tokens per observation: {config['TOKENS_PER_OBS']}")
     print(f"Tokens per block (obs+action): {config['TOKENS_PER_BLOCK']}")
@@ -1171,7 +1199,7 @@ def run_mbrl(config):
     imagination_started = False
     if config.get("RESUME_FROM"):
         print(f"\n*** Resuming from checkpoint: {config['RESUME_FROM']} ***\n")
-        policy_state, vqvae_state, twm_state, fbx_buffer_state, buffer_data, metadata = load_checkpoint(
+        policy_state, vqvae_state, twm_state, fbx_buffer_state, buffer_data, metadata, rollout_state = load_checkpoint(
             config['RESUME_FROM'], config, network, vqvae, twm
         )
         
@@ -1181,6 +1209,17 @@ def run_mbrl(config):
         start_step = metadata['total_steps']
         rng = metadata.get('rng', rng)
         imagination_started = metadata.get('imagination_started', False)
+        if rollout_state is not None:
+            try:
+                obsv = rollout_state["obsv"]
+                env_state = rollout_state["env_state"]
+                hstate = rollout_state["hstate"]
+                last_done = rollout_state["last_done"]
+                print("Restored rollout state (obsv/env_state/hstate/last_done) from checkpoint.")
+            except Exception as e:
+                print(f"Warning: Could not restore rollout state from checkpoint: {e}")
+        else:
+            print("Rollout state not found in checkpoint; resuming with fresh env rollout state.")
         print(f"Resumed at step {start_step:,}")
 
     # =========================================================================
@@ -1371,9 +1410,21 @@ def run_mbrl(config):
         }
         vqvae_updates = 0
         vqvae_nonfinite_updates = 0
-        if not config["USE_PRETRAINED_TOKENIZER"] and config["N_ITERS_TOK"] > 0:
+        tokenizer_target_iters = int(config["N_ITERS_TOK"])
+        if (
+            config["TOKENIZER_ITERS_AFTER_BP"] is not None
+            and total_steps >= config["BACKGROUND_PLANNING_START"]
+        ):
+            tokenizer_target_iters = int(config["TOKENIZER_ITERS_AFTER_BP"])
+        if (
+            config["TOKENIZER_STOP_AFTER_STEP"] >= 0
+            and total_steps >= config["TOKENIZER_STOP_AFTER_STEP"]
+        ):
+            tokenizer_target_iters = 0
+
+        if not config["USE_PRETRAINED_TOKENIZER"] and tokenizer_target_iters > 0:
             vqvae_metric_sums = {k: 0.0 for k in vqvae_metrics.keys()}
-            for tok_iter in range(config["N_ITERS_TOK"]):
+            for tok_iter in range(tokenizer_target_iters):
                 for mb in range(config["N_MB_WM"]):
                     # Sample minibatch from buffer
                     rng, sample_rng = jax.random.split(rng)
@@ -1532,6 +1583,7 @@ def run_mbrl(config):
                 'score': f'{float(score):.2f}',
                 'sps': f'{float(sps_inst):.0f}',
                 'vq': f'{float(vqvae_loss):.3f}',
+                'tok_it': f'{int(tokenizer_target_iters)}',
                 'twm': f'{float(twm_loss):.3f}',
                 'twm_r': f'{float(twm_loss_rew):.3f}',
                 'twm_d': f'{float(twm_loss_ends):.3f}',
@@ -1547,6 +1599,7 @@ def run_mbrl(config):
                     'vqvae_loss_commitment': float(vqvae_metrics["commitment"]),
                     'vqvae_update_steps': int(vqvae_updates),
                     'vqvae_nonfinite_updates': int(vqvae_nonfinite_updates),
+                    'tokenizer_target_iters': int(tokenizer_target_iters),
                     'twm_loss': float(twm_loss),
                     'twm_loss_obs': float(twm_loss_obs),
                     'twm_loss_rew': float(twm_loss_rew),
@@ -1594,7 +1647,13 @@ def run_mbrl(config):
                            max_checkpoints=config["MAX_CHECKPOINTS"],
                            save_buffers=config["CHECKPOINT_SAVE_BUFFERS"],
                            compress_buffers=config["CHECKPOINT_COMPRESS_BUFFERS"],
-                           buffer_gzip_level=config["CHECKPOINT_GZIP_LEVEL"])
+                           buffer_gzip_level=config["CHECKPOINT_GZIP_LEVEL"],
+                           rollout_state={
+                               'obsv': obsv,
+                               'env_state': env_state,
+                               'hstate': hstate,
+                               'last_done': last_done,
+                           })
             
             if exit_requested:
                 print(f"Exiting gracefully at step {total_steps:,}...")
@@ -1677,6 +1736,10 @@ if __name__ == "__main__":
                         help="Path to pre-trained tokenizer params")
     parser.add_argument("--n_iters_tok", type=int, default=500,
                         help="Number of tokenizer update iterations per step (paper: 500)")
+    parser.add_argument("--tokenizer_iters_after_bp", type=int, default=None,
+                        help="If set, override tokenizer update iterations per step once step >= background_planning_start")
+    parser.add_argument("--tokenizer_stop_after_step", type=int, default=-1,
+                        help="If >=0, stop tokenizer updates once total_steps reaches this value")
     
     # TWM
     parser.add_argument("--twm_seq_len", type=int, default=20)
