@@ -41,6 +41,7 @@ import optax
 import flax.linen as nn
 import distrax
 from flax import struct
+from flax.core.frozen_dict import freeze, unfreeze
 from flax.training.train_state import TrainState
 from flax.training import orbax_utils
 from flax.linen.initializers import constant, orthogonal
@@ -270,9 +271,21 @@ def _project_patch_codebook_params(params):
     """Project patch tokenizer codebook rows to unit norm."""
     emb = params["params"]["quantizer"]["embedding"]
     emb = emb / jnp.maximum(jnp.linalg.norm(emb, axis=-1, keepdims=True), 1e-10)
-    quantizer_params = params["params"]["quantizer"].copy({"embedding": emb})
-    params_level = params["params"].copy({"quantizer": quantizer_params})
-    return params.copy({"params": params_level})
+
+    # Fast path for plain dict params (common when loading pickled checkpoints).
+    if isinstance(params, dict):
+        params_out = dict(params)
+        params_level = dict(params_out["params"])
+        quantizer_params = dict(params_level["quantizer"])
+        quantizer_params["embedding"] = emb
+        params_level["quantizer"] = quantizer_params
+        params_out["params"] = params_level
+        return params_out
+
+    # Flax FrozenDict / immutable mapping path.
+    params_mut = unfreeze(params)
+    params_mut["params"]["quantizer"]["embedding"] = emb
+    return freeze(params_mut)
 
 
 def create_vqvae_train_state(config, rng, sample_obs):
