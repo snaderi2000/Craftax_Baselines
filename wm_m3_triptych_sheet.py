@@ -18,6 +18,7 @@ import numpy as np
 
 from craftax.craftax_env import make_craftax_env_from_name
 from token_wm.tokenizer.patch_vqvae import PatchVQVAE
+from token_wm.tokenizer.patch_nnt import PatchNNT
 from token_wm.twm.world_model import WorldModel
 from token_wm.twm.transformer import TransformerConfig
 from token_wm.twm.kv_caching import KeysValues
@@ -231,7 +232,7 @@ def batch_tokenizer_recon(vqvae, vqvae_vars, frames: List[np.ndarray]) -> np.nda
 
 
 def parse_args():
-    p = argparse.ArgumentParser(description="Create M3 WM triptych PNG sheet.")
+    p = argparse.ArgumentParser(description="Create WM triptych PNG sheet (M3 VQ-VAE or M4 NNT tokenizer).")
     p.add_argument("--checkpoint_dir", type=str, required=True)
     p.add_argument("--output_png", type=str, default="wm_m3_triptych.png")
     p.add_argument("--output_meta", type=str, default=None)
@@ -258,6 +259,10 @@ def parse_args():
     p.add_argument("--patch_size", type=int, default=7)
     p.add_argument("--obs_image_size", type=int, default=63)
     p.add_argument("--vqvae_codebook_size", type=int, default=512)
+    p.add_argument("--tokenizer_type", type=str, default="auto", choices=["auto", "vqvae", "nnt"],
+                   help="Tokenizer type. auto=detect from checkpoint params.")
+    p.add_argument("--auto_vocab_from_checkpoint", action=argparse.BooleanOptionalAction, default=True,
+                   help="Override --vqvae_codebook_size using tokenizer params shape from checkpoint.")
     p.add_argument("--vqvae_embed_dim", type=int, default=128)
     p.add_argument("--patch_encoder_hidden_dim", type=int, default=128)
     p.add_argument("--vqvae_lambda_l1", type=float, default=0.1)
@@ -270,6 +275,28 @@ def parse_args():
     p.add_argument("--use_binary_reward_target", action=argparse.BooleanOptionalAction, default=True)
     p.add_argument("--binary_reward_threshold", type=float, default=0.5)
     return p.parse_args()
+
+
+def _extract_param_tree(params_or_vars):
+    if hasattr(params_or_vars, "keys"):
+        keys = list(params_or_vars.keys())
+        if keys == ["params"] or set(keys) == {"params"}:
+            return params_or_vars["params"]
+    return params_or_vars
+
+
+def infer_tokenizer_info(vq_params_or_vars) -> Tuple[str, int]:
+    p = _extract_param_tree(vq_params_or_vars)
+    if hasattr(p, "keys"):
+        # M4 NNT: {"codebook", "codebook_count"}
+        if "codebook" in p and "codebook_count" in p:
+            k = int(np.asarray(p["codebook"]).shape[0])
+            return "nnt", k
+        # M3 PatchVQVAE: {"encoder_fc1", ..., "quantizer": {"embedding"}}
+        if "quantizer" in p and hasattr(p["quantizer"], "keys") and "embedding" in p["quantizer"]:
+            k = int(np.asarray(p["quantizer"]["embedding"]).shape[0])
+            return "vqvae", k
+    raise ValueError("Could not infer tokenizer type from checkpoint params.")
 
 
 def load_params(ckpt_dir: str):
@@ -400,6 +427,16 @@ def main():
         raise ValueError("burnin_horizon must be >= 0")
 
     policy_params, vqvae_params, twm_params = load_params(args.checkpoint_dir)
+    inferred_tok_type, inferred_vocab = infer_tokenizer_info(vqvae_params)
+    tok_type = inferred_tok_type if args.tokenizer_type == "auto" else args.tokenizer_type
+    if args.auto_vocab_from_checkpoint:
+        if int(args.vqvae_codebook_size) != int(inferred_vocab):
+            print(
+                f"Overriding vqvae_codebook_size {args.vqvae_codebook_size} -> {inferred_vocab} "
+                f"from checkpoint tokenizer params."
+            )
+        args.vqvae_codebook_size = int(inferred_vocab)
+    print(f"Tokenizer type: {tok_type} (inferred={inferred_tok_type}), vocab={args.vqvae_codebook_size}")
     policy_vars = ensure_apply_vars(policy_params)
     vqvae_vars = ensure_apply_vars(vqvae_params)
     twm_vars = ensure_apply_vars(twm_params)
@@ -413,17 +450,24 @@ def main():
     print("  " + ", ".join(f"{i}:{name}" for i, name in enumerate(action_names)))
 
     network = ActorCriticRNN(num_actions, config={"LAYER_SIZE": args.layer_size})
-    vqvae = PatchVQVAE(
-        num_embeddings=args.vqvae_codebook_size,
-        embedding_dim=args.vqvae_embed_dim,
-        encoder_hidden_dim=args.patch_encoder_hidden_dim,
-        patch_size=args.patch_size,
-        image_size=args.obs_image_size,
-        lambda_l1=args.vqvae_lambda_l1,
-        lambda_l2=args.vqvae_lambda_l2,
-        lambda_codebook=args.vqvae_lambda_codebook,
-        lambda_commitment=args.vqvae_lambda_commitment,
-    )
+    if tok_type == "nnt":
+        vqvae = PatchNNT(
+            codebook_size=args.vqvae_codebook_size,
+            patch_size=args.patch_size,
+            image_size=args.obs_image_size,
+        )
+    else:
+        vqvae = PatchVQVAE(
+            num_embeddings=args.vqvae_codebook_size,
+            embedding_dim=args.vqvae_embed_dim,
+            encoder_hidden_dim=args.patch_encoder_hidden_dim,
+            patch_size=args.patch_size,
+            image_size=args.obs_image_size,
+            lambda_l1=args.vqvae_lambda_l1,
+            lambda_l2=args.vqvae_lambda_l2,
+            lambda_codebook=args.vqvae_lambda_codebook,
+            lambda_commitment=args.vqvae_lambda_commitment,
+        )
     tokens_per_obs = (args.obs_image_size // args.patch_size) ** 2
     tokens_per_block = tokens_per_obs + 1
     twm_cfg = TransformerConfig(
