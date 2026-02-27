@@ -33,7 +33,39 @@ if not os.path.exists(os.path.join(REPO_ROOT, "ppo_mbrl_m3.py")):
 if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
-from ppo_mbrl_m3 import create_twm, create_vqvae, make_twm_update_fn, make_vqvae_update_fn
+from ppo_mbrl_m3 import create_twm, create_vqvae, make_twm_update_fn
+
+
+def make_vqvae_update_fn_debug(vqvae):
+    """Tokenizer update with explicit finite diagnostics."""
+    def _vqvae_loss_fn(params, obs_batch):
+        _, _, total_loss, metrics = vqvae.apply(params, obs_batch, method=vqvae.get_vq_loss)
+        return total_loss, metrics
+
+    @jax.jit
+    def vqvae_update_single(vqvae_state, obs_batch):
+        grad_fn = jax.value_and_grad(_vqvae_loss_fn, has_aux=True)
+        (_, metrics), grads = grad_fn(vqvae_state.params, obs_batch)
+
+        grad_is_finite = jnp.array(True, dtype=jnp.bool_)
+        for g in jax.tree.leaves(grads):
+            if jnp.issubdtype(g.dtype, jnp.floating):
+                grad_is_finite = jnp.logical_and(grad_is_finite, jnp.all(jnp.isfinite(g)))
+
+        metric_is_finite = jnp.array(True, dtype=jnp.bool_)
+        for v in metrics.values():
+            metric_is_finite = jnp.logical_and(metric_is_finite, jnp.all(jnp.isfinite(v)))
+
+        update_is_finite = jnp.logical_and(grad_is_finite, metric_is_finite)
+        vqvae_state = jax.lax.cond(
+            update_is_finite,
+            lambda s: s.apply_gradients(grads=grads),
+            lambda s: s,
+            vqvae_state,
+        )
+        return vqvae_state, metrics, update_is_finite, grad_is_finite, metric_is_finite
+
+    return vqvae_update_single
 
 
 def _load_pickle_maybe_gz(base_path):
@@ -169,6 +201,8 @@ def main():
                    help="Batch size for tokenizer diagnostics.")
     p.add_argument("--diag_before_after", action=argparse.BooleanOptionalAction, default=True,
                    help="Run tokenizer diagnostics before and after smoke updates.")
+    p.add_argument("--debug_nonfinite_limit", type=int, default=20,
+                   help="Maximum number of non-finite tokenizer minibatch diagnostics to print.")
     p.add_argument("--twm_batch_size", type=int, default=16)
     p.add_argument("--twm_seq_len", type=int, default=20)
     p.add_argument("--burnin_horizon", type=int, default=5)
@@ -286,7 +320,7 @@ def main():
     if args.fresh_tokenizer and (not args.fresh_twm) and args.n_iters_twm > 0:
         print("Warning: fresh tokenizer + old TWM with twm updates can be unstable; prefer running with --n_iters_twm 0 first.")
 
-    vq_update = make_vqvae_update_fn(vqvae, cfg)
+    vq_update = make_vqvae_update_fn_debug(vqvae)
     twm_update = make_twm_update_fn(twm, vqvae, cfg)
 
     diag_before = None
@@ -324,6 +358,8 @@ def main():
     vq_cb_acc = 0.0
     vq_cm_acc = 0.0
     vq_updates = 0
+    vq_nonfinite = 0
+    nonfinite_printed = 0
     for tok_iter in range(args.n_iters_tok):
         vq_iter_loss = 0.0
         vq_iter_l1 = 0.0
@@ -336,7 +372,7 @@ def main():
             mb_size = min(args.vqvae_batch_size, buffer_count)
             mb_idx = jax.random.randint(sample_rng, (mb_size,), 0, buffer_count)
             obs_mb = buffer_obs[mb_idx]
-            vqvae_state, vq_metrics, is_finite = vq_update(vqvae_state, obs_mb)
+            vqvae_state, vq_metrics, is_finite, grad_is_finite, metric_is_finite = vq_update(vqvae_state, obs_mb)
             if bool(is_finite):
                 loss_val = float(vq_metrics["total_loss"])
                 l1_val = float(vq_metrics["l1"])
@@ -355,6 +391,27 @@ def main():
                 vq_iter_cb += cb_val
                 vq_iter_cm += cm_val
                 vq_iter_updates += 1
+            else:
+                vq_nonfinite += 1
+                if nonfinite_printed < args.debug_nonfinite_limit:
+                    obs_min = float(jnp.min(obs_mb))
+                    obs_max = float(jnp.max(obs_mb))
+                    obs_mean = float(jnp.mean(obs_mb))
+                    obs_has_nan = bool(jnp.any(jnp.isnan(obs_mb)))
+                    l1_val = float(vq_metrics["l1"])
+                    l2_val = float(vq_metrics["l2"])
+                    cb_val = float(vq_metrics["codebook"])
+                    cm_val = float(vq_metrics["commitment"])
+                    tot_val = float(vq_metrics["total_loss"])
+                    print(
+                        f"[tok nonfinite] iter={tok_iter + 1} "
+                        f"grad_finite={bool(grad_is_finite)} metric_finite={bool(metric_is_finite)} "
+                        f"loss={tot_val} l1={l1_val} l2={l2_val} cb={cb_val} cm={cm_val} "
+                        f"obs[min,max,mean]=({obs_min:.6f},{obs_max:.6f},{obs_mean:.6f}) "
+                        f"obs_has_nan={obs_has_nan}",
+                        flush=True,
+                    )
+                    nonfinite_printed += 1
         if args.print_each_iter and (
             ((tok_iter + 1) % max(1, args.print_every) == 0)
             or (tok_iter == 0)
@@ -433,6 +490,7 @@ def main():
         )
     else:
         print("Tokenizer updates: 0")
+    print(f"Tokenizer non-finite minibatches: {vq_nonfinite}")
     if twm_updates > 0:
         print(
             f"TWM mean loss: {twm_loss_acc / twm_updates:.6f} | "
@@ -483,6 +541,7 @@ def main():
     with open(os.path.join(smoke_ckpt_dir, "smoke_metrics.txt"), "w") as f:
         f.write(f"source_checkpoint={ckpt}\n")
         f.write(f"vq_updates={vq_updates}\n")
+        f.write(f"vq_nonfinite_updates={vq_nonfinite}\n")
         f.write(f"twm_updates={twm_updates}\n")
         f.write(f"vq_mean_loss={(vq_loss_acc / max(1, vq_updates)):.8f}\n")
         f.write(f"vq_mean_l1={(vq_l1_acc / max(1, vq_updates)):.8f}\n")
