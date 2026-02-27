@@ -246,6 +246,35 @@ def create_twm(config):
     )
 
 
+def _preprocess_obs_for_tokenizer(obs):
+    """Convert observations to float32 in [0, 1] for tokenizer stability."""
+    x = obs.astype(jnp.float32)
+    # Handle common [-1, 1] normalized inputs.
+    x = jax.lax.cond(
+        jnp.logical_and(jnp.min(x) < 0.0, jnp.max(x) <= 1.0),
+        lambda y: (y + 1.0) * 0.5,
+        lambda y: y,
+        x,
+    )
+    # Handle uint8/range-[0,255] style inputs.
+    x = jax.lax.cond(
+        jnp.max(x) > 1.5,
+        lambda y: y / 255.0,
+        lambda y: y,
+        x,
+    )
+    return jnp.clip(x, 0.0, 1.0)
+
+
+def _project_patch_codebook_params(params):
+    """Project patch tokenizer codebook rows to unit norm."""
+    emb = params["params"]["quantizer"]["embedding"]
+    emb = emb / jnp.maximum(jnp.linalg.norm(emb, axis=-1, keepdims=True), 1e-10)
+    quantizer_params = params["params"]["quantizer"].copy({"embedding": emb})
+    params_level = params["params"].copy({"quantizer": quantizer_params})
+    return params.copy({"params": params_level})
+
+
 def create_vqvae_train_state(config, rng, sample_obs):
     vqvae = create_vqvae(config)
     params = vqvae.init(rng, sample_obs)
@@ -306,6 +335,7 @@ def make_vqvae_update_fn(vqvae, config):
     """Create JIT-compiled VQ-VAE single update function."""
     
     def _vqvae_loss_fn(params, obs_batch):
+        obs_batch = _preprocess_obs_for_tokenizer(obs_batch)
         _, _, total_loss, metrics = vqvae.apply(params, obs_batch, method=vqvae.get_vq_loss)
         return total_loss, metrics
     
@@ -328,7 +358,11 @@ def make_vqvae_update_fn(vqvae, config):
         update_is_finite = jnp.logical_and(grad_is_finite, metric_is_finite)
         vqvae_state = jax.lax.cond(
             update_is_finite,
-            lambda s: s.apply_gradients(grads=grads),
+            lambda s: s.replace(
+                params=_project_patch_codebook_params(
+                    s.apply_gradients(grads=grads).params
+                )
+            ),
             lambda s: s,
             vqvae_state,
         )
@@ -370,6 +404,7 @@ def make_twm_update_fn(twm, vqvae, config):
         """Single TWM update step with obs + reward + termination losses."""
         B, T = obs_batch.shape[:2]
         obs_flat = obs_batch.reshape(B * T, 63, 63, 3)
+        obs_flat = _preprocess_obs_for_tokenizer(obs_flat)
         tokens_flat = vqvae.apply(vqvae_params, obs_flat, method=vqvae.encode)
         obs_tokens = tokens_flat.reshape(B, T, -1)
         

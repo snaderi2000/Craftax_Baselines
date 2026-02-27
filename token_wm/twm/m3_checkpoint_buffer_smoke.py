@@ -8,6 +8,7 @@ M3 checkpoint-buffer smoke test:
 """
 
 import argparse
+import csv
 import gzip
 import os
 import pickle
@@ -33,19 +34,57 @@ if not os.path.exists(os.path.join(REPO_ROOT, "ppo_mbrl_m3.py")):
 if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
-from ppo_mbrl_m3 import create_twm, create_vqvae, make_twm_update_fn
+from ppo_mbrl_m3 import (
+    _preprocess_obs_for_tokenizer,
+    _project_patch_codebook_params,
+    create_twm,
+    create_vqvae,
+    make_twm_update_fn,
+)
+
+
+def _image_grad_mag_mean(x):
+    """Mean finite-difference gradient magnitude over H/W axes."""
+    gx = jnp.abs(x[:, 1:, :, :] - x[:, :-1, :, :]).mean()
+    gy = jnp.abs(x[:, :, 1:, :] - x[:, :, :-1, :]).mean()
+    return 0.5 * (gx + gy)
 
 
 def make_vqvae_update_fn_debug(vqvae):
     """Tokenizer update with explicit finite diagnostics."""
+    def _code_stats(indices, vocab_size):
+        flat = indices.reshape(-1)
+        counts = jnp.bincount(flat, length=vocab_size)
+        total = jnp.maximum(counts.sum(), 1)
+        probs = counts.astype(jnp.float32) / total.astype(jnp.float32)
+        nz = probs > 0
+        entropy = -jnp.sum(jnp.where(nz, probs * jnp.log(probs + 1e-12), 0.0))
+        perplexity = jnp.exp(entropy)
+        used = jnp.sum(counts > 0)
+        dead = vocab_size - used
+        usage_frac = used.astype(jnp.float32) / jnp.asarray(vocab_size, dtype=jnp.float32)
+        top1_code_frac = jnp.max(counts).astype(jnp.float32) / total.astype(jnp.float32)
+        return counts, used, dead, usage_frac, entropy, perplexity, top1_code_frac
+
     def _vqvae_loss_fn(params, obs_batch):
-        _, _, total_loss, metrics = vqvae.apply(params, obs_batch, method=vqvae.get_vq_loss)
-        return total_loss, metrics
+        obs_batch = _preprocess_obs_for_tokenizer(obs_batch)
+        recon, indices, total_loss, metrics = vqvae.apply(params, obs_batch, method=vqvae.get_vq_loss)
+        z = vqvae.apply(params, obs_batch, method=vqvae._encode_embeddings)
+        z_norms = jnp.linalg.norm(z, axis=-1)
+        metrics = {
+            **metrics,
+            "z_norm_min": jnp.min(z_norms),
+            "z_norm_mean": jnp.mean(z_norms),
+            "z_frac_tiny": jnp.mean((z_norms < 1e-3).astype(jnp.float32)),
+            "recon_std_ratio": jnp.std(recon) / jnp.maximum(jnp.std(obs_batch), 1e-8),
+            "recon_grad_ratio": _image_grad_mag_mean(recon) / jnp.maximum(_image_grad_mag_mean(obs_batch), 1e-8),
+        }
+        return total_loss, (metrics, indices)
 
     @jax.jit
     def vqvae_update_single(vqvae_state, obs_batch):
         grad_fn = jax.value_and_grad(_vqvae_loss_fn, has_aux=True)
-        (_, metrics), grads = grad_fn(vqvae_state.params, obs_batch)
+        (_, (metrics, indices)), grads = grad_fn(vqvae_state.params, obs_batch)
 
         grad_is_finite = jnp.array(True, dtype=jnp.bool_)
         for g in jax.tree.leaves(grads):
@@ -56,14 +95,50 @@ def make_vqvae_update_fn_debug(vqvae):
         for v in metrics.values():
             metric_is_finite = jnp.logical_and(metric_is_finite, jnp.all(jnp.isfinite(v)))
 
+        emb_before = vqvae_state.params["params"]["quantizer"]["embedding"]
+        emb_before_norms = jnp.linalg.norm(emb_before, axis=-1)
+
         update_is_finite = jnp.logical_and(grad_is_finite, metric_is_finite)
         vqvae_state = jax.lax.cond(
             update_is_finite,
-            lambda s: s.apply_gradients(grads=grads),
+            lambda s: s.replace(
+                params=_project_patch_codebook_params(
+                    s.apply_gradients(grads=grads).params
+                )
+            ),
             lambda s: s,
             vqvae_state,
         )
-        return vqvae_state, metrics, update_is_finite, grad_is_finite, metric_is_finite
+        emb_after = vqvae_state.params["params"]["quantizer"]["embedding"]
+        emb_after_norms = jnp.linalg.norm(emb_after, axis=-1)
+
+        token_counts, used, dead, usage_frac, entropy, perplexity, top1_code_frac = _code_stats(
+            indices, vqvae.num_embeddings
+        )
+
+        metrics = {
+            **metrics,
+            "used_codes": used.astype(jnp.float32),
+            "dead_codes": dead.astype(jnp.float32),
+            "usage_frac": usage_frac,
+            "entropy": entropy,
+            "perplexity": perplexity,
+            "top1_code_frac": top1_code_frac,
+            "emb_norm_min_before": jnp.min(emb_before_norms),
+            "emb_norm_mean_before": jnp.mean(emb_before_norms),
+            "emb_norm_max_before": jnp.max(emb_before_norms),
+            "emb_norm_min_after": jnp.min(emb_after_norms),
+            "emb_norm_mean_after": jnp.mean(emb_after_norms),
+            "emb_norm_max_after": jnp.max(emb_after_norms),
+        }
+        return (
+            vqvae_state,
+            metrics,
+            token_counts,
+            update_is_finite,
+            grad_is_finite,
+            metric_is_finite,
+        )
 
     return vqvae_update_single
 
@@ -123,29 +198,66 @@ def _build_config(args):
     }
 
 
-def _evaluate_tokenizer_diagnostics(vqvae, vq_params, buffer_obs, buffer_count, rng, codebook_size, num_samples, batch_size):
-    """Evaluate recon quality and codebook usage on a sampled subset of flat buffer."""
+def _load_or_create_fixed_eval_indices(path, buffer_count, num_samples, rng):
+    """Load fixed eval indices from disk, or create/save once."""
     n = int(max(1, min(buffer_count, num_samples)))
+    if os.path.exists(path):
+        loaded = np.load(path)
+        loaded = np.asarray(loaded, dtype=np.int32).reshape(-1)
+        loaded_max = int(loaded.max()) if loaded.size > 0 else -1
+        if loaded.size >= n and loaded_max < buffer_count:
+            return loaded[:n], rng, False
+        print(
+            f"Warning: fixed eval indices at {path} are invalid for buffer_count={buffer_count}; regenerating."
+        )
+
     rng, sample_rng = jax.random.split(rng)
-    idx = jax.random.randint(sample_rng, (n,), 0, buffer_count)
+    perm = jax.random.permutation(sample_rng, buffer_count)
+    idx = np.asarray(jax.device_get(perm[:n]), dtype=np.int32)
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    np.save(path, idx)
+    return idx, rng, True
+
+
+def _evaluate_tokenizer_diagnostics(vqvae, vq_params, buffer_obs, eval_indices, codebook_size, batch_size):
+    """Evaluate recon quality and codebook usage on a fixed subset of flat buffer."""
+    idx = jnp.asarray(eval_indices, dtype=jnp.int32)
+    n = int(idx.shape[0])
     obs_eval = buffer_obs[idx]
 
     token_counts = np.zeros((codebook_size,), dtype=np.int64)
     mae_sum = 0.0
     mse_sum = 0.0
+    z_norm_min = float("inf")
+    z_norm_sum = 0.0
+    z_norm_count = 0
+    z_tiny_sum = 0.0
+    recon_std_ratio_sum = 0.0
+    recon_grad_ratio_sum = 0.0
     seen = 0
 
     for start in range(0, n, batch_size):
         end = min(n, start + batch_size)
-        batch = obs_eval[start:end]
+        batch = _preprocess_obs_for_tokenizer(obs_eval[start:end])
         tokens = vqvae.apply(vq_params, batch, method=vqvae.encode)
         recon = vqvae.apply(vq_params, tokens, method=vqvae.decode_tokens)
+        z = vqvae.apply(vq_params, batch, method=vqvae._encode_embeddings)
+        z_norms = jnp.linalg.norm(z, axis=-1)
 
         batch_mae = jnp.mean(jnp.abs(batch - recon))
         batch_mse = jnp.mean(jnp.square(batch - recon))
+        batch_std_ratio = jnp.std(recon) / jnp.maximum(jnp.std(batch), 1e-8)
+        batch_grad_ratio = _image_grad_mag_mean(recon) / jnp.maximum(_image_grad_mag_mean(batch), 1e-8)
+        batch_tiny = jnp.mean((z_norms < 1e-3).astype(jnp.float32))
         bsz = end - start
         mae_sum += float(batch_mae) * bsz
         mse_sum += float(batch_mse) * bsz
+        recon_std_ratio_sum += float(batch_std_ratio) * bsz
+        recon_grad_ratio_sum += float(batch_grad_ratio) * bsz
+        z_tiny_sum += float(batch_tiny) * bsz
+        z_norm_min = min(z_norm_min, float(jnp.min(z_norms)))
+        z_norm_sum += float(jnp.sum(z_norms))
+        z_norm_count += int(z_norms.size)
         seen += bsz
 
         tok_np = np.asarray(jax.device_get(tokens)).reshape(-1)
@@ -158,6 +270,7 @@ def _evaluate_tokenizer_diagnostics(vqvae, vq_params, buffer_obs, buffer_count, 
     used = int((token_counts > 0).sum())
     dead = int(codebook_size - used)
     usage_frac = float(used) / float(codebook_size)
+    top1_code_frac = float(token_counts.max()) / float(max(1, token_counts.sum()))
 
     topk = min(10, codebook_size)
     top_ids = np.argsort(-token_counts)[:topk]
@@ -167,14 +280,20 @@ def _evaluate_tokenizer_diagnostics(vqvae, vq_params, buffer_obs, buffer_count, 
         "n_eval": int(seen),
         "recon_mae": float(mae_sum / max(1, seen)),
         "recon_mse": float(mse_sum / max(1, seen)),
+        "recon_std_ratio": float(recon_std_ratio_sum / max(1, seen)),
+        "recon_grad_ratio": float(recon_grad_ratio_sum / max(1, seen)),
+        "z_norm_min": float(z_norm_min if z_norm_min != float("inf") else 0.0),
+        "z_norm_mean": float(z_norm_sum / max(1, z_norm_count)),
+        "z_frac_tiny": float(z_tiny_sum / max(1, seen)),
         "code_usage_frac": usage_frac,
         "used_codes": used,
         "dead_codes": dead,
         "token_entropy": entropy,
         "token_perplexity": perplexity,
+        "top1_code_frac": top1_code_frac,
         "top_codes": top_pairs,
     }
-    return stats, rng
+    return stats
 
 
 def main():
@@ -201,8 +320,22 @@ def main():
                    help="Batch size for tokenizer diagnostics.")
     p.add_argument("--diag_before_after", action=argparse.BooleanOptionalAction, default=True,
                    help="Run tokenizer diagnostics before and after smoke updates.")
+    p.add_argument("--diag_log_every", type=int, default=10,
+                   help="Run fixed-eval tokenizer diagnostics every N tokenizer iterations.")
+    p.add_argument("--diag_fixed_eval_indices_path", type=str, default="",
+                   help="Path to .npy of fixed eval indices. Defaults to <output_dir>/diag_eval_indices.npy")
     p.add_argument("--debug_nonfinite_limit", type=int, default=20,
                    help="Maximum number of non-finite tokenizer minibatch diagnostics to print.")
+    p.add_argument("--failfast_enabled", action=argparse.BooleanOptionalAction, default=True,
+                   help="Stop early when repeated tokenizer collapse/non-finite conditions are detected.")
+    p.add_argument("--failfast_patience", type=int, default=5,
+                   help="Consecutive bad-iteration threshold to trigger fail-fast.")
+    p.add_argument("--failfast_perplexity_min", type=float, default=2.0,
+                   help="Fail-fast when per-iteration token perplexity stays below this threshold.")
+    p.add_argument("--failfast_top1_frac_max", type=float, default=0.5,
+                   help="Fail-fast when per-iteration top-1 token fraction stays above this threshold.")
+    p.add_argument("--failfast_z_tiny_frac_max", type=float, default=0.5,
+                   help="Fail-fast when per-iteration z_frac_tiny stays above this threshold.")
     p.add_argument("--twm_batch_size", type=int, default=16)
     p.add_argument("--twm_seq_len", type=int, default=20)
     p.add_argument("--burnin_horizon", type=int, default=5)
@@ -262,6 +395,25 @@ def main():
         raise RuntimeError("Flat buffer is empty; cannot run tokenizer smoke updates.")
 
     print(f"Flat buffer count: {buffer_count}")
+
+    os.makedirs(args.output_dir, exist_ok=True)
+    tag = (
+        f"smoke_{os.path.basename(os.path.normpath(ckpt))}"
+        f"_tok{args.n_iters_tok}x{args.n_mb_wm}_twm{args.n_iters_twm}x{args.n_mb_wm}"
+    )
+    smoke_ckpt_dir = os.path.join(args.output_dir, tag)
+    os.makedirs(smoke_ckpt_dir, exist_ok=True)
+
+    eval_indices_path = args.diag_fixed_eval_indices_path.strip()
+    if not eval_indices_path:
+        eval_indices_path = os.path.join(args.output_dir, "diag_eval_indices.npy")
+    eval_indices, rng, created_eval_idx = _load_or_create_fixed_eval_indices(
+        eval_indices_path, buffer_count, args.diag_eval_samples, rng
+    )
+    if created_eval_idx:
+        print(f"Created fixed eval indices: {eval_indices_path} ({eval_indices.shape[0]} samples)")
+    else:
+        print(f"Loaded fixed eval indices: {eval_indices_path} ({eval_indices.shape[0]} samples)")
 
     exp = fbx_state.experience
     add_batch_size = int(exp["obs"].shape[0])
@@ -326,14 +478,12 @@ def main():
     diag_before = None
     if args.diag_before_after:
         print("Running tokenizer diagnostics (before updates)...")
-        diag_before, rng = _evaluate_tokenizer_diagnostics(
+        diag_before = _evaluate_tokenizer_diagnostics(
             vqvae,
             vqvae_state.params,
             buffer_obs,
-            buffer_count,
-            rng,
+            eval_indices,
             cfg["VQVAE_CODEBOOK_SIZE"],
-            args.diag_eval_samples,
             args.diag_eval_batch_size,
         )
         print(
@@ -343,7 +493,9 @@ def main():
             f"usage={diag_before['used_codes']}/{cfg['VQVAE_CODEBOOK_SIZE']} "
             f"({diag_before['code_usage_frac']:.3f}) "
             f"entropy={diag_before['token_entropy']:.3f} "
-            f"perplexity={diag_before['token_perplexity']:.2f}"
+            f"perplexity={diag_before['token_perplexity']:.2f} "
+            f"top1={diag_before['top1_code_frac']:.3f} "
+            f"z_tiny={diag_before['z_frac_tiny']:.3f}"
         )
 
     print(
@@ -360,25 +512,55 @@ def main():
     vq_updates = 0
     vq_nonfinite = 0
     nonfinite_printed = 0
+    diag_rows = []
+    failfast_reason = ""
+    failfast_bad_streak = 0
+    stopped_early = False
     for tok_iter in range(args.n_iters_tok):
         vq_iter_loss = 0.0
         vq_iter_l1 = 0.0
         vq_iter_l2 = 0.0
         vq_iter_cb = 0.0
         vq_iter_cm = 0.0
+        vq_iter_recon_std_ratio = 0.0
+        vq_iter_recon_grad_ratio = 0.0
+        vq_iter_z_norm_min = float("inf")
+        vq_iter_z_norm_mean = 0.0
+        vq_iter_z_frac_tiny = 0.0
+        vq_iter_emb_norm_min_before = 0.0
+        vq_iter_emb_norm_mean_before = 0.0
+        vq_iter_emb_norm_max_before = 0.0
+        vq_iter_emb_norm_min_after = 0.0
+        vq_iter_emb_norm_mean_after = 0.0
+        vq_iter_emb_norm_max_after = 0.0
         vq_iter_updates = 0
+        iter_token_counts = np.zeros((cfg["VQVAE_CODEBOOK_SIZE"],), dtype=np.int64)
         for _ in range(args.n_mb_wm):
             rng, sample_rng = jax.random.split(rng)
             mb_size = min(args.vqvae_batch_size, buffer_count)
             mb_idx = jax.random.randint(sample_rng, (mb_size,), 0, buffer_count)
             obs_mb = buffer_obs[mb_idx]
-            vqvae_state, vq_metrics, is_finite, grad_is_finite, metric_is_finite = vq_update(vqvae_state, obs_mb)
+            vqvae_state, vq_metrics, token_counts_mb, is_finite, grad_is_finite, metric_is_finite = vq_update(
+                vqvae_state, obs_mb
+            )
+            iter_token_counts += np.asarray(jax.device_get(token_counts_mb))
             if bool(is_finite):
                 loss_val = float(vq_metrics["total_loss"])
                 l1_val = float(vq_metrics["l1"])
                 l2_val = float(vq_metrics["l2"])
                 cb_val = float(vq_metrics["codebook"])
                 cm_val = float(vq_metrics["commitment"])
+                recon_std_ratio_val = float(vq_metrics["recon_std_ratio"])
+                recon_grad_ratio_val = float(vq_metrics["recon_grad_ratio"])
+                z_norm_min_val = float(vq_metrics["z_norm_min"])
+                z_norm_mean_val = float(vq_metrics["z_norm_mean"])
+                z_frac_tiny_val = float(vq_metrics["z_frac_tiny"])
+                emb_norm_min_before_val = float(vq_metrics["emb_norm_min_before"])
+                emb_norm_mean_before_val = float(vq_metrics["emb_norm_mean_before"])
+                emb_norm_max_before_val = float(vq_metrics["emb_norm_max_before"])
+                emb_norm_min_after_val = float(vq_metrics["emb_norm_min_after"])
+                emb_norm_mean_after_val = float(vq_metrics["emb_norm_mean_after"])
+                emb_norm_max_after_val = float(vq_metrics["emb_norm_max_after"])
                 vq_loss_acc += loss_val
                 vq_l1_acc += l1_val
                 vq_l2_acc += l2_val
@@ -390,6 +572,17 @@ def main():
                 vq_iter_l2 += l2_val
                 vq_iter_cb += cb_val
                 vq_iter_cm += cm_val
+                vq_iter_recon_std_ratio += recon_std_ratio_val
+                vq_iter_recon_grad_ratio += recon_grad_ratio_val
+                vq_iter_z_norm_min = min(vq_iter_z_norm_min, z_norm_min_val)
+                vq_iter_z_norm_mean += z_norm_mean_val
+                vq_iter_z_frac_tiny += z_frac_tiny_val
+                vq_iter_emb_norm_min_before += emb_norm_min_before_val
+                vq_iter_emb_norm_mean_before += emb_norm_mean_before_val
+                vq_iter_emb_norm_max_before += emb_norm_max_before_val
+                vq_iter_emb_norm_min_after += emb_norm_min_after_val
+                vq_iter_emb_norm_mean_after += emb_norm_mean_after_val
+                vq_iter_emb_norm_max_after += emb_norm_max_after_val
                 vq_iter_updates += 1
             else:
                 vq_nonfinite += 1
@@ -412,29 +605,157 @@ def main():
                         flush=True,
                     )
                     nonfinite_printed += 1
+
+        iter_token_total = int(iter_token_counts.sum())
+        if iter_token_total > 0:
+            iter_probs = iter_token_counts.astype(np.float64) / float(iter_token_total)
+            iter_nz = iter_probs > 0
+            iter_entropy = float(-(iter_probs[iter_nz] * np.log(iter_probs[iter_nz])).sum())
+            iter_perplexity = float(np.exp(iter_entropy))
+            iter_used_codes = int((iter_token_counts > 0).sum())
+            iter_dead_codes = int(cfg["VQVAE_CODEBOOK_SIZE"] - iter_used_codes)
+            iter_usage_frac = float(iter_used_codes) / float(cfg["VQVAE_CODEBOOK_SIZE"])
+            iter_top1_code_frac = float(iter_token_counts.max()) / float(iter_token_total)
+        else:
+            iter_entropy = float("nan")
+            iter_perplexity = float("nan")
+            iter_used_codes = 0
+            iter_dead_codes = cfg["VQVAE_CODEBOOK_SIZE"]
+            iter_usage_frac = 0.0
+            iter_top1_code_frac = 1.0
+
+        mean_iter = vq_iter_loss / float(max(1, vq_iter_updates))
+        mean_l1 = vq_iter_l1 / float(max(1, vq_iter_updates))
+        mean_l2 = vq_iter_l2 / float(max(1, vq_iter_updates))
+        mean_cb = vq_iter_cb / float(max(1, vq_iter_updates))
+        mean_cm = vq_iter_cm / float(max(1, vq_iter_updates))
+        mean_recon_std_ratio = vq_iter_recon_std_ratio / float(max(1, vq_iter_updates))
+        mean_recon_grad_ratio = vq_iter_recon_grad_ratio / float(max(1, vq_iter_updates))
+        mean_z_norm_min = vq_iter_z_norm_min if vq_iter_z_norm_min != float("inf") else float("nan")
+        mean_z_norm_mean = vq_iter_z_norm_mean / float(max(1, vq_iter_updates))
+        mean_z_frac_tiny = vq_iter_z_frac_tiny / float(max(1, vq_iter_updates))
+        mean_emb_norm_min_before = vq_iter_emb_norm_min_before / float(max(1, vq_iter_updates))
+        mean_emb_norm_mean_before = vq_iter_emb_norm_mean_before / float(max(1, vq_iter_updates))
+        mean_emb_norm_max_before = vq_iter_emb_norm_max_before / float(max(1, vq_iter_updates))
+        mean_emb_norm_min_after = vq_iter_emb_norm_min_after / float(max(1, vq_iter_updates))
+        mean_emb_norm_mean_after = vq_iter_emb_norm_mean_after / float(max(1, vq_iter_updates))
+        mean_emb_norm_max_after = vq_iter_emb_norm_max_after / float(max(1, vq_iter_updates))
+
+        should_run_diag = (
+            (tok_iter == 0)
+            or ((tok_iter + 1) % max(1, args.diag_log_every) == 0)
+            or (tok_iter + 1 == args.n_iters_tok)
+        )
+        diag_iter_stats = None
+        if should_run_diag:
+            diag_iter_stats = _evaluate_tokenizer_diagnostics(
+                vqvae,
+                vqvae_state.params,
+                buffer_obs,
+                eval_indices,
+                cfg["VQVAE_CODEBOOK_SIZE"],
+                args.diag_eval_batch_size,
+            )
+
+        bad_reasons = []
+        if vq_iter_updates == 0:
+            bad_reasons.append("finite_mb==0")
+        if not np.isfinite(iter_perplexity) or iter_perplexity < args.failfast_perplexity_min:
+            bad_reasons.append(f"perplexity<{args.failfast_perplexity_min}")
+        if iter_top1_code_frac > args.failfast_top1_frac_max:
+            bad_reasons.append(f"top1_code_frac>{args.failfast_top1_frac_max}")
+        if np.isfinite(mean_z_frac_tiny) and mean_z_frac_tiny > args.failfast_z_tiny_frac_max:
+            bad_reasons.append(f"z_frac_tiny>{args.failfast_z_tiny_frac_max}")
+
+        if bad_reasons:
+            failfast_bad_streak += 1
+        else:
+            failfast_bad_streak = 0
+
+        diag_rows.append(
+            {
+                "tok_iter": tok_iter + 1,
+                "finite_mb": vq_iter_updates,
+                "total_mb": args.n_mb_wm,
+                "loss": mean_iter,
+                "l1": mean_l1,
+                "l2": mean_l2,
+                "codebook": mean_cb,
+                "commitment": mean_cm,
+                "used_codes": iter_used_codes,
+                "dead_codes": iter_dead_codes,
+                "usage_frac": iter_usage_frac,
+                "entropy": iter_entropy,
+                "perplexity": iter_perplexity,
+                "top1_code_frac": iter_top1_code_frac,
+                "z_norm_min": mean_z_norm_min,
+                "z_norm_mean": mean_z_norm_mean,
+                "z_frac_tiny": mean_z_frac_tiny,
+                "emb_norm_min_before": mean_emb_norm_min_before,
+                "emb_norm_mean_before": mean_emb_norm_mean_before,
+                "emb_norm_max_before": mean_emb_norm_max_before,
+                "emb_norm_min_after": mean_emb_norm_min_after,
+                "emb_norm_mean_after": mean_emb_norm_mean_after,
+                "emb_norm_max_after": mean_emb_norm_max_after,
+                "recon_std_ratio": mean_recon_std_ratio,
+                "recon_grad_ratio": mean_recon_grad_ratio,
+                "diag_recon_mae": float(diag_iter_stats["recon_mae"]) if diag_iter_stats else float("nan"),
+                "diag_recon_mse": float(diag_iter_stats["recon_mse"]) if diag_iter_stats else float("nan"),
+                "diag_recon_std_ratio": float(diag_iter_stats["recon_std_ratio"]) if diag_iter_stats else float("nan"),
+                "diag_recon_grad_ratio": float(diag_iter_stats["recon_grad_ratio"]) if diag_iter_stats else float("nan"),
+                "diag_used_codes": int(diag_iter_stats["used_codes"]) if diag_iter_stats else -1,
+                "diag_dead_codes": int(diag_iter_stats["dead_codes"]) if diag_iter_stats else -1,
+                "diag_usage_frac": float(diag_iter_stats["code_usage_frac"]) if diag_iter_stats else float("nan"),
+                "diag_entropy": float(diag_iter_stats["token_entropy"]) if diag_iter_stats else float("nan"),
+                "diag_perplexity": float(diag_iter_stats["token_perplexity"]) if diag_iter_stats else float("nan"),
+                "diag_top1_code_frac": float(diag_iter_stats["top1_code_frac"]) if diag_iter_stats else float("nan"),
+                "diag_z_norm_min": float(diag_iter_stats["z_norm_min"]) if diag_iter_stats else float("nan"),
+                "diag_z_norm_mean": float(diag_iter_stats["z_norm_mean"]) if diag_iter_stats else float("nan"),
+                "diag_z_frac_tiny": float(diag_iter_stats["z_frac_tiny"]) if diag_iter_stats else float("nan"),
+                "failfast_bad_streak": failfast_bad_streak,
+                "failfast_reasons": "|".join(bad_reasons),
+            }
+        )
+
         if args.print_each_iter and (
             ((tok_iter + 1) % max(1, args.print_every) == 0)
             or (tok_iter == 0)
             or (tok_iter + 1 == args.n_iters_tok)
         ):
-            mean_iter = vq_iter_loss / float(max(1, vq_iter_updates))
-            mean_l1 = vq_iter_l1 / float(max(1, vq_iter_updates))
-            mean_l2 = vq_iter_l2 / float(max(1, vq_iter_updates))
-            mean_cb = vq_iter_cb / float(max(1, vq_iter_updates))
-            mean_cm = vq_iter_cm / float(max(1, vq_iter_updates))
             print(
                 f"[tok {tok_iter + 1:04d}/{args.n_iters_tok}] "
                 f"loss={mean_iter:.6f} l1={mean_l1:.6f} l2={mean_l2:.6f} "
-                f"cb={mean_cb:.6f} cm={mean_cm:.6f} "
-                f"finite_mb={vq_iter_updates}/{args.n_mb_wm}",
+                f"cb={mean_cb:.6f} cm={mean_cm:.6f} finite_mb={vq_iter_updates}/{args.n_mb_wm} "
+                f"usage={iter_used_codes}/{cfg['VQVAE_CODEBOOK_SIZE']} perp={iter_perplexity:.3f} "
+                f"top1={iter_top1_code_frac:.3f} z_tiny={mean_z_frac_tiny:.3f}",
                 flush=True,
             )
+            if diag_iter_stats is not None:
+                print(
+                    f"[diag {tok_iter + 1:04d}] recon_mae={diag_iter_stats['recon_mae']:.6f} "
+                    f"recon_grad_ratio={diag_iter_stats['recon_grad_ratio']:.3f} "
+                    f"usage={diag_iter_stats['used_codes']}/{cfg['VQVAE_CODEBOOK_SIZE']} "
+                    f"perp={diag_iter_stats['token_perplexity']:.3f} "
+                    f"top1={diag_iter_stats['top1_code_frac']:.3f} "
+                    f"z_tiny={diag_iter_stats['z_frac_tiny']:.3f}",
+                    flush=True,
+                )
+
+        if args.failfast_enabled and failfast_bad_streak >= max(1, args.failfast_patience):
+            failfast_reason = (
+                f"Triggered fail-fast at tok_iter={tok_iter + 1}: "
+                f"bad conditions for {failfast_bad_streak} consecutive iterations "
+                f"({'; '.join(bad_reasons) if bad_reasons else 'unknown'})"
+            )
+            print(failfast_reason, flush=True)
+            stopped_early = True
+            break
 
     twm_loss_acc = 0.0
     twm_rew_acc = 0.0
     twm_done_acc = 0.0
     twm_updates = 0
-    for twm_iter in range(args.n_iters_twm):
+    for twm_iter in range(args.n_iters_twm if not stopped_early else 0):
         twm_iter_loss = 0.0
         twm_iter_rew = 0.0
         twm_iter_done = 0.0
@@ -503,14 +824,12 @@ def main():
     diag_after = None
     if args.diag_before_after:
         print("Running tokenizer diagnostics (after updates)...")
-        diag_after, rng = _evaluate_tokenizer_diagnostics(
+        diag_after = _evaluate_tokenizer_diagnostics(
             vqvae,
             vqvae_state.params,
             buffer_obs,
-            buffer_count,
-            rng,
+            eval_indices,
             cfg["VQVAE_CODEBOOK_SIZE"],
-            args.diag_eval_samples,
             args.diag_eval_batch_size,
         )
         print(
@@ -520,16 +839,10 @@ def main():
             f"usage={diag_after['used_codes']}/{cfg['VQVAE_CODEBOOK_SIZE']} "
             f"({diag_after['code_usage_frac']:.3f}) "
             f"entropy={diag_after['token_entropy']:.3f} "
-            f"perplexity={diag_after['token_perplexity']:.2f}"
+            f"perplexity={diag_after['token_perplexity']:.2f} "
+            f"top1={diag_after['top1_code_frac']:.3f} "
+            f"z_tiny={diag_after['z_frac_tiny']:.3f}"
         )
-
-    os.makedirs(args.output_dir, exist_ok=True)
-    tag = (
-        f"smoke_{os.path.basename(os.path.normpath(ckpt))}"
-        f"_tok{args.n_iters_tok}x{args.n_mb_wm}_twm{args.n_iters_twm}x{args.n_mb_wm}"
-    )
-    smoke_ckpt_dir = os.path.join(args.output_dir, tag)
-    os.makedirs(smoke_ckpt_dir, exist_ok=True)
 
     with open(os.path.join(smoke_ckpt_dir, "policy_params.pkl"), "wb") as f:
         pickle.dump(jax.device_get(policy_params), f, protocol=pickle.HIGHEST_PROTOCOL)
@@ -538,11 +851,25 @@ def main():
     with open(os.path.join(smoke_ckpt_dir, "twm_params.pkl"), "wb") as f:
         pickle.dump(jax.device_get(twm_state.params), f, protocol=pickle.HIGHEST_PROTOCOL)
 
+    diag_csv_path = os.path.join(smoke_ckpt_dir, "smoke_tokenizer_diag.csv")
+    if diag_rows:
+        with open(diag_csv_path, "w", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=list(diag_rows[0].keys()))
+            writer.writeheader()
+            writer.writerows(diag_rows)
+    else:
+        with open(diag_csv_path, "w", newline="") as f:
+            f.write("tok_iter\n")
+
     with open(os.path.join(smoke_ckpt_dir, "smoke_metrics.txt"), "w") as f:
         f.write(f"source_checkpoint={ckpt}\n")
+        f.write(f"fixed_eval_indices_path={eval_indices_path}\n")
+        f.write(f"fixed_eval_indices_count={len(eval_indices)}\n")
         f.write(f"vq_updates={vq_updates}\n")
         f.write(f"vq_nonfinite_updates={vq_nonfinite}\n")
         f.write(f"twm_updates={twm_updates}\n")
+        f.write(f"stopped_early={int(stopped_early)}\n")
+        f.write(f"failfast_reason={failfast_reason}\n")
         f.write(f"vq_mean_loss={(vq_loss_acc / max(1, vq_updates)):.8f}\n")
         f.write(f"vq_mean_l1={(vq_l1_acc / max(1, vq_updates)):.8f}\n")
         f.write(f"vq_mean_l2={(vq_l2_acc / max(1, vq_updates)):.8f}\n")
@@ -555,21 +882,38 @@ def main():
         if diag_before is not None:
             f.write(f"diag_before_recon_mae={diag_before['recon_mae']:.8f}\n")
             f.write(f"diag_before_recon_mse={diag_before['recon_mse']:.8f}\n")
+            f.write(f"diag_before_recon_std_ratio={diag_before['recon_std_ratio']:.8f}\n")
+            f.write(f"diag_before_recon_grad_ratio={diag_before['recon_grad_ratio']:.8f}\n")
+            f.write(f"diag_before_z_norm_min={diag_before['z_norm_min']:.8f}\n")
+            f.write(f"diag_before_z_norm_mean={diag_before['z_norm_mean']:.8f}\n")
+            f.write(f"diag_before_z_frac_tiny={diag_before['z_frac_tiny']:.8f}\n")
             f.write(f"diag_before_used_codes={diag_before['used_codes']}\n")
             f.write(f"diag_before_code_usage_frac={diag_before['code_usage_frac']:.8f}\n")
             f.write(f"diag_before_entropy={diag_before['token_entropy']:.8f}\n")
             f.write(f"diag_before_perplexity={diag_before['token_perplexity']:.8f}\n")
+            f.write(f"diag_before_top1_code_frac={diag_before['top1_code_frac']:.8f}\n")
             f.write(f"diag_before_top_codes={diag_before['top_codes']}\n")
         if diag_after is not None:
             f.write(f"diag_after_recon_mae={diag_after['recon_mae']:.8f}\n")
             f.write(f"diag_after_recon_mse={diag_after['recon_mse']:.8f}\n")
+            f.write(f"diag_after_recon_std_ratio={diag_after['recon_std_ratio']:.8f}\n")
+            f.write(f"diag_after_recon_grad_ratio={diag_after['recon_grad_ratio']:.8f}\n")
+            f.write(f"diag_after_z_norm_min={diag_after['z_norm_min']:.8f}\n")
+            f.write(f"diag_after_z_norm_mean={diag_after['z_norm_mean']:.8f}\n")
+            f.write(f"diag_after_z_frac_tiny={diag_after['z_frac_tiny']:.8f}\n")
             f.write(f"diag_after_used_codes={diag_after['used_codes']}\n")
             f.write(f"diag_after_code_usage_frac={diag_after['code_usage_frac']:.8f}\n")
             f.write(f"diag_after_entropy={diag_after['token_entropy']:.8f}\n")
             f.write(f"diag_after_perplexity={diag_after['token_perplexity']:.8f}\n")
+            f.write(f"diag_after_top1_code_frac={diag_after['top1_code_frac']:.8f}\n")
             f.write(f"diag_after_top_codes={diag_after['top_codes']}\n")
 
+    if failfast_reason:
+        with open(os.path.join(smoke_ckpt_dir, "smoke_failfast_reason.txt"), "w") as f:
+            f.write(f"{failfast_reason}\n")
+
     print(f"Saved smoke checkpoint-like params to: {smoke_ckpt_dir}")
+    print(f"Saved tokenizer diag CSV: {diag_csv_path}")
 
     if args.run_triptych:
         os.makedirs(os.path.dirname(args.triptych_output_png) or ".", exist_ok=True)
