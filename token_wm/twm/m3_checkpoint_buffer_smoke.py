@@ -91,6 +91,60 @@ def _build_config(args):
     }
 
 
+def _evaluate_tokenizer_diagnostics(vqvae, vq_params, buffer_obs, buffer_count, rng, codebook_size, num_samples, batch_size):
+    """Evaluate recon quality and codebook usage on a sampled subset of flat buffer."""
+    n = int(max(1, min(buffer_count, num_samples)))
+    rng, sample_rng = jax.random.split(rng)
+    idx = jax.random.randint(sample_rng, (n,), 0, buffer_count)
+    obs_eval = buffer_obs[idx]
+
+    token_counts = np.zeros((codebook_size,), dtype=np.int64)
+    mae_sum = 0.0
+    mse_sum = 0.0
+    seen = 0
+
+    for start in range(0, n, batch_size):
+        end = min(n, start + batch_size)
+        batch = obs_eval[start:end]
+        tokens = vqvae.apply(vq_params, batch, method=vqvae.encode)
+        recon = vqvae.apply(vq_params, tokens, method=vqvae.decode_tokens)
+
+        batch_mae = jnp.mean(jnp.abs(batch - recon))
+        batch_mse = jnp.mean(jnp.square(batch - recon))
+        bsz = end - start
+        mae_sum += float(batch_mae) * bsz
+        mse_sum += float(batch_mse) * bsz
+        seen += bsz
+
+        tok_np = np.asarray(jax.device_get(tokens)).reshape(-1)
+        token_counts += np.bincount(tok_np, minlength=codebook_size)
+
+    probs = token_counts.astype(np.float64) / max(1, int(token_counts.sum()))
+    nz = probs > 0
+    entropy = float(-(probs[nz] * np.log(probs[nz])).sum())
+    perplexity = float(np.exp(entropy))
+    used = int((token_counts > 0).sum())
+    dead = int(codebook_size - used)
+    usage_frac = float(used) / float(codebook_size)
+
+    topk = min(10, codebook_size)
+    top_ids = np.argsort(-token_counts)[:topk]
+    top_pairs = [(int(i), int(token_counts[i])) for i in top_ids]
+
+    stats = {
+        "n_eval": int(seen),
+        "recon_mae": float(mae_sum / max(1, seen)),
+        "recon_mse": float(mse_sum / max(1, seen)),
+        "code_usage_frac": usage_frac,
+        "used_codes": used,
+        "dead_codes": dead,
+        "token_entropy": entropy,
+        "token_perplexity": perplexity,
+        "top_codes": top_pairs,
+    }
+    return stats, rng
+
+
 def main():
     p = argparse.ArgumentParser(description="Run tokenizer+TWM smoke updates from an M3 checkpoint buffer.")
     p.add_argument("--checkpoint_dir", type=str, required=True)
@@ -109,6 +163,12 @@ def main():
     p.add_argument("--print_every", type=int, default=1,
                    help="Print cadence for iterations when --print_each_iter is enabled.")
     p.add_argument("--vqvae_batch_size", type=int, default=256)
+    p.add_argument("--diag_eval_samples", type=int, default=4096,
+                   help="Number of flat-buffer observations to sample for tokenizer diagnostics.")
+    p.add_argument("--diag_eval_batch_size", type=int, default=512,
+                   help="Batch size for tokenizer diagnostics.")
+    p.add_argument("--diag_before_after", action=argparse.BooleanOptionalAction, default=True,
+                   help="Run tokenizer diagnostics before and after smoke updates.")
     p.add_argument("--twm_batch_size", type=int, default=16)
     p.add_argument("--twm_seq_len", type=int, default=20)
     p.add_argument("--burnin_horizon", type=int, default=5)
@@ -229,6 +289,29 @@ def main():
     vq_update = make_vqvae_update_fn(vqvae, cfg)
     twm_update = make_twm_update_fn(twm, vqvae, cfg)
 
+    diag_before = None
+    if args.diag_before_after:
+        print("Running tokenizer diagnostics (before updates)...")
+        diag_before, rng = _evaluate_tokenizer_diagnostics(
+            vqvae,
+            vqvae_state.params,
+            buffer_obs,
+            buffer_count,
+            rng,
+            cfg["VQVAE_CODEBOOK_SIZE"],
+            args.diag_eval_samples,
+            args.diag_eval_batch_size,
+        )
+        print(
+            "[diag before] "
+            f"recon_mae={diag_before['recon_mae']:.6f} "
+            f"recon_mse={diag_before['recon_mse']:.6f} "
+            f"usage={diag_before['used_codes']}/{cfg['VQVAE_CODEBOOK_SIZE']} "
+            f"({diag_before['code_usage_frac']:.3f}) "
+            f"entropy={diag_before['token_entropy']:.3f} "
+            f"perplexity={diag_before['token_perplexity']:.2f}"
+        )
+
     print(
         f"Running smoke updates: tokenizer={args.n_iters_tok}x{args.n_mb_wm}, "
         f"twm={args.n_iters_twm}x{args.n_mb_wm}"
@@ -236,9 +319,17 @@ def main():
     t0 = time.time()
 
     vq_loss_acc = 0.0
+    vq_l1_acc = 0.0
+    vq_l2_acc = 0.0
+    vq_cb_acc = 0.0
+    vq_cm_acc = 0.0
     vq_updates = 0
     for tok_iter in range(args.n_iters_tok):
         vq_iter_loss = 0.0
+        vq_iter_l1 = 0.0
+        vq_iter_l2 = 0.0
+        vq_iter_cb = 0.0
+        vq_iter_cm = 0.0
         vq_iter_updates = 0
         for _ in range(args.n_mb_wm):
             rng, sample_rng = jax.random.split(rng)
@@ -248,9 +339,21 @@ def main():
             vqvae_state, vq_metrics, is_finite = vq_update(vqvae_state, obs_mb)
             if bool(is_finite):
                 loss_val = float(vq_metrics["total_loss"])
+                l1_val = float(vq_metrics["l1"])
+                l2_val = float(vq_metrics["l2"])
+                cb_val = float(vq_metrics["codebook"])
+                cm_val = float(vq_metrics["commitment"])
                 vq_loss_acc += loss_val
+                vq_l1_acc += l1_val
+                vq_l2_acc += l2_val
+                vq_cb_acc += cb_val
+                vq_cm_acc += cm_val
                 vq_updates += 1
                 vq_iter_loss += loss_val
+                vq_iter_l1 += l1_val
+                vq_iter_l2 += l2_val
+                vq_iter_cb += cb_val
+                vq_iter_cm += cm_val
                 vq_iter_updates += 1
         if args.print_each_iter and (
             ((tok_iter + 1) % max(1, args.print_every) == 0)
@@ -258,9 +361,15 @@ def main():
             or (tok_iter + 1 == args.n_iters_tok)
         ):
             mean_iter = vq_iter_loss / float(max(1, vq_iter_updates))
+            mean_l1 = vq_iter_l1 / float(max(1, vq_iter_updates))
+            mean_l2 = vq_iter_l2 / float(max(1, vq_iter_updates))
+            mean_cb = vq_iter_cb / float(max(1, vq_iter_updates))
+            mean_cm = vq_iter_cm / float(max(1, vq_iter_updates))
             print(
                 f"[tok {tok_iter + 1:04d}/{args.n_iters_tok}] "
-                f"loss={mean_iter:.6f} finite_mb={vq_iter_updates}/{args.n_mb_wm}",
+                f"loss={mean_iter:.6f} l1={mean_l1:.6f} l2={mean_l2:.6f} "
+                f"cb={mean_cb:.6f} cm={mean_cm:.6f} "
+                f"finite_mb={vq_iter_updates}/{args.n_mb_wm}",
                 flush=True,
             )
 
@@ -313,7 +422,15 @@ def main():
     elapsed = time.time() - t0
     print(f"Smoke updates complete in {elapsed:.2f}s")
     if vq_updates > 0:
-        print(f"Tokenizer mean loss: {vq_loss_acc / vq_updates:.6f} over {vq_updates} updates")
+        print(
+            "Tokenizer mean: "
+            f"loss={vq_loss_acc / vq_updates:.6f} "
+            f"l1={vq_l1_acc / vq_updates:.6f} "
+            f"l2={vq_l2_acc / vq_updates:.6f} "
+            f"cb={vq_cb_acc / vq_updates:.6f} "
+            f"cm={vq_cm_acc / vq_updates:.6f} "
+            f"over {vq_updates} updates"
+        )
     else:
         print("Tokenizer updates: 0")
     if twm_updates > 0:
@@ -324,6 +441,29 @@ def main():
         )
     else:
         print("TWM updates: 0")
+
+    diag_after = None
+    if args.diag_before_after:
+        print("Running tokenizer diagnostics (after updates)...")
+        diag_after, rng = _evaluate_tokenizer_diagnostics(
+            vqvae,
+            vqvae_state.params,
+            buffer_obs,
+            buffer_count,
+            rng,
+            cfg["VQVAE_CODEBOOK_SIZE"],
+            args.diag_eval_samples,
+            args.diag_eval_batch_size,
+        )
+        print(
+            "[diag after] "
+            f"recon_mae={diag_after['recon_mae']:.6f} "
+            f"recon_mse={diag_after['recon_mse']:.6f} "
+            f"usage={diag_after['used_codes']}/{cfg['VQVAE_CODEBOOK_SIZE']} "
+            f"({diag_after['code_usage_frac']:.3f}) "
+            f"entropy={diag_after['token_entropy']:.3f} "
+            f"perplexity={diag_after['token_perplexity']:.2f}"
+        )
 
     os.makedirs(args.output_dir, exist_ok=True)
     tag = (
@@ -345,10 +485,30 @@ def main():
         f.write(f"vq_updates={vq_updates}\n")
         f.write(f"twm_updates={twm_updates}\n")
         f.write(f"vq_mean_loss={(vq_loss_acc / max(1, vq_updates)):.8f}\n")
+        f.write(f"vq_mean_l1={(vq_l1_acc / max(1, vq_updates)):.8f}\n")
+        f.write(f"vq_mean_l2={(vq_l2_acc / max(1, vq_updates)):.8f}\n")
+        f.write(f"vq_mean_codebook={(vq_cb_acc / max(1, vq_updates)):.8f}\n")
+        f.write(f"vq_mean_commitment={(vq_cm_acc / max(1, vq_updates)):.8f}\n")
         f.write(f"twm_mean_loss={(twm_loss_acc / max(1, twm_updates)):.8f}\n")
         f.write(f"twm_mean_loss_rew={(twm_rew_acc / max(1, twm_updates)):.8f}\n")
         f.write(f"twm_mean_loss_ends={(twm_done_acc / max(1, twm_updates)):.8f}\n")
         f.write(f"elapsed_sec={elapsed:.2f}\n")
+        if diag_before is not None:
+            f.write(f"diag_before_recon_mae={diag_before['recon_mae']:.8f}\n")
+            f.write(f"diag_before_recon_mse={diag_before['recon_mse']:.8f}\n")
+            f.write(f"diag_before_used_codes={diag_before['used_codes']}\n")
+            f.write(f"diag_before_code_usage_frac={diag_before['code_usage_frac']:.8f}\n")
+            f.write(f"diag_before_entropy={diag_before['token_entropy']:.8f}\n")
+            f.write(f"diag_before_perplexity={diag_before['token_perplexity']:.8f}\n")
+            f.write(f"diag_before_top_codes={diag_before['top_codes']}\n")
+        if diag_after is not None:
+            f.write(f"diag_after_recon_mae={diag_after['recon_mae']:.8f}\n")
+            f.write(f"diag_after_recon_mse={diag_after['recon_mse']:.8f}\n")
+            f.write(f"diag_after_used_codes={diag_after['used_codes']}\n")
+            f.write(f"diag_after_code_usage_frac={diag_after['code_usage_frac']:.8f}\n")
+            f.write(f"diag_after_entropy={diag_after['token_entropy']:.8f}\n")
+            f.write(f"diag_after_perplexity={diag_after['token_perplexity']:.8f}\n")
+            f.write(f"diag_after_top_codes={diag_after['top_codes']}\n")
 
     print(f"Saved smoke checkpoint-like params to: {smoke_ckpt_dir}")
 

@@ -33,13 +33,14 @@ class PatchVectorQuantizer(nn.Module):
         indices = jnp.argmin(dist, axis=-1)
         z_q = emb_norm[indices].reshape(b, l, d)
 
-        # Eq. (5)-style losses on latent space with stop-gradient.
-        codebook_loss = jnp.mean((jax.lax.stop_gradient(z) - z_q) ** 2)
-        commitment_loss = jnp.mean((z - jax.lax.stop_gradient(z_q)) ** 2)
+        # Eq. (5)-style losses on normalized latent space.
+        # Paper states latent embeddings are normalized before quantization.
+        codebook_loss = jnp.mean((jax.lax.stop_gradient(z_lookup) - z_q) ** 2)
+        commitment_loss = jnp.mean((z_lookup - jax.lax.stop_gradient(z_q)) ** 2)
 
         # Straight-through estimator: forward uses quantized embedding, backward
-        # passes through the pre-quantized encoder output z.
-        z_q_st = z + jax.lax.stop_gradient(z_q - z)
+        # passes through normalized pre-quantized embeddings.
+        z_q_st = z_lookup + jax.lax.stop_gradient(z_q - z_lookup)
         return z_q_st, codebook_loss, commitment_loss, indices.reshape(b, l)
 
 
