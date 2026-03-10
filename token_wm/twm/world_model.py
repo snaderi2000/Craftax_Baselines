@@ -2,7 +2,7 @@ import jax
 import jax.numpy as jnp
 from flax import linen as nn
 from flax import struct
-from typing import Optional, Any
+from typing import Optional, Any, Literal
 from einops import rearrange
 import optax
 
@@ -24,6 +24,8 @@ class WorldModelOutput:
 @struct.dataclass
 class LossWithIntermediateLosses:
     loss_obs: jnp.ndarray
+    loss_obs_btf: jnp.ndarray
+    loss_obs_ar: jnp.ndarray
     loss_rewards: jnp.ndarray
     loss_ends: jnp.ndarray
     total_loss: jnp.ndarray
@@ -34,6 +36,8 @@ class WorldModel(nn.Module):
     config: TransformerConfig
     reward_num_classes: int = 3
     binary_reward_threshold: float = 0.5
+    obs_loss_mode: Literal["autoregressive", "block_teacher_forcing", "hybrid_btf_ar"] = "autoregressive"
+    ar_aux_weight: float = 0.25
 
     def setup(self):
         # 1. Define Patterns matching PyTorch exactly
@@ -63,11 +67,24 @@ class WorldModel(nn.Module):
 
         act_mask = jnp.zeros((tpb,), dtype=jnp.float32).at[-1].set(1.0)
         all_but_last_obs = jnp.ones((tpb,), dtype=jnp.float32).at[-2].set(0.0)
+        all_tokens = jnp.ones((tpb,), dtype=jnp.float32)
+
+        if self.obs_loss_mode == "autoregressive":
+            obs_head_mask = all_but_last_obs
+        elif self.obs_loss_mode == "block_teacher_forcing":
+            obs_head_mask = self.obs_pattern
+        elif self.obs_loss_mode == "hybrid_btf_ar":
+            obs_head_mask = all_tokens
+        else:
+            raise ValueError(
+                f"Unsupported obs_loss_mode={self.obs_loss_mode}. "
+                "Expected one of: autoregressive, block_teacher_forcing, hybrid_btf_ar."
+            )
 
         self.head_observations = Head(
             embed_dim=self.config.embed_dim,
             output_dim=self.obs_vocab_size,
-            block_mask=all_but_last_obs,
+            block_mask=obs_head_mask,
         )
 
         self.head_rewards = Head(
@@ -240,11 +257,24 @@ class WorldModel(nn.Module):
         logits_ends = output.logits_ends
 
         # ------------------------------------------------------------------
-        # 7. Shift + flatten logits (autoregressive alignment)
+        # 7. Flatten logits for each objective
         # ------------------------------------------------------------------
 
-        # Obs logits: autoregressive shift (predict next token)
-        logits_obs_flat = logits_obs[:, :-1, :].reshape(-1, self.obs_vocab_size)
+        # Obs logits (AR): autoregressive shift (predict next token)
+        logits_obs_ar_flat = logits_obs[:, :-1, :].reshape(-1, self.obs_vocab_size)
+
+        # Obs logits (BTF): timestep t predicts obs tokens of timestep t+1
+        logits_obs_grid = logits_obs.reshape(B, T, tokens_per_block, self.obs_vocab_size)
+        if T > 1:
+            logits_obs_btf_flat = logits_obs_grid[:, :-1, :obs_tokens_per_step, :].reshape(-1, self.obs_vocab_size)
+            mask_valid = ~batch['mask_padding']
+            valid_pairs = jnp.logical_and(mask_valid[:, :-1], mask_valid[:, 1:])
+            valid_pairs_obs = jnp.broadcast_to(valid_pairs[..., None], (B, T - 1, obs_tokens_per_step))
+            next_obs_tokens = obs_tokens[:, 1:, :].astype(jnp.int32)
+            labels_obs_btf_flat = jnp.where(valid_pairs_obs.reshape(-1), next_obs_tokens.reshape(-1), -100)
+        else:
+            logits_obs_btf_flat = jnp.zeros((0, self.obs_vocab_size), dtype=logits_obs.dtype)
+            labels_obs_btf_flat = jnp.zeros((0,), dtype=jnp.int32)
         
         # Reward/ends logits: NO shift (transition-level prediction at action position)
         logits_rew_flat = logits_rew.reshape(-1, self.reward_num_classes)
@@ -252,28 +282,46 @@ class WorldModel(nn.Module):
 
         # ------------------------------------------------------------------
         # 8. Compute losses with COMMON DENOMINATOR
-        #    All three losses are divided by total_tokens so that each
-        #    token position contributes equally to the gradient, regardless
-        #    of which head it belongs to. Observation tokens dominate because
-        #    there are many more of them than reward/done tokens per block.
         # ------------------------------------------------------------------
 
         total_tokens = B * T * self.config.tokens_per_block  # common denominator
 
-        obs_sum, obs_valid = compute_masked_loss_sum(logits_obs_flat, labels_obs_flat, self.obs_vocab_size)
+        obs_ar_sum, obs_ar_valid = compute_masked_loss_sum(logits_obs_ar_flat, labels_obs_flat, self.obs_vocab_size)
+        obs_btf_sum, obs_btf_valid = compute_masked_loss_sum(logits_obs_btf_flat, labels_obs_btf_flat, self.obs_vocab_size)
         rew_sum, rew_valid = compute_masked_loss_sum(logits_rew_flat, labels_rew_flat, self.reward_num_classes)
         ends_sum, ends_valid = compute_masked_loss_sum(logits_ends_flat, labels_ends_flat, 2)
 
-        # Total loss: sum of all masked losses / total tokens
-        total_loss = (obs_sum + rew_sum + ends_sum) / (total_tokens + 1e-9)
+        if self.obs_loss_mode == "autoregressive":
+            obs_sum_effective = obs_ar_sum
+        elif self.obs_loss_mode == "block_teacher_forcing":
+            obs_sum_effective = obs_btf_sum
+        elif self.obs_loss_mode == "hybrid_btf_ar":
+            obs_sum_effective = obs_btf_sum + (self.ar_aux_weight * obs_ar_sum)
+        else:
+            raise ValueError(
+                f"Unsupported obs_loss_mode={self.obs_loss_mode}. "
+                "Expected one of: autoregressive, block_teacher_forcing, hybrid_btf_ar."
+            )
+
+        # Total loss: sum of selected obs loss and transition losses / total tokens
+        total_loss = (obs_sum_effective + rew_sum + ends_sum) / (total_tokens + 1e-9)
 
         # Per-head averages for logging (each over its own valid count)
-        loss_obs = jnp.where(obs_valid > 0, obs_sum / (obs_valid + 1e-9), 0.0)
+        loss_obs_ar = jnp.where(obs_ar_valid > 0, obs_ar_sum / (obs_ar_valid + 1e-9), 0.0)
+        loss_obs_btf = jnp.where(obs_btf_valid > 0, obs_btf_sum / (obs_btf_valid + 1e-9), 0.0)
         loss_rew = jnp.where(rew_valid > 0, rew_sum / (rew_valid + 1e-9), 0.0)
         loss_ends = jnp.where(ends_valid > 0, ends_sum / (ends_valid + 1e-9), 0.0)
+        if self.obs_loss_mode == "autoregressive":
+            loss_obs = loss_obs_ar
+        elif self.obs_loss_mode == "block_teacher_forcing":
+            loss_obs = loss_obs_btf
+        else:
+            loss_obs = loss_obs_btf + (self.ar_aux_weight * loss_obs_ar)
 
         return LossWithIntermediateLosses(
             loss_obs=loss_obs,
+            loss_obs_btf=loss_obs_btf,
+            loss_obs_ar=loss_obs_ar,
             loss_rewards=loss_rew,
             loss_ends=loss_ends,
             total_loss=total_loss,
