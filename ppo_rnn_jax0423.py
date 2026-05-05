@@ -236,7 +236,11 @@ class ActorCriticRNN(nn.Module):
             rnn_input_features = nn.Dense(256, kernel_init=orthogonal(2))(rnn_input_features)
             rnn_input_features = nn.relu(rnn_input_features)
             feedforward_features = z_t
-        elif self.config["ARCH"] in ("achdist_strong", "achdist_baseline"):
+        elif self.config["ARCH"] in (
+            "achdist_strong",
+            "achdist_baseline",
+            "achdist_gru_baseline",
+        ):
             x_enc = obs.astype(jnp.float32)
             if self.config["ACHDIST_USE_ORIGINAL_IMPALA"]:
                 channels = tuple(
@@ -326,7 +330,7 @@ class ActorCriticRNN(nn.Module):
                 jax.debug.print("shared input no-GRU shape: {s}", s=shared_input.shape)
 
         # 5. Actor Head
-        if self.config["ARCH"] == "achdist_baseline":
+        if self.config["ARCH"] in ("achdist_baseline", "achdist_gru_baseline"):
             h_actor = shared_input
         elif self.config["ARCH"] == "achdist_strong":
             h_actor = nn.LayerNorm()(shared_input)
@@ -349,7 +353,7 @@ class ActorCriticRNN(nn.Module):
         pi = distrax.Categorical(logits=actor_logits)
 
         # 6. Critic Head
-        if self.config["ARCH"] == "achdist_baseline":
+        if self.config["ARCH"] in ("achdist_baseline", "achdist_gru_baseline"):
             h_critic = shared_input
         elif self.config["ARCH"] == "achdist_strong":
             h_critic = nn.LayerNorm()(shared_input)
@@ -452,7 +456,11 @@ def make_train(config):
             print(f"  use_gru: {config['USE_GRU']}")
             print(f"  no_gru_memory: {config['NO_GRU_MEMORY']}")
             print(f"  normalize_value_targets: {config['NORMALIZE_VALUE_TARGETS']}")
-            if config["ARCH"] in ("achdist_strong", "achdist_baseline"):
+            if config["ARCH"] in (
+                "achdist_strong",
+                "achdist_baseline",
+                "achdist_gru_baseline",
+            ):
                 print(f"  achdist_impala_channels: {config['ACHDIST_IMPALA_CHANNELS']}")
                 print(f"  achdist_use_original_impala: {config['ACHDIST_USE_ORIGINAL_IMPALA']}")
                 print(f"  achdist_impala_outsize: {config['ACHDIST_IMPALA_OUTSIZE']}")
@@ -912,7 +920,12 @@ if __name__ == "__main__":
     parser.add_argument(
         "--arch",
         type=str,
-        choices=("paper", "achdist_strong", "achdist_baseline"),
+        choices=(
+            "paper",
+            "achdist_strong",
+            "achdist_baseline",
+            "achdist_gru_baseline",
+        ),
         default="paper",
     )
     parser.add_argument("--achdist_impala_outsize", type=int, default=256)
