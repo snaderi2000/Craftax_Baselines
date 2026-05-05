@@ -231,7 +231,10 @@ class ActorCriticRNN(nn.Module):
         elif self.config["ARCH"] in ("achdist_strong", "achdist_baseline"):
             x_enc = obs.astype(jnp.float32)
             if self.config["ACHDIST_USE_ORIGINAL_IMPALA"]:
-                for ch in (64, 128, 128):
+                channels = tuple(
+                    int(ch) for ch in self.config["ACHDIST_IMPALA_CHANNELS"].split(",")
+                )
+                for ch in channels:
                     x_enc = ImpalaStack(ch)(x_enc)
                 x_enc = nn.relu(x_enc)
             else:
@@ -807,6 +810,7 @@ if __name__ == "__main__":
     parser.add_argument("--achdist_impala_outsize", type=int, default=256)
     parser.add_argument("--achdist_hidsize", type=int, default=1024)
     parser.add_argument("--achdist_vf_head_hidsize", type=int, default=1280)
+    parser.add_argument("--achdist_impala_channels", type=str, default="64,64,128")
     parser.add_argument(
         "--achdist_use_original_impala",
         action=argparse.BooleanOptionalAction,
