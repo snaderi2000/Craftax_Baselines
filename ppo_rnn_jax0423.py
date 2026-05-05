@@ -3,6 +3,16 @@ import os
 import sys
 
 import jax
+
+# Compatibility for newer Optax/Flax code running on JAX versions before
+# jax.tree was introduced, such as jax==0.4.23.
+if not hasattr(jax, "tree"):
+    class _JaxTreeCompat:
+        map = staticmethod(jax.tree_util.tree_map)
+        leaves = staticmethod(jax.tree_util.tree_leaves)
+
+    jax.tree = _JaxTreeCompat()
+
 import jax.numpy as jnp
 import flax.linen as nn
 import numpy as np
