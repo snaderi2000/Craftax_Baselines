@@ -15,6 +15,31 @@ pip install -r requirements.txt -f https://storage.googleapis.com/jax-releases/j
 pre-commit install
 ```
 
+## V100 Installation
+For V100 machines, use the separate pinned requirements file:
+
+```commandline
+conda create -n craftax-v100 python=3.10 -y
+conda activate craftax-v100
+pip install -U pip
+
+pip install -r requirements_v100.txt \
+  -f https://storage.googleapis.com/jax-releases/jax_cuda_releases.html
+```
+
+Verify the install:
+
+```commandline
+python - <<'PY'
+import jax, numpy as np, scipy
+print("jax", jax.__version__)
+print("numpy", np.__version__)
+print("scipy", scipy.__version__)
+print(jax.devices())
+print(jax.lib.xla_bridge.get_backend().platform_version)
+PY
+```
+
 # Run Experiments
 
 ### PPO
