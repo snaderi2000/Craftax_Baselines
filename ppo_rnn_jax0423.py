@@ -50,6 +50,11 @@ from craftax.craftax_env import make_craftax_env_from_name
 # Code adapted from the original implementation made by Chris Lu
 # Original code located at https://github.com/luchris429/purejaxrl
 
+class PPOTrainState(TrainState):
+    target_mean: jnp.ndarray
+    target_mean_sq: jnp.ndarray
+    target_debias: jnp.ndarray
+
 class ImpalaResBlock(nn.Module):
     channels: int
     groups: int = 32
@@ -95,6 +100,39 @@ class ImpalaStack(nn.Module):
         x = ImpalaResBlock(self.channels)(x)
         return x
 
+class AchDistImpalaResBlock(nn.Module):
+    channels: int
+    groups: int = 1
+
+    @nn.compact
+    def __call__(self, x):
+        residual = x
+        x = nn.GroupNorm(num_groups=self.groups, epsilon=1e-5)(x)
+        x = nn.Conv(self.channels, (3, 3), strides=(1, 1), padding="SAME")(x)
+        x = nn.relu(x)
+        x = nn.GroupNorm(num_groups=self.groups, epsilon=1e-5)(x)
+        x = nn.Conv(self.channels, (3, 3), strides=(1, 1), padding="SAME")(x)
+        x = nn.relu(x)
+        return residual + x
+
+class AchDistImpalaStack(nn.Module):
+    channels: int
+    groups: int = 1
+    first_conv_norm: bool = True
+    post_pool_groups: int = 1
+
+    @nn.compact
+    def __call__(self, x):
+        if self.first_conv_norm:
+            x = nn.GroupNorm(num_groups=self.groups, epsilon=1e-5)(x)
+        x = nn.Conv(self.channels, (3, 3), strides=(1, 1), padding="SAME")(x)
+        x = nn.relu(x)
+        x = nn.max_pool(x, window_shape=(3, 3), strides=(2, 2), padding="SAME")
+        x = nn.GroupNorm(num_groups=self.post_pool_groups, epsilon=1e-5)(x)
+        x = AchDistImpalaResBlock(self.channels, groups=self.groups)(x)
+        x = AchDistImpalaResBlock(self.channels, groups=self.groups)(x)
+        return x
+
 class DenseResBlock(nn.Module):
     width: int
 
@@ -138,36 +176,66 @@ class ActorCriticRNN(nn.Module):
     def __call__(self, hidden, x):
         obs, dones = x  # x is (Time, Batch, 63, 63, 3) and (Time, Batch)
 
-        # 1. Impala CNN Encoder (Paper Section A.1.1)
-        x_enc = obs.astype(jnp.float32)
-        for ch in (64, 64, 128):
-            x_enc = ImpalaStack(ch)(x_enc)
-            #x_enc = nn.LayerNorm()(x_enc)
-        x_enc = nn.relu(x_enc)
-        
-        # Flatten CNN output while preserving Time (T) and Batch (B) dimensions
-        # Paper calls this z_t (dimension 8192) [cite: 628]
-        z_t = x_enc.reshape((*x_enc.shape[:2], -1)) 
+        # 1. CNN encoder.
+        if self.config["ARCH"] == "paper":
+            x_enc = obs.astype(jnp.float32)
+            for ch in (64, 64, 128):
+                x_enc = ImpalaStack(ch)(x_enc)
+            x_enc = nn.relu(x_enc)
+            # Paper-style raw flattened IMPALA feature: [T, B, 8192].
+            z_t = x_enc.reshape((*x_enc.shape[:2], -1))
 
-        # 2. RNN Bridge (Paper Section A.1.1)
-        # (a) Layer norm, (b) Linear map to 256, (c) ReLU [cite: 629]
-        rnn_input_features = nn.LayerNorm()(z_t)
-        rnn_input_features = nn.Dense(256, kernel_init=orthogonal(2))(rnn_input_features)
-        rnn_input_features = nn.relu(rnn_input_features)
+            # RNN bridge: 8192 -> 256.
+            rnn_input_features = nn.LayerNorm()(z_t)
+            rnn_input_features = nn.Dense(256, kernel_init=orthogonal(2))(rnn_input_features)
+            rnn_input_features = nn.relu(rnn_input_features)
+            feedforward_features = z_t
+        elif self.config["ARCH"] in ("achdist_strong", "achdist_baseline"):
+            x_enc = obs.astype(jnp.float32)
+            for i, ch in enumerate((64, 128, 128)):
+                x_enc = AchDistImpalaStack(
+                    ch,
+                    groups=1,
+                    first_conv_norm=i > 0,
+                    post_pool_groups=1,
+                )(x_enc)
+            x_enc = x_enc.reshape((*x_enc.shape[:2], -1))
+
+            # Match Achievement-Distillation PPOGRUStrong:
+            # IMPALA dense outsize 256, then visual latent hidsize 1024.
+            x_enc = nn.LayerNorm()(x_enc)
+            x_enc = nn.Dense(
+                self.config["ACHDIST_IMPALA_OUTSIZE"],
+                kernel_init=orthogonal(2),
+            )(x_enc)
+            x_enc = nn.relu(x_enc)
+            feedforward_features = nn.LayerNorm()(x_enc)
+            feedforward_features = nn.Dense(
+                self.config["ACHDIST_HIDSIZE"],
+                kernel_init=orthogonal(2),
+            )(feedforward_features)
+            feedforward_features = nn.relu(feedforward_features)
+
+            # RNN bridge: 1024 -> 256.
+            rnn_input_features = nn.LayerNorm()(feedforward_features)
+            rnn_input_features = nn.Dense(256, kernel_init=orthogonal(2))(rnn_input_features)
+            rnn_input_features = nn.relu(rnn_input_features)
+        else:
+            raise ValueError(f"Unknown ARCH={self.config['ARCH']}")
 
         # 3. RNN Update (Paper calls output y_t) [cite: 630]
-        if self.config["USE_GRU"] or self.config["NO_GRU_MEMORY"] == "masked_gru":
+        if self.config["ARCH"] == "achdist_baseline":
+            shared_input = feedforward_features
+        elif self.config["USE_GRU"] or self.config["NO_GRU_MEMORY"] == "masked_gru":
             rnn_in = (rnn_input_features, dones)
             hidden, y_t = ScannedRNN()(hidden, rnn_in)
             if not self.config["USE_GRU"]:
                 y_t = 0.0 * y_t
             y_t = nn.relu(y_t)
-            # 4. Concatenate z_t and y_t (Paper Section A.1.1)
-            # Resulting embedding is 8192 + 256 = 8448 dimensions.
-            shared_input = jnp.concatenate([y_t, z_t], axis=-1)
+            shared_input = jnp.concatenate([feedforward_features, y_t], axis=-1)
         else:
             # No-GRU ablation: remove recurrent state updates while preserving
-            # the original 8448-dim head input shape for a closer/stabler graph.
+            # the original head input shape for a closer/stabler graph.
             if self.config["NO_GRU_MEMORY"] == "zeros":
                 memory_features = 0.0 * rnn_input_features
             elif self.config["NO_GRU_MEMORY"] == "projection":
@@ -176,37 +244,54 @@ class ActorCriticRNN(nn.Module):
                 raise ValueError(
                     f"Unknown NO_GRU_MEMORY={self.config['NO_GRU_MEMORY']}"
                 )
-            shared_input = jnp.concatenate([memory_features, z_t], axis=-1)
+            shared_input = jnp.concatenate([feedforward_features, memory_features], axis=-1)
 
-        # 5. Actor Head (Paper Section A.1.1)
-        h_actor = nn.LayerNorm()(shared_input)
-        h_actor = nn.Dense(self.config["LAYER_SIZE"], kernel_init=orthogonal(2))(h_actor)
-        h_actor = nn.relu(h_actor)
-        
-        # These blocks are now linear (ReLU removed from inside the class)
-        h_actor = DenseResBlock(self.config["LAYER_SIZE"])(h_actor)
-        h_actor = DenseResBlock(self.config["LAYER_SIZE"])(h_actor)
-        
-        # NEW: Added ReLU here to act as the 'cap' after linear residual additions
-        h_actor = nn.relu(h_actor) 
-        
-        h_actor = nn.LayerNorm()(h_actor)
+        # 5. Actor Head
+        if self.config["ARCH"] == "achdist_baseline":
+            h_actor = shared_input
+        elif self.config["ARCH"] == "achdist_strong":
+            h_actor = nn.LayerNorm()(shared_input)
+            h_actor = nn.Dense(self.config["LAYER_SIZE"], kernel_init=orthogonal(2))(h_actor)
+            h_actor = nn.relu(h_actor)
+        else:
+            h_actor = nn.LayerNorm()(shared_input)
+            h_actor = nn.Dense(self.config["LAYER_SIZE"], kernel_init=orthogonal(2))(h_actor)
+            h_actor = nn.relu(h_actor)
+            
+            # These blocks are now linear (ReLU removed from inside the class)
+            h_actor = DenseResBlock(self.config["LAYER_SIZE"])(h_actor)
+            h_actor = DenseResBlock(self.config["LAYER_SIZE"])(h_actor)
+            
+            # NEW: Added ReLU here to act as the 'cap' after linear residual additions
+            h_actor = nn.relu(h_actor) 
+            
+            h_actor = nn.LayerNorm()(h_actor)
         actor_logits = nn.Dense(self.action_dim, kernel_init=orthogonal(0.01))(h_actor)
         pi = distrax.Categorical(logits=actor_logits)
 
-        # 6. Critic Head (Paper Section A.1.1)
-        h_critic = nn.LayerNorm()(shared_input)
-        h_critic = nn.Dense(self.config["LAYER_SIZE"], kernel_init=orthogonal(2))(h_critic)
-        h_critic = nn.relu(h_critic)
-        
-        # These blocks are now linear
-        h_critic = DenseResBlock(self.config["LAYER_SIZE"])(h_critic)
-        h_critic = DenseResBlock(self.config["LAYER_SIZE"])(h_critic)
-        
-        # NEW: Added ReLU here to act as the 'cap' after linear residual additions
-        h_critic = nn.relu(h_critic)
-        
-        h_critic = nn.LayerNorm()(h_critic)
+        # 6. Critic Head
+        if self.config["ARCH"] == "achdist_baseline":
+            h_critic = shared_input
+        elif self.config["ARCH"] == "achdist_strong":
+            h_critic = nn.LayerNorm()(shared_input)
+            h_critic = nn.Dense(
+                self.config["ACHDIST_VF_HEAD_HIDSIZE"],
+                kernel_init=orthogonal(2),
+            )(h_critic)
+            h_critic = nn.relu(h_critic)
+        else:
+            h_critic = nn.LayerNorm()(shared_input)
+            h_critic = nn.Dense(self.config["LAYER_SIZE"], kernel_init=orthogonal(2))(h_critic)
+            h_critic = nn.relu(h_critic)
+            
+            # These blocks are now linear
+            h_critic = DenseResBlock(self.config["LAYER_SIZE"])(h_critic)
+            h_critic = DenseResBlock(self.config["LAYER_SIZE"])(h_critic)
+            
+            # NEW: Added ReLU here to act as the 'cap' after linear residual additions
+            h_critic = nn.relu(h_critic)
+            
+            h_critic = nn.LayerNorm()(h_critic)
         critic_value = nn.Dense(1, kernel_init=orthogonal(1.0))(h_critic)
 
         return hidden, pi, jnp.squeeze(critic_value, axis=-1)
@@ -287,11 +372,40 @@ def make_train(config):
                 optax.clip_by_global_norm(config["MAX_GRAD_NORM"]),
                 optax.adam(config["LR"], eps=1e-5),
             )
-        train_state = TrainState.create(
+        train_state = PPOTrainState.create(
             apply_fn=network.apply,
             params=network_params,
             tx=tx,
+            target_mean=jnp.array(0.0),
+            target_mean_sq=jnp.array(0.0),
+            target_debias=jnp.array(0.0),
         )
+
+        def _target_mean_var(train_state):
+            debias = jnp.maximum(train_state.target_debias, config["TARGET_NORM_EPS"])
+            mean = train_state.target_mean / debias
+            mean_sq = train_state.target_mean_sq / debias
+            var = jnp.maximum(mean_sq - mean**2, config["TARGET_NORM_MIN_VAR"])
+            return mean, var
+
+        def _normalize_value(train_state, value):
+            mean, var = _target_mean_var(train_state)
+            return (value - mean) / jnp.sqrt(var)
+
+        def _denormalize_value(train_state, value):
+            mean, var = _target_mean_var(train_state)
+            return value * jnp.sqrt(var) + mean
+
+        def _update_target_stats(train_state, targets):
+            beta = config["TARGET_NORM_BETA"]
+            batch_mean = jnp.mean(targets)
+            batch_mean_sq = jnp.mean(jnp.square(targets))
+            return train_state.replace(
+                target_mean=beta * train_state.target_mean + (1.0 - beta) * batch_mean,
+                target_mean_sq=beta * train_state.target_mean_sq
+                + (1.0 - beta) * batch_mean_sq,
+                target_debias=beta * train_state.target_debias + (1.0 - beta),
+            )
 
         # INIT ENV
         rng, _rng = jax.random.split(rng)
@@ -318,6 +432,8 @@ def make_train(config):
                 # SELECT ACTION
                 ac_in = (last_obs[np.newaxis, :], last_done[np.newaxis, :])
                 hstate, pi, value = network.apply(train_state.params, hstate, ac_in)
+                if config["NORMALIZE_VALUE_TARGETS"]:
+                    value = _denormalize_value(train_state, value)
                 action = pi.sample(seed=_rng)
                 log_prob = pi.log_prob(action)
                 value, action, log_prob = (
@@ -362,6 +478,8 @@ def make_train(config):
             ) = runner_state
             ac_in = (last_obs[np.newaxis, :], last_done[np.newaxis, :])
             _, _, last_val = network.apply(train_state.params, hstate, ac_in)
+            if config["NORMALIZE_VALUE_TARGETS"]:
+                last_val = _denormalize_value(train_state, last_val)
             last_val = last_val.squeeze(0)
 
             def _calculate_gae(traj_batch, last_val, last_done):
@@ -396,6 +514,8 @@ def make_train(config):
             def _update_epoch(update_state, unused):
                 def _update_minbatch(train_state, batch_info):
                     init_hstate, traj_batch, advantages, targets = batch_info
+                    if config["NORMALIZE_VALUE_TARGETS"]:
+                        train_state = _update_target_stats(train_state, targets)
 
                     def _loss_fn(params, init_hstate, traj_batch, gae, targets):
                         # RERUN NETWORK
@@ -405,11 +525,17 @@ def make_train(config):
                         log_prob = pi.log_prob(traj_batch.action)
 
                         # CALCULATE VALUE LOSS
-                        value_pred_clipped = traj_batch.value + (
-                            value - traj_batch.value
+                        if config["NORMALIZE_VALUE_TARGETS"]:
+                            old_value = _normalize_value(train_state, traj_batch.value)
+                            value_targets = _normalize_value(train_state, targets)
+                        else:
+                            old_value = traj_batch.value
+                            value_targets = targets
+                        value_pred_clipped = old_value + (
+                            value - old_value
                         ).clip(-config["CLIP_EPS"], config["CLIP_EPS"])
-                        value_losses = jnp.square(value - targets)
-                        value_losses_clipped = jnp.square(value_pred_clipped - targets)
+                        value_losses = jnp.square(value - value_targets)
+                        value_losses_clipped = jnp.square(value_pred_clipped - value_targets)
                         value_loss = (
                             0.5 * jnp.maximum(value_losses, value_losses_clipped).mean()
                         )
@@ -628,6 +754,23 @@ if __name__ == "__main__":
     )
     parser.add_argument("--num_repeats", type=int, default=1)
     parser.add_argument("--layer_size", type=int, default=512)
+    parser.add_argument(
+        "--arch",
+        type=str,
+        choices=("paper", "achdist_strong", "achdist_baseline"),
+        default="paper",
+    )
+    parser.add_argument("--achdist_impala_outsize", type=int, default=256)
+    parser.add_argument("--achdist_hidsize", type=int, default=1024)
+    parser.add_argument("--achdist_vf_head_hidsize", type=int, default=1280)
+    parser.add_argument(
+        "--normalize_value_targets",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+    )
+    parser.add_argument("--target_norm_beta", type=float, default=0.99)
+    parser.add_argument("--target_norm_eps", type=float, default=1e-2)
+    parser.add_argument("--target_norm_min_var", type=float, default=1e-2)
     parser.add_argument("--use_gru", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument(
         "--no_gru_memory",
