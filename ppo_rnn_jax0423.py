@@ -55,6 +55,10 @@ class PPOTrainState(TrainState):
     target_mean_sq: jnp.ndarray
     target_debias: jnp.ndarray
 
+class MetricState(NamedTuple):
+    achievement_successes: jnp.ndarray
+    episodes: jnp.ndarray
+
 def unfused_relu(x):
     # Avoid XLA lowering Conv+ReLU into a cuDNN fused conv custom call on V100.
     zero = jax.lax.stop_gradient(jnp.zeros((), dtype=x.dtype))
@@ -526,6 +530,7 @@ def make_train(config):
                     hstate,
                     rng,
                     update_step,
+                    metric_state,
                 ) = runner_state
                 rng, _rng = jax.random.split(rng)
 
@@ -558,10 +563,11 @@ def make_train(config):
                     hstate,
                     rng,
                     update_step,
+                    metric_state,
                 )
                 return runner_state, transition
 
-            initial_hstate = runner_state[-3]
+            initial_hstate = runner_state[4]
             runner_state, traj_batch = jax.lax.scan(
                 _env_step, runner_state, None, config["NUM_STEPS"]
             )
@@ -575,6 +581,7 @@ def make_train(config):
                 hstate,
                 rng,
                 update_step,
+                metric_state,
             ) = runner_state
             ac_in = (last_obs[np.newaxis, :], last_done[np.newaxis, :])
             _, _, last_val = network.apply(train_state.params, hstate, ac_in)
@@ -734,6 +741,42 @@ def make_train(config):
                 / traj_batch.info["returned_episode"].sum(),
                 traj_batch.info,
             )
+            if config["CUMULATIVE_ACHIEVEMENT_LOGGING"]:
+                metric_state = runner_state[-1]
+                returned_episode = traj_batch.info["returned_episode"]
+                achievement_keys = sorted(
+                    [
+                        k
+                        for k in traj_batch.info.keys()
+                        if "achievements" in k.lower()
+                    ]
+                )
+                if len(achievement_keys) > 0:
+                    successes = jnp.stack(
+                        [
+                            ((traj_batch.info[k] > 0) * returned_episode).sum()
+                            for k in achievement_keys
+                        ]
+                    )
+                    episodes = returned_episode.sum()
+                    new_metric_state = MetricState(
+                        achievement_successes=metric_state.achievement_successes
+                        + successes,
+                        episodes=metric_state.episodes + episodes,
+                    )
+                    cumulative_rates = (
+                        100.0
+                        * new_metric_state.achievement_successes
+                        / jnp.maximum(new_metric_state.episodes, 1)
+                    )
+                    metric["cumulative_reward"] = cumulative_rates.mean()
+                    metric["cumulative_score"] = (
+                        jnp.exp(jnp.mean(jnp.log1p(cumulative_rates))) - 1
+                    )
+                    for i, key in enumerate(achievement_keys):
+                        metric[f"cumulative_{key}"] = cumulative_rates[i]
+                    metric["cumulative_episodes"] = new_metric_state.episodes
+                    metric_state = new_metric_state
             rng = update_state[-1]
             if config["DEBUG"] and config["USE_WANDB"]:
 
@@ -751,10 +794,15 @@ def make_train(config):
                 hstate,
                 rng,
                 update_step + 1,
+                metric_state,
             )
             return runner_state, metric
 
         rng, _rng = jax.random.split(rng)
+        metric_state = MetricState(
+            achievement_successes=jnp.zeros((22,), dtype=jnp.float32),
+            episodes=jnp.array(0.0, dtype=jnp.float32),
+        )
         runner_state = (
             train_state,
             env_state,
@@ -763,6 +811,7 @@ def make_train(config):
             init_hstate,
             _rng,
             0,
+            metric_state,
         )
         runner_state, metric = jax.lax.scan(
             _update_step, runner_state, None, config["NUM_UPDATES"]
@@ -845,6 +894,11 @@ if __name__ == "__main__":
     )
     parser.add_argument("--debug", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--debug_shapes", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument(
+        "--cumulative_achievement_logging",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+    )
     parser.add_argument("--jit", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--seed", type=int, default=np.random.randint(2**31))
     parser.add_argument(

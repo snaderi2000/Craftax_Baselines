@@ -13,12 +13,15 @@ def create_log_dict(info, config):
         "episode_return": info["returned_episode_returns"],
         "episode_length": info["returned_episode_lengths"],
     }
+    for k, v in info.items():
+        if k.startswith("cumulative_"):
+            to_log[k] = v
 
     sum_achievements = 0
     achievement_rates = []
 
     for k, v in info.items():
-        if "achievements" in k.lower():
+        if "achievements" in k.lower() and not k.startswith("cumulative_"):
             to_log[k] = v
             achievement_rates.append(v) # collect for score
             sum_achievements += v / 100.0
@@ -70,10 +73,17 @@ def batch_log(update_step, log, config):
                         agg.append(val)
 
             if len(agg) > 0:
-                if key in [
+                if key.startswith("cumulative_"):
+                    agg_logs[key] = np.mean(agg)
+                elif key in [
                     "episode_length",
                     "episode_return",
                     "score",
+                    "reward",
+                    "achievements",
+                    "cumulative_score",
+                    "cumulative_reward",
+                    "cumulative_episodes",
                     "wm/loss_total",
                     "wm/loss_obs",
                     "wm/loss_rewards",
