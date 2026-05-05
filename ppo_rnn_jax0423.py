@@ -156,14 +156,17 @@ class ActorCriticRNN(nn.Module):
         rnn_input_features = nn.relu(rnn_input_features)
 
         # 3. RNN Update (Paper calls output y_t) [cite: 630]
-        # We pass the processed features and dones into the ScannedRNN
-        rnn_in = (rnn_input_features, dones)
-        hidden, y_t = ScannedRNN()(hidden, rnn_in)
-        y_t = nn.relu(y_t)
-
-        # 4. Concatenate z_t and y_t (Paper Section A.1.1)
-        # Resulting embedding is 8192 + 256 = 8448 dimensions 
-        shared_input = jnp.concatenate([y_t, z_t], axis=-1)
+        if self.config["USE_GRU"]:
+            rnn_in = (rnn_input_features, dones)
+            hidden, y_t = ScannedRNN()(hidden, rnn_in)
+            y_t = nn.relu(y_t)
+            # 4. Concatenate z_t and y_t (Paper Section A.1.1)
+            # Resulting embedding is 8192 + 256 = 8448 dimensions.
+            shared_input = jnp.concatenate([y_t, z_t], axis=-1)
+        else:
+            # No-GRU ablation: remove recurrent features entirely, so actor and
+            # critic heads consume only the flattened CNN embedding.
+            shared_input = z_t
 
         # 5. Actor Head (Paper Section A.1.1)
         h_actor = nn.LayerNorm()(shared_input)
@@ -615,6 +618,7 @@ if __name__ == "__main__":
     )
     parser.add_argument("--num_repeats", type=int, default=1)
     parser.add_argument("--layer_size", type=int, default=512)
+    parser.add_argument("--use_gru", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--wandb_project", type=str)
     parser.add_argument("--wandb_entity", type=str)
     parser.add_argument(
