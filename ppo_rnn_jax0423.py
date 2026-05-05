@@ -230,14 +230,19 @@ class ActorCriticRNN(nn.Module):
             feedforward_features = z_t
         elif self.config["ARCH"] in ("achdist_strong", "achdist_baseline"):
             x_enc = obs.astype(jnp.float32)
-            for i, ch in enumerate((64, 128, 128)):
-                x_enc = AchDistImpalaStack(
-                    ch,
-                    groups=1,
-                    first_conv_norm=i > 0,
-                    post_pool_groups=1,
-                    use_unfused_relu=self.config["UNFUSED_CONV_RELU"],
-                )(x_enc)
+            if self.config["ACHDIST_USE_ORIGINAL_IMPALA"]:
+                for ch in (64, 128, 128):
+                    x_enc = ImpalaStack(ch)(x_enc)
+                x_enc = nn.relu(x_enc)
+            else:
+                for i, ch in enumerate((64, 128, 128)):
+                    x_enc = AchDistImpalaStack(
+                        ch,
+                        groups=1,
+                        first_conv_norm=i > 0,
+                        post_pool_groups=1,
+                        use_unfused_relu=self.config["UNFUSED_CONV_RELU"],
+                    )(x_enc)
             x_enc = x_enc.reshape((*x_enc.shape[:2], -1))
 
             # Match Achievement-Distillation PPOGRUStrong:
@@ -802,6 +807,11 @@ if __name__ == "__main__":
     parser.add_argument("--achdist_impala_outsize", type=int, default=256)
     parser.add_argument("--achdist_hidsize", type=int, default=1024)
     parser.add_argument("--achdist_vf_head_hidsize", type=int, default=1280)
+    parser.add_argument(
+        "--achdist_use_original_impala",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+    )
     parser.add_argument(
         "--normalize_value_targets",
         action=argparse.BooleanOptionalAction,
