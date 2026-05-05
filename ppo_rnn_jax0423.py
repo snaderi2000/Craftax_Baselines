@@ -217,11 +217,15 @@ class ActorCriticRNN(nn.Module):
         # 1. CNN encoder.
         if self.config["ARCH"] == "paper":
             x_enc = obs.astype(jnp.float32)
-            for ch in (64, 64, 128):
+            for i, ch in enumerate((64, 64, 128)):
                 x_enc = ImpalaStack(ch)(x_enc)
+                if self.config["DEBUG_SHAPES"]:
+                    jax.debug.print("paper stack {i} output shape: {s}", i=i, s=x_enc.shape)
             x_enc = nn.relu(x_enc)
             # Paper-style raw flattened IMPALA feature: [T, B, 8192].
             z_t = x_enc.reshape((*x_enc.shape[:2], -1))
+            if self.config["DEBUG_SHAPES"]:
+                jax.debug.print("paper z_t shape: {s}", s=z_t.shape)
 
             # RNN bridge: 8192 -> 256.
             rnn_input_features = nn.LayerNorm()(z_t)
@@ -234,8 +238,14 @@ class ActorCriticRNN(nn.Module):
                 channels = tuple(
                     int(ch) for ch in self.config["ACHDIST_IMPALA_CHANNELS"].split(",")
                 )
-                for ch in channels:
+                for i, ch in enumerate(channels):
                     x_enc = ImpalaStack(ch)(x_enc)
+                    if self.config["DEBUG_SHAPES"]:
+                        jax.debug.print(
+                            "achdist original stack {i} output shape: {s}",
+                            i=i,
+                            s=x_enc.shape,
+                        )
                 x_enc = nn.relu(x_enc)
             else:
                 for i, ch in enumerate((64, 128, 128)):
@@ -246,7 +256,15 @@ class ActorCriticRNN(nn.Module):
                         post_pool_groups=1,
                         use_unfused_relu=self.config["UNFUSED_CONV_RELU"],
                     )(x_enc)
+                    if self.config["DEBUG_SHAPES"]:
+                        jax.debug.print(
+                            "achdist native stack {i} output shape: {s}",
+                            i=i,
+                            s=x_enc.shape,
+                        )
             x_enc = x_enc.reshape((*x_enc.shape[:2], -1))
+            if self.config["DEBUG_SHAPES"]:
+                jax.debug.print("achdist flattened shape: {s}", s=x_enc.shape)
 
             # Match Achievement-Distillation PPOGRUStrong:
             # IMPALA dense outsize 256, then visual latent hidsize 1024.
@@ -256,17 +274,23 @@ class ActorCriticRNN(nn.Module):
                 kernel_init=orthogonal(2),
             )(x_enc)
             x_enc = nn.relu(x_enc)
+            if self.config["DEBUG_SHAPES"]:
+                jax.debug.print("achdist impala dense shape: {s}", s=x_enc.shape)
             feedforward_features = nn.LayerNorm()(x_enc)
             feedforward_features = nn.Dense(
                 self.config["ACHDIST_HIDSIZE"],
                 kernel_init=orthogonal(2),
             )(feedforward_features)
             feedforward_features = nn.relu(feedforward_features)
+            if self.config["DEBUG_SHAPES"]:
+                jax.debug.print("achdist visual latent shape: {s}", s=feedforward_features.shape)
 
             # RNN bridge: 1024 -> 256.
             rnn_input_features = nn.LayerNorm()(feedforward_features)
             rnn_input_features = nn.Dense(256, kernel_init=orthogonal(2))(rnn_input_features)
             rnn_input_features = nn.relu(rnn_input_features)
+            if self.config["DEBUG_SHAPES"]:
+                jax.debug.print("rnn input shape: {s}", s=rnn_input_features.shape)
         else:
             raise ValueError(f"Unknown ARCH={self.config['ARCH']}")
 
@@ -280,6 +304,8 @@ class ActorCriticRNN(nn.Module):
                 y_t = 0.0 * y_t
             y_t = nn.relu(y_t)
             shared_input = jnp.concatenate([feedforward_features, y_t], axis=-1)
+            if self.config["DEBUG_SHAPES"]:
+                jax.debug.print("shared input with GRU slot shape: {s}", s=shared_input.shape)
         else:
             # No-GRU ablation: remove recurrent state updates while preserving
             # the original head input shape for a closer/stabler graph.
@@ -292,6 +318,8 @@ class ActorCriticRNN(nn.Module):
                     f"Unknown NO_GRU_MEMORY={self.config['NO_GRU_MEMORY']}"
                 )
             shared_input = jnp.concatenate([feedforward_features, memory_features], axis=-1)
+            if self.config["DEBUG_SHAPES"]:
+                jax.debug.print("shared input no-GRU shape: {s}", s=shared_input.shape)
 
         # 5. Actor Head
         if self.config["ARCH"] == "achdist_baseline":
@@ -403,6 +431,31 @@ def make_train(config):
         init_hstate = ScannedRNN.initialize_carry(
             config["NUM_ENVS"], 256 #config["LAYER_SIZE"]
         )
+        if config["DEBUG_SHAPES"]:
+            obs_shape = env.observation_space(env_params).shape
+            print("\n[PPO-RNN debug]")
+            print(f"  arch: {config['ARCH']}")
+            print(f"  env_name: {config['ENV_NAME']}")
+            print(f"  env obs shape: {obs_shape}")
+            print(f"  init_x obs shape: {init_x[0].shape}")
+            print(f"  init done shape: {init_x[1].shape}")
+            print(f"  init hidden shape: {init_hstate.shape}")
+            print(f"  num_envs: {config['NUM_ENVS']}")
+            print(f"  num_steps: {config['NUM_STEPS']}")
+            print(f"  num_minibatches: {config['NUM_MINIBATCHES']}")
+            print(f"  minibatch_size: {config['MINIBATCH_SIZE']}")
+            print(f"  layer_size: {config['LAYER_SIZE']}")
+            print(f"  use_gru: {config['USE_GRU']}")
+            print(f"  no_gru_memory: {config['NO_GRU_MEMORY']}")
+            print(f"  normalize_value_targets: {config['NORMALIZE_VALUE_TARGETS']}")
+            if config["ARCH"] in ("achdist_strong", "achdist_baseline"):
+                print(f"  achdist_impala_channels: {config['ACHDIST_IMPALA_CHANNELS']}")
+                print(f"  achdist_use_original_impala: {config['ACHDIST_USE_ORIGINAL_IMPALA']}")
+                print(f"  achdist_impala_outsize: {config['ACHDIST_IMPALA_OUTSIZE']}")
+                print(f"  achdist_hidsize: {config['ACHDIST_HIDSIZE']}")
+                print(f"  achdist_vf_head_hidsize: {config['ACHDIST_VF_HEAD_HIDSIZE']}")
+                print(f"  unfused_conv_relu: {config['UNFUSED_CONV_RELU']}")
+            print()
         network_params = network.init(_rng, init_hstate, init_x)
 
         # Print parameter size
@@ -791,6 +844,7 @@ if __name__ == "__main__":
         "--anneal_lr", action=argparse.BooleanOptionalAction, default=True
     )
     parser.add_argument("--debug", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--debug_shapes", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--jit", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--seed", type=int, default=np.random.randint(2**31))
     parser.add_argument(
