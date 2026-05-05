@@ -164,9 +164,17 @@ class ActorCriticRNN(nn.Module):
             # Resulting embedding is 8192 + 256 = 8448 dimensions.
             shared_input = jnp.concatenate([y_t, z_t], axis=-1)
         else:
-            # No-GRU ablation: remove recurrent features entirely, so actor and
-            # critic heads consume only the flattened CNN embedding.
-            shared_input = z_t
+            # No-GRU ablation: remove recurrent state updates while preserving
+            # the original 8448-dim head input shape for a closer/stabler graph.
+            if self.config["NO_GRU_MEMORY"] == "zeros":
+                memory_features = jnp.zeros_like(rnn_input_features)
+            elif self.config["NO_GRU_MEMORY"] == "projection":
+                memory_features = rnn_input_features
+            else:
+                raise ValueError(
+                    f"Unknown NO_GRU_MEMORY={self.config['NO_GRU_MEMORY']}"
+                )
+            shared_input = jnp.concatenate([memory_features, z_t], axis=-1)
 
         # 5. Actor Head (Paper Section A.1.1)
         h_actor = nn.LayerNorm()(shared_input)
@@ -619,6 +627,12 @@ if __name__ == "__main__":
     parser.add_argument("--num_repeats", type=int, default=1)
     parser.add_argument("--layer_size", type=int, default=512)
     parser.add_argument("--use_gru", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument(
+        "--no_gru_memory",
+        type=str,
+        choices=("zeros", "projection"),
+        default="zeros",
+    )
     parser.add_argument("--wandb_project", type=str)
     parser.add_argument("--wandb_entity", type=str)
     parser.add_argument(
