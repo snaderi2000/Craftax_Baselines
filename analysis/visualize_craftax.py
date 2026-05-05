@@ -6,7 +6,10 @@ import jax.numpy as jnp
 import numpy as np
 import imageio
 import orbax.checkpoint as ocp
-from ppo_rnn import ActorCriticRNN, ScannedRNN
+try:
+    from ppo_rnn_jax0423 import ActorCriticRNN, ScannedRNN
+except ImportError:
+    from ppo_rnn import ActorCriticRNN, ScannedRNN
 from craftax.craftax_env import make_craftax_env_from_name
 
 def main():
