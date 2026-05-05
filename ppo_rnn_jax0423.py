@@ -87,7 +87,13 @@ class ImpalaStack(nn.Module):
     @nn.compact
     def __call__(self, x):
         # (b) Conv 3x3 stride 1
-        x = nn.Conv(self.channels, (3, 3), strides=(1, 1), padding="SAME")(x)
+        x = nn.Conv(
+            self.channels,
+            (3, 3),
+            strides=(1, 1),
+            padding="SAME",
+            use_bias=False,
+        )(x)
 
         x = nn.GroupNorm(
             num_groups=self.groups,
@@ -108,10 +114,22 @@ class AchDistImpalaResBlock(nn.Module):
     def __call__(self, x):
         residual = x
         x = nn.GroupNorm(num_groups=self.groups, epsilon=1e-5)(x)
-        x = nn.Conv(self.channels, (3, 3), strides=(1, 1), padding="SAME")(x)
+        x = nn.Conv(
+            self.channels,
+            (3, 3),
+            strides=(1, 1),
+            padding="SAME",
+            use_bias=False,
+        )(x)
         x = nn.relu(x)
         x = nn.GroupNorm(num_groups=self.groups, epsilon=1e-5)(x)
-        x = nn.Conv(self.channels, (3, 3), strides=(1, 1), padding="SAME")(x)
+        x = nn.Conv(
+            self.channels,
+            (3, 3),
+            strides=(1, 1),
+            padding="SAME",
+            use_bias=False,
+        )(x)
         x = nn.relu(x)
         return residual + x
 
@@ -125,7 +143,13 @@ class AchDistImpalaStack(nn.Module):
     def __call__(self, x):
         if self.first_conv_norm:
             x = nn.GroupNorm(num_groups=self.groups, epsilon=1e-5)(x)
-        x = nn.Conv(self.channels, (3, 3), strides=(1, 1), padding="SAME")(x)
+        x = nn.Conv(
+            self.channels,
+            (3, 3),
+            strides=(1, 1),
+            padding="SAME",
+            use_bias=False,
+        )(x)
         x = nn.relu(x)
         x = nn.max_pool(x, window_shape=(3, 3), strides=(2, 2), padding="SAME")
         x = nn.GroupNorm(num_groups=self.post_pool_groups, epsilon=1e-5)(x)
