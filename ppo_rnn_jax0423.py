@@ -10,6 +10,7 @@ if not hasattr(jax, "tree"):
     class _JaxTreeCompat:
         map = staticmethod(jax.tree_util.tree_map)
         leaves = staticmethod(jax.tree_util.tree_leaves)
+        reduce = staticmethod(jax.tree_util.tree_reduce)
 
     jax.tree = _JaxTreeCompat()
 
