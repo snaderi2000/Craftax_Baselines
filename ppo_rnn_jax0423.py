@@ -55,6 +55,11 @@ class PPOTrainState(TrainState):
     target_mean_sq: jnp.ndarray
     target_debias: jnp.ndarray
 
+def unfused_relu(x):
+    # Avoid XLA lowering Conv+ReLU into a cuDNN fused conv custom call on V100.
+    zero = jax.lax.stop_gradient(jnp.zeros((), dtype=x.dtype))
+    return jnp.where(x > zero, x, zero)
+
 class ImpalaResBlock(nn.Module):
     channels: int
     groups: int = 32
@@ -92,7 +97,6 @@ class ImpalaStack(nn.Module):
             (3, 3),
             strides=(1, 1),
             padding="SAME",
-            use_bias=False,
         )(x)
 
         x = nn.GroupNorm(
@@ -109,6 +113,7 @@ class ImpalaStack(nn.Module):
 class AchDistImpalaResBlock(nn.Module):
     channels: int
     groups: int = 1
+    use_unfused_relu: bool = False
 
     @nn.compact
     def __call__(self, x):
@@ -121,7 +126,7 @@ class AchDistImpalaResBlock(nn.Module):
             padding="SAME",
             use_bias=False,
         )(x)
-        x = nn.relu(x)
+        x = unfused_relu(x) if self.use_unfused_relu else nn.relu(x)
         x = nn.GroupNorm(num_groups=self.groups, epsilon=1e-5)(x)
         x = nn.Conv(
             self.channels,
@@ -130,7 +135,7 @@ class AchDistImpalaResBlock(nn.Module):
             padding="SAME",
             use_bias=False,
         )(x)
-        x = nn.relu(x)
+        x = unfused_relu(x) if self.use_unfused_relu else nn.relu(x)
         return residual + x
 
 class AchDistImpalaStack(nn.Module):
@@ -138,6 +143,7 @@ class AchDistImpalaStack(nn.Module):
     groups: int = 1
     first_conv_norm: bool = True
     post_pool_groups: int = 1
+    use_unfused_relu: bool = False
 
     @nn.compact
     def __call__(self, x):
@@ -150,11 +156,19 @@ class AchDistImpalaStack(nn.Module):
             padding="SAME",
             use_bias=False,
         )(x)
-        x = nn.relu(x)
+        x = unfused_relu(x) if self.use_unfused_relu else nn.relu(x)
         x = nn.max_pool(x, window_shape=(3, 3), strides=(2, 2), padding="SAME")
         x = nn.GroupNorm(num_groups=self.post_pool_groups, epsilon=1e-5)(x)
-        x = AchDistImpalaResBlock(self.channels, groups=self.groups)(x)
-        x = AchDistImpalaResBlock(self.channels, groups=self.groups)(x)
+        x = AchDistImpalaResBlock(
+            self.channels,
+            groups=self.groups,
+            use_unfused_relu=self.use_unfused_relu,
+        )(x)
+        x = AchDistImpalaResBlock(
+            self.channels,
+            groups=self.groups,
+            use_unfused_relu=self.use_unfused_relu,
+        )(x)
         return x
 
 class DenseResBlock(nn.Module):
@@ -222,6 +236,7 @@ class ActorCriticRNN(nn.Module):
                     groups=1,
                     first_conv_norm=i > 0,
                     post_pool_groups=1,
+                    use_unfused_relu=self.config["UNFUSED_CONV_RELU"],
                 )(x_enc)
             x_enc = x_enc.reshape((*x_enc.shape[:2], -1))
 
@@ -795,6 +810,11 @@ if __name__ == "__main__":
     parser.add_argument("--target_norm_beta", type=float, default=0.99)
     parser.add_argument("--target_norm_eps", type=float, default=1e-2)
     parser.add_argument("--target_norm_min_var", type=float, default=1e-2)
+    parser.add_argument(
+        "--unfused_conv_relu",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+    )
     parser.add_argument("--use_gru", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument(
         "--no_gru_memory",
