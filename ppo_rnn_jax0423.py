@@ -156,9 +156,11 @@ class ActorCriticRNN(nn.Module):
         rnn_input_features = nn.relu(rnn_input_features)
 
         # 3. RNN Update (Paper calls output y_t) [cite: 630]
-        if self.config["USE_GRU"]:
+        if self.config["USE_GRU"] or self.config["NO_GRU_MEMORY"] == "masked_gru":
             rnn_in = (rnn_input_features, dones)
             hidden, y_t = ScannedRNN()(hidden, rnn_in)
+            if not self.config["USE_GRU"]:
+                y_t = 0.0 * y_t
             y_t = nn.relu(y_t)
             # 4. Concatenate z_t and y_t (Paper Section A.1.1)
             # Resulting embedding is 8192 + 256 = 8448 dimensions.
@@ -167,7 +169,7 @@ class ActorCriticRNN(nn.Module):
             # No-GRU ablation: remove recurrent state updates while preserving
             # the original 8448-dim head input shape for a closer/stabler graph.
             if self.config["NO_GRU_MEMORY"] == "zeros":
-                memory_features = jnp.zeros_like(rnn_input_features)
+                memory_features = 0.0 * rnn_input_features
             elif self.config["NO_GRU_MEMORY"] == "projection":
                 memory_features = rnn_input_features
             else:
@@ -630,7 +632,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--no_gru_memory",
         type=str,
-        choices=("zeros", "projection"),
+        choices=("zeros", "projection", "masked_gru"),
         default="zeros",
     )
     parser.add_argument("--wandb_project", type=str)
