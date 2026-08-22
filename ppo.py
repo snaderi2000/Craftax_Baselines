@@ -9,6 +9,16 @@ import numpy as np
 import optax
 from craftax.craftax_env import make_craftax_env_from_name
 
+# Compatibility for newer Optax/Flax code running on JAX versions before
+# jax.tree was introduced, such as jax==0.4.23.
+if not hasattr(jax, "tree"):
+    class _JaxTreeCompat:
+        map = staticmethod(jax.tree_util.tree_map)
+        leaves = staticmethod(jax.tree_util.tree_leaves)
+        reduce = staticmethod(jax.tree_util.tree_reduce)
+
+    jax.tree = _JaxTreeCompat()
+
 import wandb
 from typing import NamedTuple
 
@@ -51,9 +61,20 @@ class Transition(NamedTuple):
 
 
 def make_train(config):
-    config["NUM_UPDATES"] = (
+    config["START_TIMESTEPS"] = config.get("START_TIMESTEPS", 0)
+    config["TOTAL_UPDATES"] = (
         config["TOTAL_TIMESTEPS"] // config["NUM_STEPS"] // config["NUM_ENVS"]
     )
+    config["NUM_UPDATES"] = (
+        (config["TOTAL_TIMESTEPS"] - config["START_TIMESTEPS"])
+        // config["NUM_STEPS"]
+        // config["NUM_ENVS"]
+    )
+    if config["NUM_UPDATES"] < 0:
+        raise ValueError(
+            "TOTAL_TIMESTEPS must be >= START_TIMESTEPS when resuming. "
+            f"Got total={config['TOTAL_TIMESTEPS']} start={config['START_TIMESTEPS']}."
+        )
     config["MINIBATCH_SIZE"] = (
         config["NUM_ENVS"] * config["NUM_STEPS"] // config["NUM_MINIBATCHES"]
     )
@@ -78,19 +99,17 @@ def make_train(config):
         frac = (
             1.0
             - (count // (config["NUM_MINIBATCHES"] * config["UPDATE_EPOCHS"]))
-            / config["NUM_UPDATES"]
+            / config["TOTAL_UPDATES"]
         )
         return config["LR"] * frac
 
-    def train(rng):
-        # INIT NETWORK
-        if "Symbolic" in config["ENV_NAME"]:
-            network = ActorCritic(env.action_space(env_params).n, config["LAYER_SIZE"])
-        else:
-            network = ActorCriticConv(
-                env.action_space(env_params).n, config["LAYER_SIZE"]
-            )
+    # INIT NETWORK
+    if "Symbolic" in config["ENV_NAME"]:
+        network = ActorCritic(env.action_space(env_params).n, config["LAYER_SIZE"])
+    else:
+        network = ActorCriticConv(env.action_space(env_params).n, config["LAYER_SIZE"])
 
+    def init_train_state(rng):
         rng, _rng = jax.random.split(rng)
         init_x = jnp.zeros((1, *env.observation_space(env_params).shape))
         network_params = network.init(_rng, init_x)
@@ -109,6 +128,30 @@ def make_train(config):
             params=network_params,
             tx=tx,
         )
+        return train_state
+
+    restored_train_state = None
+    if config["RESUME_FROM"] is not None:
+        seed = 0 if config["SEED"] is None else config["SEED"]
+        restore_item = init_train_state(jax.random.PRNGKey(seed))
+        orbax_checkpointer = PyTreeCheckpointer()
+        options = CheckpointManagerOptions(max_to_keep=1, create=False)
+        checkpoint_manager = CheckpointManager(
+            config["RESUME_FROM"], orbax_checkpointer, options
+        )
+        print(
+            "Restoring policy checkpoint "
+            f"step {config['RESUME_STEP']} from {config['RESUME_FROM']}"
+        )
+        restored_train_state = checkpoint_manager.restore(
+            config["RESUME_STEP"], items=restore_item
+        )
+
+    def train(rng):
+        if restored_train_state is None:
+            train_state = init_train_state(rng)
+        else:
+            train_state = restored_train_state
 
         # Exploration state
         ex_state = {
@@ -591,6 +634,50 @@ def make_train(config):
                     update_step,
                 )
 
+            if (
+                config["SAVE_POLICY"]
+                and config["USE_WANDB"]
+                and len(config["SAVE_POLICY_MILESTONES"]) > 0
+            ):
+                batch_size = jnp.int64(config["NUM_STEPS"] * config["NUM_ENVS"])
+                current_step = (
+                    jnp.int64(config["START_TIMESTEPS"])
+                    + (update_step.astype(jnp.int64) + 1) * batch_size
+                )
+                prev_step = current_step - batch_size
+                milestones = jnp.array(config["SAVE_POLICY_MILESTONES"], dtype=jnp.int64)
+                should_save = jnp.any(
+                    jnp.logical_and(prev_step < milestones, current_step >= milestones)
+                )
+
+                def _save_checkpoint(ts, cs):
+                    import numpy as _np
+
+                    step = int(_np.asarray(cs))
+                    orbax_checkpointer = PyTreeCheckpointer()
+                    options = CheckpointManagerOptions(
+                        max_to_keep=config["POLICY_MAX_TO_KEEP"],
+                        create=True,
+                    )
+                    path = os.path.join(wandb.run.dir, "policies")
+                    checkpoint_manager = CheckpointManager(path, orbax_checkpointer, options)
+                    print(f"saving intermediate policy checkpoint to {path} at step {step}")
+                    save_args = orbax_utils.save_args_from_target(ts)
+                    checkpoint_manager.save(
+                        step,
+                        ts,
+                        save_kwargs={"save_args": save_args},
+                    )
+
+                def _do_save(_):
+                    jax.debug.callback(_save_checkpoint, train_state, current_step)
+                    return _
+
+                def _no_save(_):
+                    return _
+
+                _ = jax.lax.cond(should_save, _do_save, _no_save, operand=0)
+
             runner_state = (
                 train_state,
                 env_state,
@@ -618,8 +705,65 @@ def make_train(config):
     return train
 
 
+def _resolve_policy_checkpoint(resume_from):
+    if resume_from is None:
+        return None, None
+
+    checkpoint_path = resume_from
+    basename = os.path.basename(os.path.normpath(resume_from))
+    if basename.isdigit():
+        return os.path.dirname(os.path.normpath(resume_from)), int(basename)
+
+    policies_path = os.path.join(resume_from, "policies")
+    if os.path.isdir(policies_path):
+        checkpoint_path = policies_path
+
+    orbax_checkpointer = PyTreeCheckpointer()
+    options = CheckpointManagerOptions(max_to_keep=1, create=False)
+    checkpoint_manager = CheckpointManager(
+        checkpoint_path, orbax_checkpointer, options
+    )
+    latest_step = checkpoint_manager.latest_step()
+    if latest_step is None:
+        raise ValueError(f"No checkpoint steps found in {checkpoint_path}")
+
+    return checkpoint_path, latest_step
+
+
 def run_ppo(config):
     config = {k.upper(): v for k, v in config.__dict__.items()}
+    config["RESUME_FROM"], config["RESUME_STEP"] = _resolve_policy_checkpoint(
+        config["RESUME_FROM"]
+    )
+    config["START_TIMESTEPS"] = config["RESUME_STEP"] or 0
+    milestones = []
+    if config["SAVE_POLICY_INTERVAL"] and config["SAVE_POLICY_INTERVAL"] > 0:
+        next_step = (
+            (config["START_TIMESTEPS"] // config["SAVE_POLICY_INTERVAL"]) + 1
+        ) * config["SAVE_POLICY_INTERVAL"]
+        while next_step < config["TOTAL_TIMESTEPS"]:
+            milestones.append(int(next_step))
+            next_step += config["SAVE_POLICY_INTERVAL"]
+    if config["SAVE_POLICY_MILESTONES"]:
+        for raw in str(config["SAVE_POLICY_MILESTONES"]).split(","):
+            raw = raw.strip()
+            if raw:
+                step = int(float(raw))
+                if config["START_TIMESTEPS"] < step < config["TOTAL_TIMESTEPS"]:
+                    milestones.append(step)
+    config["SAVE_POLICY_MILESTONES"] = tuple(sorted(set(milestones)))
+    config["POLICY_MAX_TO_KEEP"] = max(1, len(config["SAVE_POLICY_MILESTONES"]) + 1)
+    if config["RESUME_FROM"] is not None:
+        print(
+            "Resuming from "
+            f"{config['RESUME_FROM']} at step {config['RESUME_STEP']:,}; "
+            f"training until {config['TOTAL_TIMESTEPS']:,} total timesteps."
+        )
+    if config["SAVE_POLICY"] and config["SAVE_POLICY_MILESTONES"]:
+        print(
+            "Intermediate policy checkpoints: "
+            + ", ".join(f"{step:,}" for step in config["SAVE_POLICY_MILESTONES"])
+        )
 
     if config["USE_WANDB"]:
         wandb.init(
@@ -650,13 +794,20 @@ def run_ppo(config):
             train_states = out["runner_state"][rs_index]
             train_state = jax.tree.map(lambda x: x[0], train_states)
             orbax_checkpointer = PyTreeCheckpointer()
-            options = CheckpointManagerOptions(max_to_keep=1, create=True)
+            options = CheckpointManagerOptions(
+                max_to_keep=config["POLICY_MAX_TO_KEEP"],
+                create=True,
+            )
             path = os.path.join(wandb.run.dir, dir_name)
             checkpoint_manager = CheckpointManager(path, orbax_checkpointer, options)
             print(f"saved runner state to {path}")
             save_args = orbax_utils.save_args_from_target(train_state)
+            save_step = (
+                config["START_TIMESTEPS"]
+                + config["NUM_UPDATES"] * config["NUM_STEPS"] * config["NUM_ENVS"]
+            )
             checkpoint_manager.save(
-                config["TOTAL_TIMESTEPS"],
+                save_step,
                 train_state,
                 save_kwargs={"save_args": save_args},
             )
@@ -697,6 +848,33 @@ if __name__ == "__main__":
         "--use_wandb", action=argparse.BooleanOptionalAction, default=True
     )
     parser.add_argument("--save_policy", action="store_true")
+    parser.add_argument(
+        "--save_policy_interval",
+        type=lambda x: int(float(x)),
+        default=0,
+        help=(
+            "Save intermediate policy checkpoints every N environment steps. "
+            "The final checkpoint is still saved by --save_policy."
+        ),
+    )
+    parser.add_argument(
+        "--save_policy_milestones",
+        type=str,
+        default="",
+        help=(
+            "Comma-separated intermediate policy checkpoint steps, e.g. "
+            "1e9,2e9,5e9. Final TOTAL_TIMESTEPS is saved separately."
+        ),
+    )
+    parser.add_argument(
+        "--resume_from",
+        type=str,
+        default=None,
+        help=(
+            "Path to a saved wandb files directory or policies checkpoint "
+            "directory to continue training from."
+        ),
+    )
     parser.add_argument("--num_repeats", type=int, default=1)
     parser.add_argument("--layer_size", type=int, default=512)
     parser.add_argument("--wandb_project", type=str)

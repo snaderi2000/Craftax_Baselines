@@ -1,0 +1,6 @@
+checkpoint_step: 10000000000
+env_name: Craftax-Classic-Symbolic-v1
+greedy: false
+num_envs: 512
+run_path: wandb/run-20260528_225318-5v1h672r
+steps_per_shard: 512

@@ -615,7 +615,6 @@ class ActorCriticConvRNN(nn.Module):
     use_gru: bool = True
     train: bool = True
 
-    @nn.compact
     def encode(self, x): 
         x = x.astype(jnp.float32)
         for channels in [64, 64, 128]:
@@ -623,7 +622,6 @@ class ActorCriticConvRNN(nn.Module):
         x = nn.relu(x)
         return x.reshape((x.shape[0], -1)) # zt (8192)
 
-    @nn.compact
     def core(self, zt, h):
         # 1. RNN Architecture (yt)
         rnn_in = nn.relu(nn.Dense(256)(nn.LayerNorm()(zt)))
@@ -657,6 +655,7 @@ class ActorCriticConvRNN(nn.Module):
 
         return pi, jnp.squeeze(value, axis=-1), new_h
 
+    @nn.compact
     def __call__(self, x, h):
         zt = self.encode(x)
         return self.core(zt, h)

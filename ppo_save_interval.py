@@ -9,6 +9,16 @@ import numpy as np
 import optax
 from craftax.craftax_env import make_craftax_env_from_name
 
+# Compatibility for newer Optax/Flax code running on JAX versions before
+# jax.tree was introduced, such as jax==0.4.23.
+if not hasattr(jax, "tree"):
+    class _JaxTreeCompat:
+        map = staticmethod(jax.tree_util.tree_map)
+        leaves = staticmethod(jax.tree_util.tree_leaves)
+        reduce = staticmethod(jax.tree_util.tree_reduce)
+
+    jax.tree = _JaxTreeCompat()
+
 import wandb
 from typing import NamedTuple
 

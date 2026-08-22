@@ -9,6 +9,16 @@ import numpy as np
 import optax
 from craftax.craftax_env import make_craftax_env_from_name
 
+# Compatibility for newer Optax/Flax code running on JAX versions before
+# jax.tree was introduced, such as jax==0.4.23.
+if not hasattr(jax, "tree"):
+    class _JaxTreeCompat:
+        map = staticmethod(jax.tree_util.tree_map)
+        leaves = staticmethod(jax.tree_util.tree_leaves)
+        reduce = staticmethod(jax.tree_util.tree_reduce)
+
+    jax.tree = _JaxTreeCompat()
+
 import wandb
 from typing import NamedTuple
 
@@ -524,6 +534,49 @@ def make_train(config):
                     # loss_info, traj_batch, ex_state, advantages_i, targets_i
                 )
 
+            if (
+                config["SAVE_POLICY"]
+                and config["USE_WANDB"]
+                and len(config["SAVE_POLICY_MILESTONES"]) > 0
+            ):
+                batch_size = jnp.int64(config["NUM_STEPS"] * config["NUM_ENVS"])
+                current_step = (update_step.astype(jnp.int64) + 1) * batch_size
+                prev_step = current_step - batch_size
+                milestones = jnp.array(
+                    config["SAVE_POLICY_MILESTONES"], dtype=jnp.int64
+                )
+                should_save = jnp.any(
+                    jnp.logical_and(prev_step < milestones, current_step >= milestones)
+                )
+
+                def _save_checkpoint(ts, cs):
+                    import numpy as _np
+
+                    step = int(_np.asarray(cs))
+                    path = os.path.join(wandb.run.dir, "policies")
+                    checkpointer = PyTreeCheckpointer()
+                    options = CheckpointManagerOptions(
+                        max_to_keep=config["POLICY_MAX_TO_KEEP"], create=True
+                    )
+                    manager = CheckpointManager(path, checkpointer, options)
+                    print(
+                        f"saving intermediate RND checkpoint to {path} at step {step}"
+                    )
+                    save_args = orbax_utils.save_args_from_target(ts)
+                    manager.save(
+                        step, ts, save_kwargs={"save_args": save_args}
+                    )
+
+                def _do_save(operand):
+                    jax.debug.callback(
+                        _save_checkpoint, train_state, current_step
+                    )
+                    return operand
+
+                _ = jax.lax.cond(
+                    should_save, _do_save, lambda operand: operand, operand=0
+                )
+
             runner_state = (
                 train_state,
                 env_state,
@@ -553,6 +606,25 @@ def make_train(config):
 
 def run_ppo(config):
     config = {k.upper(): v for k, v in config.__dict__.items()}
+    milestones = []
+    if config["SAVE_POLICY_MILESTONES"]:
+        for raw in str(config["SAVE_POLICY_MILESTONES"]).split(","):
+            raw = raw.strip()
+            if raw:
+                step = int(float(raw))
+                if 0 < step < config["TOTAL_TIMESTEPS"]:
+                    milestones.append(step)
+    config["SAVE_POLICY_MILESTONES"] = tuple(sorted(set(milestones)))
+    config["POLICY_MAX_TO_KEEP"] = max(
+        1, len(config["SAVE_POLICY_MILESTONES"]) + 1
+    )
+    if config["SAVE_POLICY"] and config["SAVE_POLICY_MILESTONES"]:
+        print(
+            "Intermediate RND checkpoints: "
+            + ", ".join(
+                f"{step:,}" for step in config["SAVE_POLICY_MILESTONES"]
+            )
+        )
 
     if config["USE_WANDB"]:
         wandb.init(
@@ -599,7 +671,9 @@ def run_ppo(config):
             train_states = out["runner_state"][rs_index]
             train_state = jax.tree.map(lambda x: x[0], train_states)
             orbax_checkpointer = PyTreeCheckpointer()
-            options = CheckpointManagerOptions(max_to_keep=1, create=True)
+            options = CheckpointManagerOptions(
+                max_to_keep=config["POLICY_MAX_TO_KEEP"], create=True
+            )
             path = os.path.join(wandb.run.dir, dir_name)
             checkpoint_manager = CheckpointManager(path, orbax_checkpointer, options)
             print(f"saved runner state to {path}")
@@ -646,6 +720,15 @@ if __name__ == "__main__":
         "--use_wandb", action=argparse.BooleanOptionalAction, default=True
     )
     parser.add_argument("--save_policy", action="store_true")
+    parser.add_argument(
+        "--save_policy_milestones",
+        type=str,
+        default="",
+        help=(
+            "Comma-separated intermediate checkpoint steps. "
+            "The final checkpoint is also saved."
+        ),
+    )
     parser.add_argument("--num_repeats", type=int, default=1)
     parser.add_argument("--layer_size", type=int, default=512)
     parser.add_argument("--wandb_project", type=str)
