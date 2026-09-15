@@ -4,6 +4,9 @@
 
 # Craftax Baselines
 
+For the frozen 10B policy's two seeded 5,000-episode batches (10,000 total target),
+see the [collection documentation](concept_mapping/README.md#frozen-10b-policy-10000-episode-collection).
+
 This repository contains the code for running the baselines from the [Craftax paper](https://arxiv.org/abs/2402.16801).
 For packaging reasons, this is separate to the [main repository](https://github.com/MichaelTMatthews/Craftax/).
 
@@ -109,6 +112,42 @@ python -u concept_mapping/diamond_affordance_clean_filter.py \
 
 `run_diamond_affordance_4gpu.sh` shards the same collection across GPUs 1--4,
 then deduplicates and merges the results.
+
+#### State-fixed-effects model
+
+The merged 5,000-state diamond dataset also supports a formal within-state
+factorial model.  Each base state contributes all four diamond/pickaxe
+counterfactuals, so the critic values are modeled as:
+
+```text
+V_ic = alpha_i + beta_D Diamond_ic + beta_P Pickaxe_ic
+       + beta_DP (Diamond_ic x Pickaxe_ic) + epsilon_ic
+```
+
+The base-state fixed effect `alpha_i` absorbs every feature shared by the four
+counterfactuals, including the map, visible entities, health, intrinsics, and
+all unchanged inventory.  The key term is `beta_DP`: it measures whether an
+iron pickaxe has a larger value effect when a diamond is visible.
+
+At the final 10B PPO checkpoint, the analysis uses 5,000 base states and
+20,000 critic evaluations.  The diamond--pickaxe interaction is `0.812`
+critic-value units (clustered 95% CI `[0.810, 0.814]`, `p < 10^-300`), and
+99.96% of state-level interactions are positive.  The iron pickaxe lowers
+value without a diamond (`-0.405`) but raises value when a diamond is present
+(`+0.407`); conversely, a diamond has almost no effect without a pickaxe
+(`+0.013`) but a large effect with one (`+0.825`).  This is the formal
+counterfactual signature of diamond collectability.
+
+Reproduce the analysis from an existing merged values CSV with:
+
+```commandline
+python concept_mapping/analyze_diamond_fixed_effects.py
+```
+
+The default outputs are written to the merged run's `fixed_effects/`
+subdirectory and include a long-format dataset, clustered regression summary,
+LaTex table, simple-effects forest plot, and state-level interaction
+distribution.
 
 ### Water value
 

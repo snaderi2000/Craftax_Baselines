@@ -1,4 +1,4 @@
-"""Render random successful water-value counterfactuals for qualitative selection."""
+"""Render selected successful or failed water-value counterfactuals."""
 
 import argparse
 import csv
@@ -41,6 +41,9 @@ def main() -> None:
     parser.add_argument("--run_dir", default="concept_mapping/runs/water_sword_500episodes_3gpu_m0mw4end/merged")
     parser.add_argument("--n_examples", type=int, default=10)
     parser.add_argument("--seed", type=int, default=50)
+    parser.add_argument("--outcome", choices=("success", "failure"), default="success")
+    parser.add_argument("--sample_indices", default=None, help="Comma-separated merged indices to render.")
+    parser.add_argument("--out_subdir", default=None)
     parser.add_argument("--block_size", type=int, default=7)
     parser.add_argument("--display_scale", type=int, default=4)
     parser.add_argument("--minimal", action=argparse.BooleanOptionalAction, default=False)
@@ -55,10 +58,20 @@ def main() -> None:
     empty_effect = np.asarray([float(row["empty_water"]) - float(row["empty_no_water"]) for row in rows])
     full_effect = np.asarray([float(row["full_water"]) - float(row["full_no_water"]) for row in rows])
     success = (empty_effect > 0) & (empty_effect > full_effect)
-    chosen = np.random.default_rng(args.seed).choice(np.flatnonzero(success), size=min(args.n_examples, int(success.sum())), replace=False)
+    eligible = success if args.outcome == "success" else ~success
+    if args.sample_indices:
+        chosen = np.asarray([int(value) for value in args.sample_indices.split(",")], dtype=int)
+        if np.any(chosen < 0) or np.any(chosen >= len(rows)):
+            raise ValueError("--sample_indices contains an out-of-range index")
+        if np.any(~eligible[chosen]):
+            raise ValueError(f"At least one requested index is not a {args.outcome}")
+    else:
+        chosen = np.random.default_rng(args.seed).choice(
+            np.flatnonzero(eligible), size=min(args.n_examples, int(eligible.sum())), replace=False
+        )
     textures = load_all_textures(args.block_size)
     panel_textures = textures if args.display_scale == 1 else load_all_textures(args.block_size * args.display_scale)
-    out_dir = run_dir / "water_success_examples"
+    out_dir = run_dir / (args.out_subdir or f"water_{args.outcome}_examples")
     out_dir.mkdir(parents=True, exist_ok=True)
     for rank, index in enumerate(chosen):
         counterfactuals = _water_counterfactuals(states[index])
@@ -101,7 +114,7 @@ def main() -> None:
         if args.regular_text:
             suffix += "_regular"
         sheet.save(out_dir / f"example_{rank:02d}_idx_{index}{suffix}.png")
-    print(f"Wrote {len(chosen)} water-success examples to {out_dir}")
+    print(f"Wrote {len(chosen)} water-{args.outcome} examples to {out_dir}")
 
 
 if __name__ == "__main__":

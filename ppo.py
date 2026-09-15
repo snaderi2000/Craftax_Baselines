@@ -639,21 +639,21 @@ def make_train(config):
                 and config["USE_WANDB"]
                 and len(config["SAVE_POLICY_MILESTONES"]) > 0
             ):
-                batch_size = jnp.int64(config["NUM_STEPS"] * config["NUM_ENVS"])
-                current_step = (
-                    jnp.int64(config["START_TIMESTEPS"])
-                    + (update_step.astype(jnp.int64) + 1) * batch_size
-                )
-                prev_step = current_step - batch_size
-                milestones = jnp.array(config["SAVE_POLICY_MILESTONES"], dtype=jnp.int64)
-                should_save = jnp.any(
-                    jnp.logical_and(prev_step < milestones, current_step >= milestones)
-                )
+                # Compare update counts so step totals above 2**31 remain safe
+                # with JAX's default 32-bit integers. Compute checkpoint labels
+                # using Python integers in the host callback.
+                batch_size = config["NUM_STEPS"] * config["NUM_ENVS"]
+                milestone_updates = jnp.array(tuple(
+                    (step - config["START_TIMESTEPS"] + batch_size - 1) // batch_size
+                    for step in config["SAVE_POLICY_MILESTONES"]
+                ), dtype=jnp.int32)
+                current_update = update_step + 1
+                should_save = jnp.any(current_update == milestone_updates)
 
                 def _save_checkpoint(ts, cs):
                     import numpy as _np
 
-                    step = int(_np.asarray(cs))
+                    step = config["START_TIMESTEPS"] + int(_np.asarray(cs)) * batch_size
                     orbax_checkpointer = PyTreeCheckpointer()
                     options = CheckpointManagerOptions(
                         max_to_keep=config["POLICY_MAX_TO_KEEP"],
@@ -670,7 +670,7 @@ def make_train(config):
                     )
 
                 def _do_save(_):
-                    jax.debug.callback(_save_checkpoint, train_state, current_step)
+                    jax.debug.callback(_save_checkpoint, train_state, current_update)
                     return _
 
                 def _no_save(_):
