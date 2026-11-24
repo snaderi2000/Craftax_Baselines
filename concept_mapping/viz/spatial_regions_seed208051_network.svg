@@ -1,0 +1,278 @@
+<?xml version="1.0" encoding="utf-8" standalone="no"?>
+<!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN"
+  "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd">
+<svg xmlns:xlink="http://www.w3.org/1999/xlink" width="936pt" height="619.2pt" viewBox="0 0 936 619.2" xmlns="http://www.w3.org/2000/svg" version="1.1">
+ <title>Spatial regions actor–critic</title>
+ <metadata>
+  <rdf:RDF xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:cc="http://creativecommons.org/ns#" xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
+   <cc:Work>
+    <dc:type rdf:resource="http://purl.org/dc/dcmitype/StillImage"/>
+    <dc:title>Spatial regions actor–critic</dc:title>
+    <dc:date>2026-11-23T01:59:36.645297</dc:date>
+    <dc:description>Network used in spatial_regions_12p2b_100m-map_mlp-seed208051.</dc:description>
+    <dc:format>image/svg+xml</dc:format>
+    <dc:creator>
+     <cc:Agent>
+      <dc:title>Matplotlib v3.10.8, https://matplotlib.org/</dc:title>
+     </cc:Agent>
+    </dc:creator>
+   </cc:Work>
+  </rdf:RDF>
+ </metadata>
+ <defs>
+  <style type="text/css">*{stroke-linejoin: round; stroke-linecap: butt}</style>
+ </defs>
+ <g id="figure_1">
+  <g id="patch_1">
+   <path d="M 0 619.2 
+L 936 619.2 
+L 936 0 
+L 0 0 
+z
+" style="fill: #fbfcf8"/>
+  </g>
+  <g id="axes_1">
+   <g id="patch_2">
+    <path d="M 33.84 172.8 
+L 354.96 172.8 
+Q 360 172.8 360 167.76 
+L 360 113.04 
+Q 360 108 354.96 108 
+L 33.84 108 
+Q 28.8 108 28.8 113.04 
+L 28.8 167.76 
+Q 28.8 172.8 33.84 172.8 
+z
+" clip-path="url(#pc82f9338c8)" style="fill: #ffffff; stroke: #a7b7aa; stroke-width: 0.9; stroke-linejoin: miter"/>
+   </g>
+   <g id="patch_3">
+    <path d="M 415.44 172.8 
+L 902.16 172.8 
+Q 907.2 172.8 907.2 167.76 
+L 907.2 113.04 
+Q 907.2 108 902.16 108 
+L 415.44 108 
+Q 410.4 108 410.4 113.04 
+L 410.4 167.76 
+Q 410.4 172.8 415.44 172.8 
+z
+" clip-path="url(#pc82f9338c8)" style="fill: #ffffff; stroke: #a7b7aa; stroke-width: 0.9; stroke-linejoin: miter"/>
+   </g>
+   <g id="patch_4">
+    <path d="M 658.8 173.797559 
+Q 658.8 181.798585 658.8 188.40207 
+" clip-path="url(#pc82f9338c8)" style="fill: none; stroke: #537568; stroke-width: 1.25; stroke-linecap: round"/>
+    <path d="M 661.4 183.20207 
+L 658.8 188.40207 
+L 656.2 183.20207 
+z
+" clip-path="url(#pc82f9338c8)" style="fill: #537568; stroke: #537568; stroke-width: 1.25; stroke-linecap: round"/>
+   </g>
+   <g id="patch_5">
+    <path d="M 415.44 248.4 
+L 902.16 248.4 
+Q 907.2 248.4 907.2 243.36 
+L 907.2 195.84 
+Q 907.2 190.8 902.16 190.8 
+L 415.44 190.8 
+Q 410.4 190.8 410.4 195.84 
+L 410.4 243.36 
+Q 410.4 248.4 415.44 248.4 
+z
+" clip-path="url(#pc82f9338c8)" style="fill: #e6efe4; stroke: #a7b7aa; stroke-width: 0.9; stroke-linejoin: miter"/>
+   </g>
+   <g id="patch_6">
+    <path d="M 658.8 249.401602 
+Q 658.8 256.319063 658.8 261.838982 
+" clip-path="url(#pc82f9338c8)" style="fill: none; stroke: #537568; stroke-width: 1.25; stroke-linecap: round"/>
+    <path d="M 661.4 256.638982 
+L 658.8 261.838982 
+L 656.2 256.638982 
+z
+" clip-path="url(#pc82f9338c8)" style="fill: #537568; stroke: #537568; stroke-width: 1.25; stroke-linecap: round"/>
+   </g>
+   <g id="patch_7">
+    <path d="M 415.44 320.4 
+L 902.16 320.4 
+Q 907.2 320.4 907.2 315.36 
+L 907.2 269.28 
+Q 907.2 264.24 902.16 264.24 
+L 415.44 264.24 
+Q 410.4 264.24 410.4 269.28 
+L 410.4 315.36 
+Q 410.4 320.4 415.44 320.4 
+z
+" clip-path="url(#pc82f9338c8)" style="fill: #e6efe4; stroke: #a7b7aa; stroke-width: 0.9; stroke-linejoin: miter"/>
+   </g>
+   <g id="patch_8">
+    <path d="M 658.8 321.401602 
+Q 658.8 328.319063 658.8 333.838982 
+" clip-path="url(#pc82f9338c8)" style="fill: none; stroke: #537568; stroke-width: 1.25; stroke-linecap: round"/>
+    <path d="M 661.4 328.638982 
+L 658.8 333.838982 
+L 656.2 328.638982 
+z
+" clip-path="url(#pc82f9338c8)" style="fill: #537568; stroke: #537568; stroke-width: 1.25; stroke-linecap: round"/>
+   </g>
+   <g id="patch_9">
+    <path d="M 415.44 392.4 
+L 902.16 392.4 
+Q 907.2 392.4 907.2 387.36 
+L 907.2 341.28 
+Q 907.2 336.24 902.16 336.24 
+L 415.44 336.24 
+Q 410.4 336.24 410.4 341.28 
+L 410.4 387.36 
+Q 410.4 392.4 415.44 392.4 
+z
+" clip-path="url(#pc82f9338c8)" style="fill: #e6efe4; stroke: #a7b7aa; stroke-width: 0.9; stroke-linejoin: miter"/>
+   </g>
+   <g id="patch_10">
+    <path d="M 195.372839 378.241095 
+Q 277.200346 398.520086 357.671345 418.462899 
+" clip-path="url(#pc82f9338c8)" style="fill: none; stroke: #537568; stroke-width: 1.25; stroke-linecap: round"/>
+    <path d="M 353.249461 414.688387 
+L 357.671345 418.462899 
+L 351.998605 419.735699 
+z
+" clip-path="url(#pc82f9338c8)" style="fill: #537568; stroke: #537568; stroke-width: 1.25; stroke-linecap: round"/>
+   </g>
+   <g id="patch_11">
+    <path d="M 657.847375 392.706497 
+Q 617.399516 405.720156 578.282036 418.30578 
+" clip-path="url(#pc82f9338c8)" style="fill: none; stroke: #537568; stroke-width: 1.25; stroke-linecap: round"/>
+    <path d="M 584.028456 419.188189 
+L 578.282036 418.30578 
+L 582.435815 414.238089 
+z
+" clip-path="url(#pc82f9338c8)" style="fill: #537568; stroke: #537568; stroke-width: 1.25; stroke-linecap: round"/>
+   </g>
+   <g id="patch_12">
+    <path d="M 206.64 478.8 
+L 729.36 478.8 
+Q 734.4 478.8 734.4 473.76 
+L 734.4 424.08 
+Q 734.4 419.04 729.36 419.04 
+L 206.64 419.04 
+Q 201.6 419.04 201.6 424.08 
+L 201.6 473.76 
+Q 201.6 478.8 206.64 478.8 
+z
+" clip-path="url(#pc82f9338c8)" style="fill: #d9ebde; stroke: #a7b7aa; stroke-width: 0.9; stroke-linejoin: miter"/>
+   </g>
+   <g id="patch_13">
+    <path d="M 395.026392 479.00863 
+Q 320.40145 494.999689 247.143029 510.697922 
+" clip-path="url(#pc82f9338c8)" style="fill: none; stroke: #537568; stroke-width: 1.25; stroke-linecap: round"/>
+    <path d="M 252.772377 512.150657 
+L 247.143029 510.697922 
+L 251.682826 507.066085 
+z
+" clip-path="url(#pc82f9338c8)" style="fill: #537568; stroke: #537568; stroke-width: 1.25; stroke-linecap: round"/>
+   </g>
+   <g id="patch_14">
+    <path d="M 540.973608 479.00863 
+Q 615.59855 494.999689 688.856971 510.697922 
+" clip-path="url(#pc82f9338c8)" style="fill: none; stroke: #537568; stroke-width: 1.25; stroke-linecap: round"/>
+    <path d="M 684.317174 507.066085 
+L 688.856971 510.697922 
+L 683.227623 512.150657 
+z
+" clip-path="url(#pc82f9338c8)" style="fill: #537568; stroke: #537568; stroke-width: 1.25; stroke-linecap: round"/>
+   </g>
+   <g id="patch_15">
+    <path d="M 33.84 586.8 
+L 455.76 586.8 
+Q 460.8 586.8 460.8 581.76 
+L 460.8 516.24 
+Q 460.8 511.2 455.76 511.2 
+L 33.84 511.2 
+Q 28.8 511.2 28.8 516.24 
+L 28.8 581.76 
+Q 28.8 586.8 33.84 586.8 
+z
+" clip-path="url(#pc82f9338c8)" style="fill: #ffffff; stroke: #a7b7aa; stroke-width: 0.9; stroke-linejoin: miter"/>
+   </g>
+   <g id="patch_16">
+    <path d="M 480.24 586.8 
+L 902.16 586.8 
+Q 907.2 586.8 907.2 581.76 
+L 907.2 516.24 
+Q 907.2 511.2 902.16 511.2 
+L 480.24 511.2 
+Q 475.2 511.2 475.2 516.24 
+L 475.2 581.76 
+Q 475.2 586.8 480.24 586.8 
+z
+" clip-path="url(#pc82f9338c8)" style="fill: #ffffff; stroke: #a7b7aa; stroke-width: 0.9; stroke-linejoin: miter"/>
+   </g>
+   <g id="line2d_1">
+    <path d="M 194.4 172.8 
+L 194.4 378 
+" clip-path="url(#pc82f9338c8)" style="fill: none; stroke: #537568; stroke-width: 1.25; stroke-linecap: square"/>
+   </g>
+   <g id="text_1">
+    <text style="font-weight: 700; font-size: 23px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #19392e" x="28.8" y="40.096719" transform="rotate(-0 28.8 40.096719)">Spatial regions actor–critic</text>
+   </g>
+   <g id="text_2">
+    <text style="font-size: 12px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #4c665b" x="28.8" y="70.27125" transform="rotate(-0 28.8 70.27125)">Craftax Classic  ·  seed 208051  ·  one remembered world map  ·  4,537,474 trainable parameters</text>
+   </g>
+   <g id="text_3">
+    <text style="font-weight: 700; font-size: 13px; font-family: 'DejaVu Sans'; text-anchor: middle; fill: #19392e" x="194.4" y="133.568406" transform="rotate(-0 194.4 133.568406)">Live symbolic observation · 1,345</text>
+   </g>
+   <g id="text_4">
+    <text style="font-size: 10.5px; font-family: 'DejaVu Sans'; text-anchor: middle; fill: #3f5c51" x="194.4" y="156.257344" transform="rotate(-0 194.4 156.257344)">7 × 9 × 21 local tile channels + 22 agent-state values</text>
+   </g>
+   <g id="text_5">
+    <text style="font-weight: 700; font-size: 13px; font-family: 'DejaVu Sans'; text-anchor: middle; fill: #19392e" x="658.8" y="133.568406" transform="rotate(-0 658.8 133.568406)">Observed world memory + position · 8,194</text>
+   </g>
+   <g id="text_6">
+    <text style="font-size: 10.5px; font-family: 'DejaVu Sans'; text-anchor: middle; fill: #3f5c51" x="658.8" y="156.257344" transform="rotate(-0 658.8 156.257344)">4,096 terrain IDs + 4,096 last-seen ages + row and column</text>
+   </g>
+   <g id="text_7">
+    <text style="font-weight: 700; font-size: 13px; font-family: 'DejaVu Sans'; text-anchor: middle; fill: #19392e" x="658.8" y="213.971187" transform="rotate(-0 658.8 213.971187)">Per-tile features · 64 × 64 × 8</text>
+   </g>
+   <g id="text_8">
+    <text style="font-size: 10.5px; font-family: 'DejaVu Sans'; text-anchor: middle; fill: #3f5c51" x="658.8" y="234.017344" transform="rotate(-0 658.8 234.017344)">4 terrain embeddings + age + player marker + 2 relative offsets</text>
+   </g>
+   <g id="text_9">
+    <text style="font-weight: 700; font-size: 13px; font-family: 'DejaVu Sans'; text-anchor: middle; fill: #19392e" x="658.8" y="286.921588" transform="rotate(-0 658.8 286.921588)">4 × 4 convolution · stride 4 · ReLU</text>
+   </g>
+   <g id="text_10">
+    <text style="font-size: 10.5px; font-family: 'DejaVu Sans'; text-anchor: middle; fill: #3f5c51" x="658.8" y="306.449344" transform="rotate(-0 658.8 306.449344)">16 × 16 spatial locations × 8 features</text>
+   </g>
+   <g id="text_11">
+    <text style="font-weight: 700; font-size: 13px; font-family: 'DejaVu Sans'; text-anchor: middle; fill: #19392e" x="658.8" y="358.921587" transform="rotate(-0 658.8 358.921587)">2 × 2 convolution · stride 2 · ReLU</text>
+   </g>
+   <g id="text_12">
+    <text style="font-size: 10.5px; font-family: 'DejaVu Sans'; text-anchor: middle; fill: #3f5c51" x="658.8" y="378.449344" transform="rotate(-0 658.8 378.449344)">8 × 8 regions × 32 features = 2,048 values</text>
+   </g>
+   <g id="text_13">
+    <text style="font-size: 11px; font-family: 'DejaVu Sans'; text-anchor: start; fill: #3f5c51" x="205.2" y="294.635312" transform="rotate(-0 205.2 294.635312)">Full live vector</text>
+   </g>
+   <g id="text_14">
+    <text style="font-weight: 700; font-size: 13px; font-family: 'DejaVu Sans'; text-anchor: middle; fill: #19392e" x="468" y="442.945587" transform="rotate(-0 468 442.945587)">Concatenate · 3,393 features</text>
+   </g>
+   <g id="text_15">
+    <text style="font-size: 10.5px; font-family: 'DejaVu Sans'; text-anchor: middle; fill: #3f5c51" x="468" y="463.769344" transform="rotate(-0 468 463.769344)">1,345 live values + 2,048 map values flattened in world-grid order</text>
+   </g>
+   <g id="text_16">
+    <text style="font-weight: 700; font-size: 13px; font-family: 'DejaVu Sans'; text-anchor: middle; fill: #19392e" x="244.8" y="540.491187" transform="rotate(-0 244.8 540.491187)">Actor · 512 → 512 → 512 → 17</text>
+   </g>
+   <g id="text_17">
+    <text style="font-size: 10.5px; font-family: 'DejaVu Sans'; text-anchor: middle; fill: #3f5c51" x="244.8" y="567.017344" transform="rotate(-0 244.8 567.017344)">Three tanh hidden layers, then 17 action logits</text>
+   </g>
+   <g id="text_18">
+    <text style="font-weight: 700; font-size: 13px; font-family: 'DejaVu Sans'; text-anchor: middle; fill: #19392e" x="691.2" y="540.491187" transform="rotate(-0 691.2 540.491187)">Critic · 512 → 512 → 512 → 1</text>
+   </g>
+   <g id="text_19">
+    <text style="font-size: 10.5px; font-family: 'DejaVu Sans'; text-anchor: middle; fill: #3f5c51" x="691.2" y="567.017344" transform="rotate(-0 691.2 567.017344)">Three tanh hidden layers, then one value estimate</text>
+   </g>
+  </g>
+ </g>
+ <defs>
+  <clipPath id="pc82f9338c8">
+   <rect x="0" y="0" width="936" height="619.2"/>
+  </clipPath>
+ </defs>
+</svg>

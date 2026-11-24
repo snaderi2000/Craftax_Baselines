@@ -1,0 +1,13 @@
+{
+  "name": "fixed_board_only_smoke",
+  "seed": 50,
+  "architectures": [{"name": "map_mlp", "train_gpu": 4, "evaluation_gpu": 5}],
+  "rewards": {"lava_penalty": 2.0},
+  "ppo": {
+    "map_global_readout": true, "map_single_readout": true, "map_board_only": true,
+    "num_envs": 16, "num_steps": 16, "update_epochs": 1, "num_minibatches": 2,
+    "layer_size": 64, "optimistic_resets": false
+  },
+  "budget": {"max_steps": 512, "max_hours": 1, "evaluation_reserve_minutes": 10},
+  "evaluation": {"common_checkpoints": {}, "common_episodes": 4, "final_episodes": 4, "batch": 4}
+}

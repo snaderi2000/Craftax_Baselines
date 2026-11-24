@@ -1,0 +1,21 @@
+{
+  "name": "lava_only_gru_concat_motion_dp2_10b_seed50",
+  "seed": 50,
+  "architectures": [{"name": "gru", "train_gpu": 5, "train_gpus": [5, 7], "evaluation_gpu": 1}],
+  "rewards": {"death_penalty": 0, "lava_penalty": 2, "diamond_reward": 1, "plant_reward": 1},
+  "ppo": {
+    "num_envs": 1024, "num_steps": 64, "update_epochs": 4, "num_minibatches": 8,
+    "gamma": 0.99, "gae_lambda": 0.8, "clip_eps": 0.2, "vf_coef": 0.5,
+    "ent_coef": 0.01, "lr": 0.0002, "lr_horizon_timesteps": 10000000000,
+    "max_grad_norm": 1.0, "layer_size": 512, "anneal_lr": true,
+    "optimistic_resets": false, "gru_concat_observation": true, "motion_inputs": true
+  },
+  "budget": {"max_hours": 96, "evaluation_reserve_minutes": 45, "max_steps": 10000000000},
+  "evaluation": {
+    "common_checkpoints": {"100m": 100000000, "1b": 1000000000, "2p5b": 2500000000, "5b": 5000000000, "7p5b": 7500000000},
+    "common_episodes": 1024, "final_episodes": 1024, "batch": 32,
+    "seed": 28050, "temperatures": [1, 0.25]
+  },
+  "wandb_project": "Craftax_Baselines",
+  "wandb_entity": "synaderi-uc-davis"
+}

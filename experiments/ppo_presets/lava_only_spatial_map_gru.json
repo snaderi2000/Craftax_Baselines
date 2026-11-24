@@ -1,0 +1,11 @@
+{
+  "name": "lava_only_spatial_map_gru_seed50",
+  "seed": 50,
+  "architectures": [
+    {"name": "spatial_map_gru", "train_gpu": 1, "evaluation_gpu": 5}
+  ],
+  "rewards": {"lava_penalty": 2},
+  "ppo": {"map_view_size": 33, "lr_horizon_timesteps": 10000000000},
+  "budget": {"max_hours": 9, "max_steps": 1000000000},
+  "evaluation": {"common_checkpoints": {"100m": 100000000}}
+}

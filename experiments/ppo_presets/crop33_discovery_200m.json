@@ -1,0 +1,21 @@
+{
+  "name": "crop33_discovery_200m",
+  "seed": 208050,
+  "resume_from": "wandb/run-20261114_232649-7ab0c4df/files/policies/11999969280",
+  "resume_reset_optimizer": true,
+  "architectures": [{"name": "map_mlp", "train_gpu": 6, "evaluation_gpu": 6}],
+  "rewards": {"lava_penalty": 2.0, "map_coverage_bonus": 0.001},
+  "ppo": {
+    "num_envs": 1024, "num_steps": 64, "update_epochs": 4, "num_minibatches": 8,
+    "map_view_size": 33, "map_embedding_size": 4, "layer_size": 512,
+    "lr": 0.000005, "anneal_lr": true, "optimistic_resets": true, "optimistic_reset_ratio": 16
+  },
+  "checkpoint_milestones": [12049969280, 12099969280, 12149969280],
+  "budget": {"max_steps": 12199985152, "max_hours": 6, "evaluation_reserve_minutes": 30},
+  "evaluation": {
+    "common_checkpoints": {}, "common_episodes": 1024, "final_episodes": 1024,
+    "batch": 64, "seed": 209651, "temperatures": [1.0],
+    "world_seeds_file": "concept_mapping/runs/global_map_ppo_200m/heldout_worlds.json",
+    "defer_until_training_complete": true
+  }
+}

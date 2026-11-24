@@ -1,5 +1,7 @@
 import argparse
+import json
 import os
+import subprocess
 import sys
 from typing import Any
 
@@ -39,6 +41,10 @@ def _load_wandb_config(run_path: str) -> dict[str, Any]:
     files_dir = run_path if os.path.basename(run_path) == "files" else os.path.join(run_path, "files")
     config_path = os.path.join(files_dir, "config.yaml")
     if not os.path.exists(config_path):
+        explicit_path = os.path.join(files_dir, 'study_config.json')
+        if os.path.exists(explicit_path):
+            with open(explicit_path) as f:
+                return json.load(f)
         raise FileNotFoundError(f"Could not find W&B config at {config_path}")
     with open(config_path) as f:
         raw_config = yaml.load(f, Loader=yaml.Loader)
@@ -82,7 +88,10 @@ def _restore_train_state(
     if step is None:
         raise FileNotFoundError(f"No checkpoints found in {ckpt_dir}")
     print(f"Restoring RNN policy checkpoint step={step} from {ckpt_dir}", flush=True)
-    return manager.restore(step, items=train_state), int(step)
+    # Inference needs only parameters. The saved optimizer may use an annealed
+    # schedule with a different state structure from this inference-only one.
+    restored = manager.restore(step)
+    return train_state.replace(params=restored['params']), int(step)
 
 
 def _label_frame(
@@ -106,15 +115,16 @@ def _label_frame(
         textures=textures,
         panel_textures=panel_textures,
     )
-    label_h = max(30, 6 * display_scale + 24)
+    label_h = max(70, 18 * display_scale + 18)
     out = Image.new("RGB", (view.width, view.height + label_h), "white")
     out.paste(view, (0, 0))
     draw = ImageDraw.Draw(out)
     label = (
-        f"episode={episode} step={step} action={action}:{_action_name(action)} "
-        f"reward={reward:.3f} V={value:.3f} done={done}"
+        f"episode={episode} step={step}\n"
+        f"action={_action_name(action)} reward={reward:.3f}\n"
+        f"V={value:.3f} done={done}"
     )
-    draw.text((6, view.height + 6), label, fill=(0, 0, 0))
+    draw.multiline_text((6, view.height + 6), label, fill=(0, 0, 0), spacing=3)
     return out
 
 
@@ -144,6 +154,37 @@ def _write_mp4(frames: list[Image.Image], path: str, fps: int, ffmpeg_path: str 
     plt.close(fig)
 
 
+class _MP4Stream:
+    """Encode while rolling out, rather than retaining 10,000 images in RAM."""
+    def __init__(self, path, fps, ffmpeg_path):
+        self.path, self.fps, self.ffmpeg_path = path, fps, ffmpeg_path or 'ffmpeg'
+        self.process = None
+        self.frames = 0
+
+    def __enter__(self):
+        return self
+
+    def append(self, frame):
+        frame = np.asarray(frame.convert('RGB'))
+        if self.process is None:
+            height, width = frame.shape[:2]
+            self.process = subprocess.Popen([self.ffmpeg_path, '-y', '-loglevel', 'error',
+                '-f', 'rawvideo', '-pixel_format', 'rgb24', '-video_size', f'{width}x{height}',
+                '-framerate', str(self.fps), '-i', '-', '-an', '-c:v', 'libx264',
+                '-preset', 'veryfast', '-crf', '20', '-threads', '2',
+                '-vf', 'pad=ceil(iw/2)*2:ceil(ih/2)*2', '-pix_fmt', 'yuv420p',
+                '-movflags', '+faststart', self.path], stdin=subprocess.PIPE)
+        self.process.stdin.write(frame.tobytes())
+        self.frames += 1
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        if self.process is not None:
+            self.process.stdin.close()
+            code = self.process.wait()
+            if code and exc_type is None:
+                raise RuntimeError(f'ffmpeg failed with exit {code}: {self.path}')
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Render trained PPO-RNN symbolic policy episodes to MP4."
@@ -155,6 +196,9 @@ def main() -> None:
     parser.add_argument("--episodes", type=int, default=10)
     parser.add_argument("--max_steps", type=int, default=640)
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument('--config_json', default=None,
+                        help='Local training metadata/config for an active run without config.yaml.')
+    parser.add_argument('--independent_episode_seeds', action='store_true')
     parser.add_argument("--fps", type=int, default=8)
     parser.add_argument("--block_size", type=int, default=7)
     parser.add_argument("--display_scale", type=int, default=4)
@@ -167,8 +211,17 @@ def main() -> None:
     )
     args = parser.parse_args()
 
+    if any(os.path.exists(os.path.join(args.out_dir, name)) for name in
+           ('episode_summary.csv', 'summary.json')):
+        raise FileExistsError('Use a new output directory; an episode summary already exists')
     os.makedirs(args.out_dir, exist_ok=True)
-    config = _load_wandb_config(args.run_path)
+    if args.config_json:
+        with open(args.config_json) as file:
+            config = {k.upper(): v for k, v in json.load(file).items()}
+        config.setdefault('ENV_NAME', config.get('ENVIRONMENT'))
+        config.setdefault('DEATH_PENALTY', abs(config.get('ADDITIONAL_DEATH_COST', 0.)))
+    else:
+        config = _load_wandb_config(args.run_path)
     config = {k.upper(): v for k, v in config.items()}
     env_name = args.env_name or config.get("ENV_NAME", "Craftax-Classic-Symbolic-v1")
     if "Symbolic" not in env_name:
@@ -177,17 +230,30 @@ def main() -> None:
 
     env = make_craftax_env_from_name(env_name, auto_reset=False)
     env_params = env.default_params
+    death_penalty = float(config.get('DEATH_PENALTY', 0.))
+    if death_penalty:
+        from wrappers import ClassicDeathPenaltyWrapper
+        env = ClassicDeathPenaltyWrapper(env, death_penalty)
+    if config.get('LAVA_PENALTY',0.):
+        from wrappers import ClassicLavaPenaltyWrapper
+        env=ClassicLavaPenaltyWrapper(env,config['LAVA_PENALTY'])
+    diamond_reward = float(config.get('DIAMOND_REWARD', 1.))
+    if diamond_reward != 1. or config.get('PLANT_REWARD', 1.) != 1.:
+        from wrappers import ClassicAchievementRewardWrapper
+        env = ClassicAchievementRewardWrapper(env, diamond_reward, config.get('PLANT_REWARD', 1.))
     network = ActorCriticRNN(env.action_space(env_params).n, config=config)
     train_state, restored_step = _restore_train_state(
         args.run_path, config, network, env, env_params, args.timestep
     )
     print(f"env={env_name} checkpoint_step={restored_step}", flush=True)
 
-    textures = load_all_textures(args.block_size)
+    # The drawing helpers use NumPy. Cache textures on the CPU once, avoiding
+    # dozens of GPU slice/transfers for inventory digits in every video frame.
+    textures = jax.tree_util.tree_map(np.asarray, load_all_textures(args.block_size))
     panel_textures = (
         textures
         if args.display_scale == 1
-        else load_all_textures(args.block_size * args.display_scale)
+        else jax.tree_util.tree_map(np.asarray, load_all_textures(args.block_size * args.display_scale))
     )
 
     reset_jit = jax.jit(env.reset)
@@ -204,22 +270,27 @@ def main() -> None:
         return hstate, pi.sample(seed=action_rng)[0, 0], value[0, 0], rng
 
     rng = jax.random.PRNGKey(args.seed)
+    summaries = []
     summary_path = os.path.join(args.out_dir, "episode_summary.csv")
     with open(summary_path, "w") as summary:
         summary.write("episode,frames,total_reward,done,last_step,mp4,actions\n")
         for episode in range(args.episodes):
             print(f"Rolling out episode {episode}/{args.episodes - 1}", flush=True)
+            if os.path.exists(os.path.join(args.out_dir, f'episode_{episode:02d}.mp4')):
+                raise FileExistsError('Refusing to overwrite an existing episode MP4')
+            if args.independent_episode_seeds:
+                rng = jax.random.fold_in(jax.random.PRNGKey(args.seed), episode)
             rng, reset_rng, policy_rng = jax.random.split(rng, 3)
             obs, env_state = reset_jit(reset_rng, env_params)
             hstate = ScannedRNN.initialize_carry(1, int(config["LAYER_SIZE"]))
             last_done = jnp.zeros((), dtype=bool)
-            frames = []
             total_reward = 0.0
             done_b = False
             last_step = -1
 
             actions_path = os.path.join(args.out_dir, f"episode_{episode:02d}_actions.txt")
-            with open(actions_path, "w") as f:
+            mp4_path = os.path.join(args.out_dir, f"episode_{episode:02d}.mp4")
+            with _MP4Stream(mp4_path, args.fps, args.ffmpeg_path) as writer, open(actions_path, "w") as f:
                 f.write("step,action,action_name,reward,value,done\n")
                 for step in range(args.max_steps):
                     hstate, action, value, policy_rng = policy_apply(
@@ -235,7 +306,7 @@ def main() -> None:
                     done_b = bool(np.asarray(done))
                     total_reward += reward_f
                     last_step = step
-                    frames.append(
+                    writer.append(
                         _label_frame(
                             np.asarray(obs),
                             action_i,
@@ -258,17 +329,35 @@ def main() -> None:
                     last_done = done
                     if done_b:
                         break
+                    if (step+1) % 500 == 0:
+                        print(f'Episode {episode}: {step+1} steps, reward={total_reward:.2f}', flush=True)
+                if done_b:
+                    writer.append(_label_frame(np.asarray(obs), action_i, reward_f, True,
+                        0., last_step+1, episode, args.block_size, args.display_scale,
+                        textures, panel_textures))
 
-            mp4_path = os.path.join(args.out_dir, f"episode_{episode:02d}.mp4")
-            print(f"Encoding {mp4_path}", flush=True)
-            _write_mp4(frames, mp4_path, args.fps, args.ffmpeg_path)
             summary.write(
-                f"{episode},{len(frames)},{total_reward:.6f},{done_b},{last_step},"
+                f"{episode},{writer.frames},{total_reward:.6f},{done_b},{last_step},"
                 f"{mp4_path},{actions_path}\n"
             )
             summary.flush()
-            print(f"Saved {mp4_path} ({len(frames)} frames, reward={total_reward:.3f})")
+            print(f"Saved {mp4_path} ({writer.frames} frames, reward={total_reward:.3f})")
             print(f"Saved {actions_path}")
+            from craftax.craftax_classic.constants import Achievement, BlockType
+            position = tuple(np.asarray(env_state.player_position))
+            summaries.append(dict(episode=episode, steps=last_step+1, frames=writer.frames,
+                total_reward=total_reward, done=done_b, truncated_by_renderer=not done_b,
+                ended_in_lava=bool(np.asarray(env_state.map)[position] == BlockType.LAVA.value),
+                final_health=int(np.asarray(env_state.player_health)),
+                achievements=[a.name.lower() for a in Achievement if bool(env_state.achievements[a.value])],
+                mp4=mp4_path))
+            with open(os.path.join(args.out_dir, 'summary.json'), 'w') as file:
+                json.dump(dict(run=args.run_path, checkpoint=restored_step, seed=args.seed,
+                    independent_episode_seeds=args.independent_episode_seeds,
+                    death_penalty_magnitude=death_penalty, diamond_reward=diamond_reward,
+                    fps=args.fps, max_steps=args.max_steps,
+                    greedy=args.greedy, config_source=args.config_json or 'W&B config.yaml',
+                    episodes=summaries), file, indent=2)
 
     print(f"Saved {summary_path}")
 

@@ -1,0 +1,80 @@
+{
+  "name": "lava_only_gru_concat_10b_seed50",
+  "seed": 50,
+  "architectures": [
+    {
+      "name": "gru",
+      "train_gpu": 2,
+      "evaluation_gpu": 7
+    }
+  ],
+  "rewards": {
+    "death_penalty": 0,
+    "lava_penalty": 2,
+    "diamond_reward": 1,
+    "plant_reward": 1
+  },
+  "ppo": {
+    "reset_gru_every_step": false,
+    "optimistic_resets": false,
+    "gru_concat_observation": true,
+    "lr_horizon_timesteps": 10000000000
+  },
+  "budget": {
+    "max_hours": 96,
+    "evaluation_reserve_minutes": 45,
+    "max_steps": 10000000000
+  },
+  "checkpoint_milestones": [
+    65536,
+    100000,
+    150000,
+    220000,
+    330000,
+    500000,
+    750000,
+    1000000,
+    1500000,
+    2200000,
+    3300000,
+    5000000,
+    7500000,
+    10000000,
+    15000000,
+    22000000,
+    33000000,
+    50000000,
+    75000000,
+    100000000,
+    150000000,
+    220000000,
+    330000000,
+    500000000,
+    750000000,
+    1000000000,
+    1500000000,
+    2200000000,
+    2500000000,
+    3300000000,
+    5000000000,
+    7500000000
+  ],
+  "evaluation": {
+    "common_checkpoints": {
+      "100m": 100000000,
+      "1b": 1000000000,
+      "2p5b": 2500000000,
+      "5b": 5000000000,
+      "7p5b": 7500000000
+    },
+    "common_episodes": 1024,
+    "final_episodes": 1024,
+    "batch": 32,
+    "seed": 28050,
+    "temperatures": [
+      1,
+      0.25
+    ],
+    "defer_until_training_complete": false
+  }
+}

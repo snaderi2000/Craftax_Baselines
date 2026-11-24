@@ -1,5 +1,6 @@
 import argparse
 import csv
+import json
 import os
 import sys
 
@@ -22,6 +23,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 from craftax.craftax_env import make_craftax_env_from_name
+from craftax.craftax_classic.constants import BlockType
 
 from concept_mapping.render_ppo_episodes import (
     _action_name,
@@ -44,9 +46,35 @@ def _rollout_episode(args, network, train_state, env, env_params):
         rng, action_rng = jax.random.split(rng)
         return pi.sample(seed=action_rng)[0], value[0], rng
 
+    @jax.jit
+    def skip_episode(rng, params):
+        # Replay preceding episodes without transferring unused records to the host.
+        rng, reset_rng, policy_rng = jax.random.split(rng, 3)
+        obs, state = reset_jit(reset_rng, env_params)
+
+        def cond(carry):
+            step, _, _, _, _, done = carry
+            return (step < args.max_steps) & ~done
+
+        def body(carry):
+            step, rng, policy_rng, obs, state, _ = carry
+            action, _, policy_rng = policy_apply(params, obs, policy_rng)
+            rng, step_rng = jax.random.split(rng)
+            obs, state, _, done, _ = step_jit(step_rng, state, action, env_params)
+            return step + 1, rng, policy_rng, obs, state, done
+
+        result = jax.lax.while_loop(
+            cond, body, (jnp.asarray(0), rng, policy_rng, obs, state, jnp.asarray(False))
+        )
+        return result[1]
+
     rng = jax.random.PRNGKey(args.seed)
     target_records = None
     for episode in range(args.episode + 1):
+        if episode < args.episode:
+            rng = skip_episode(rng, train_state.params)
+            continue
+        print(f"Rolling out episode {episode}", flush=True)
         rng, reset_rng, policy_rng = jax.random.split(rng, 3)
         obs, env_state = reset_jit(reset_rng, env_params)
         records = []
@@ -55,11 +83,17 @@ def _rollout_episode(args, network, train_state, env, env_params):
             action_i = int(np.asarray(action))
             value_f = float(np.asarray(value))
             rng, step_rng = jax.random.split(rng)
+            old_health = int(np.asarray(env_state.player_health))
+            old_achievements = int(np.asarray(env_state.achievements).sum())
             next_obs, env_state, reward, done, _info = step_jit(
                 step_rng, env_state, action, env_params
             )
             reward_f = float(np.asarray(reward))
             done_b = bool(np.asarray(done))
+            died = done_b and (
+                int(np.asarray(env_state.player_health)) <= 0
+                or int(np.asarray(env_state.map[tuple(env_state.player_position)])) == BlockType.LAVA.value
+            )
             records.append(
                 {
                     "step": step,
@@ -68,6 +102,9 @@ def _rollout_episode(args, network, train_state, env, env_params):
                     "action_name": _action_name(action_i),
                     "reward": reward_f,
                     "done": done_b,
+                    "achievement_reward": int(np.asarray(env_state.achievements).sum()) - old_achievements,
+                    "health_reward": 0.1 * (int(np.asarray(env_state.player_health)) - old_health),
+                    "death_reward": -args.death_penalty if died else 0.0,
                 }
             )
             obs = next_obs
@@ -107,6 +144,8 @@ def _plot(records: list[dict], out_path: str, title: str, smooth_window: int) ->
             "xtick.color": "#374151",
             "ytick.color": "#374151",
             "font.size": 11,
+            "font.weight": "bold",
+            "axes.labelweight": "bold",
             "axes.titleweight": "bold",
             "axes.spines.top": False,
             "axes.spines.right": False,
@@ -117,8 +156,11 @@ def _plot(records: list[dict], out_path: str, title: str, smooth_window: int) ->
     ax.plot(steps, smooth_values, color="#175CD3", linewidth=2.6, label=f"V(s), smoothed")
     ax.fill_between(steps, smooth_values, np.minimum(values.min(), smooth_values.min()), color="#175CD3", alpha=0.08)
 
-    positive_idx = np.where(rewards > 0)[0]
-    negative_idx = np.where(rewards < 0)[0]
+    decomposed = all('achievement_reward' in r and 'health_reward' in r for r in records)
+    achievement = np.asarray([r['achievement_reward'] for r in records],dtype=float) if decomposed else None
+    health = np.asarray([r['health_reward'] for r in records],dtype=float) if decomposed else rewards
+    positive_idx = np.where(achievement > 0)[0] if decomposed else np.where(rewards > 0)[0]
+    negative_idx = np.where(health < 0)[0]
     if positive_idx.size:
         ax.scatter(
             steps[positive_idx],
@@ -128,8 +170,13 @@ def _plot(records: list[dict], out_path: str, title: str, smooth_window: int) ->
             edgecolor="white",
             linewidth=0.8,
             zorder=4,
-            label="positive reward",
+            label="achievement reward" if decomposed else "positive reward",
         )
+    if decomposed and np.any(health > 0):
+        idx = np.where(health > 0)[0]
+        ax.scatter(steps[idx], smooth_values[idx], s=48, marker='^',
+                   color='#D99A00', edgecolor='white', linewidth=.8,
+                   zorder=5, label='health recovery')
     if negative_idx.size:
         ax.scatter(
             steps[negative_idx],
@@ -139,8 +186,13 @@ def _plot(records: list[dict], out_path: str, title: str, smooth_window: int) ->
             edgecolor="white",
             linewidth=0.8,
             zorder=4,
-            label="negative reward",
+            label="health loss" if decomposed else "negative reward",
         )
+    death_idx = np.where(np.asarray([r.get("death_reward", 0.0) for r in records]) < 0)[0]
+    if death_idx.size:
+        ax.scatter(steps[death_idx], smooth_values[death_idx], s=65, marker="X",
+                   color="#7A271A", edgecolor="white", linewidth=0.8,
+                   zorder=6, label="death penalty")
     done_idx = np.where(done)[0]
     if done_idx.size:
         ax.axvline(steps[done_idx[0]], color="#111827", linewidth=1.2, linestyle="--", alpha=0.65)
@@ -159,10 +211,11 @@ def _plot(records: list[dict], out_path: str, title: str, smooth_window: int) ->
     ax.set_ylabel("Critic value V(s)")
     ax.grid(axis="y", color="#E8ECF2", linewidth=0.9)
     ax.grid(axis="x", color="#F3F5F8", linewidth=0.6)
-    ax.legend(loc="upper right", frameon=False, ncol=3)
+    ax.legend(loc="upper right", frameon=False, ncol=3, prop={'weight':'bold','size':10})
     ax.margins(x=0.01)
     fig.tight_layout()
     fig.savefig(out_path, bbox_inches="tight")
+    fig.savefig(os.path.splitext(out_path)[0] + ".pdf", bbox_inches="tight")
     plt.close(fig)
 
 
@@ -174,7 +227,7 @@ def main() -> None:
     parser.add_argument("--env_name", type=str, default=None)
     parser.add_argument("--seed", type=int, default=1)
     parser.add_argument("--episode", type=int, default=19)
-    parser.add_argument("--max_steps", type=int, default=4096)
+    parser.add_argument("--max_steps", type=int, default=10000)
     parser.add_argument("--smooth_window", type=int, default=9)
     parser.add_argument("--title", default="Critic Value Over Episode")
     parser.add_argument("--greedy", action=argparse.BooleanOptionalAction, default=False)
@@ -185,6 +238,10 @@ def main() -> None:
     env_name = args.env_name or config.get("ENV_NAME", "Craftax-Classic-Symbolic-v1")
     config["ENV_NAME"] = env_name
     env = make_craftax_env_from_name(env_name, auto_reset=False)
+    args.death_penalty = float(config.get("DEATH_PENALTY", 0.0))
+    if args.death_penalty:
+        from wrappers import ClassicDeathPenaltyWrapper
+        env = ClassicDeathPenaltyWrapper(env, args.death_penalty)
     env_params = env.default_params
     network = _init_network(config, env, env_params)
     train_state, checkpoint_step = _restore_train_state(
@@ -196,13 +253,21 @@ def main() -> None:
     with open(csv_path, "w", newline="") as f:
         writer = csv.DictWriter(
             f,
-            fieldnames=["step", "value", "action", "action_name", "reward", "done"],
+            fieldnames=["step", "value", "action", "action_name", "reward", "done", "achievement_reward", "health_reward", "death_reward"],
         )
         writer.writeheader()
         writer.writerows(records)
 
     png_path = os.path.join(args.out_dir, f"episode_{args.episode:02d}_values.png")
     _plot(records, png_path, args.title, args.smooth_window)
+
+    metadata = dict(vars(args), checkpoint_step=checkpoint_step, env_name=env_name,
+                    terminated=records[-1]["done"],
+                    run_path=os.path.abspath(args.run_path), steps=len(records))
+    metadata_path = os.path.join(args.out_dir, f"episode_{args.episode:02d}_metadata.json")
+    with open(metadata_path, "w") as f:
+        json.dump(metadata, f, indent=2)
+        f.write("\n")
 
     values = np.asarray([r["value"] for r in records], dtype=np.float32)
     rewards = np.asarray([r["reward"] for r in records], dtype=np.float32)

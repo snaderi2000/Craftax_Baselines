@@ -1,0 +1,22 @@
+{
+  "name": "one_observed_map_12p2b_finetune_100m",
+  "seed": 27154,
+  "resume_from": "/home/shawheen/Craftax_Baselines/wandb/run-20261120_094749-5860320f/files/policies/12199985152",
+  "architectures": [{"name": "map_mlp", "train_gpus": [4, 5, 6, 7], "evaluation_gpu": 4}],
+  "rewards": {"lava_penalty": 2.0},
+  "ppo": {
+    "num_envs": 1024, "num_steps": 64, "update_epochs": 4, "num_minibatches": 8,
+    "map_global_readout": true, "map_single_readout": true, "map_internal_crop": true,
+    "map_view_size": 33, "map_embedding_size": 4, "layer_size": 512,
+    "lr": 0.000002, "anneal_lr": true, "lr_horizon_timesteps": 12299993088,
+    "optimistic_resets": true, "optimistic_reset_ratio": 16
+  },
+  "checkpoint_milestones": [12200247296, 12209946624, 12249989120, 12274958336],
+  "budget": {"max_steps": 12299993088, "max_hours": 12, "evaluation_reserve_minutes": 60},
+  "evaluation": {
+    "common_checkpoints": {}, "final_episodes": 1024, "batch": 64, "seed": 209651,
+    "world_seeds_file": "/home/shawheen/Craftax_Baselines/concept_mapping/runs/global_map_ppo_200m/heldout_worlds.json",
+    "temperatures": [1.0], "defer_until_training_complete": true
+  },
+  "wandb_project": "Craftax_Baselines", "wandb_entity": "synaderi-uc-davis"
+}

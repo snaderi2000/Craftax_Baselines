@@ -1,0 +1,73 @@
+{
+  "name": "lava_only_spatial_map_gru_to2b_seed50",
+  "seed": 50,
+  "resume_from": null,
+  "resume_after": "/home/shawheen/Craftax_Baselines/concept_mapping/runs/lava_only_spatial_map_gru_seed50/spatial_map_gru",
+  "resume_reset_optimizer": false,
+  "checkpoint_milestones": [
+    500000000,
+    750000000,
+    1000000000,
+    1250000000,
+    1500000000,
+    1750000000
+  ],
+  "architectures": [
+    {
+      "name": "spatial_map_gru",
+      "train_gpu": 1,
+      "evaluation_gpu": 5,
+      "train_gpus": []
+    }
+  ],
+  "rewards": {
+    "death_penalty": 0.0,
+    "lava_penalty": 2,
+    "diamond_reward": 1.0,
+    "plant_reward": 1.0
+  },
+  "ppo": {
+    "num_envs": 1024,
+    "num_steps": 64,
+    "update_epochs": 4,
+    "num_minibatches": 8,
+    "gamma": 0.99,
+    "gae_lambda": 0.8,
+    "clip_eps": 0.2,
+    "vf_coef": 0.5,
+    "ent_coef": 0.01,
+    "lr": 0.0002,
+    "lr_horizon_timesteps": 10000000000,
+    "max_grad_norm": 1.0,
+    "layer_size": 512,
+    "anneal_lr": true,
+    "optimistic_resets": true,
+    "optimistic_reset_ratio": 16,
+    "map_view_size": 33,
+    "map_embedding_size": 4,
+    "reset_seed_bank": null,
+    "policy_temperature": 1.0
+  },
+  "budget": {
+    "max_hours": 48,
+    "evaluation_reserve_minutes": 15.0,
+    "max_steps": 2000027648
+  },
+  "evaluation": {
+    "common_checkpoints": {
+      "1b": 1000000000,
+      "1p5b": 1500000000
+    },
+    "common_episodes": 1024,
+    "final_episodes": 256,
+    "batch": 32,
+    "seed": 18050,
+    "temperatures": [
+      1.0
+    ],
+    "world_seeds_file": null,
+    "repeats": 1
+  },
+  "wandb_project": "Craftax_Baselines",
+  "wandb_entity": "synaderi-uc-davis"
+}

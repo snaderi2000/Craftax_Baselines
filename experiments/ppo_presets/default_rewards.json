@@ -1,0 +1,15 @@
+{
+  "name": "default_rewards_9h_seed50",
+  "seed": 50,
+  "rewards": {
+    "death_penalty": 0,
+    "lava_penalty": 0,
+    "diamond_reward": 1,
+    "plant_reward": 1
+  },
+  "budget": {
+    "max_hours": 9,
+    "evaluation_reserve_minutes": 15,
+    "max_steps": 10000000000
+  }
+}

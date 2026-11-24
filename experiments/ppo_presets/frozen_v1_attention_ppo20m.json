@@ -1,0 +1,23 @@
+{
+  "name": "frozen_v1_attention_ppo20m",
+  "seed": 208056,
+  "architectures": [{"name": "map_mlp", "train_gpus": [0, 1, 2, 3], "evaluation_gpu": 4}],
+  "rewards": {"lava_penalty": 2.0},
+  "ppo": {
+    "map_global_readout": true, "map_single_readout": true, "map_board_only": true,
+    "map_v1_attention_adapter": true,
+    "map_v1_imitation_init": "concept_mapping/runs/board_only_frozen_v1_attention_5m/imitation_checkpoints/5001216",
+    "num_envs": 256, "num_steps": 64, "num_minibatches": 32, "update_epochs": 4,
+    "layer_size": 512, "lr": 0.00003, "anneal_lr": false,
+    "optimistic_resets": true, "optimistic_reset_ratio": 16
+  },
+  "checkpoint_milestones": [262144, 1048576, 5000000, 10000000, 15000000],
+  "budget": {"max_steps": 20004864, "max_hours": 6, "evaluation_reserve_minutes": 20},
+  "evaluation": {
+    "common_checkpoints": {"after_5m": 5000000, "after_10m": 10000000},
+    "common_episodes": 64, "final_episodes": 64, "batch": 64, "seed": 209651,
+    "world_seeds_file": "concept_mapping/runs/v6_board_only_imitation_10m/heldout_64.json",
+    "temperatures": [1.0]
+  },
+  "wandb_project": "Craftax_Baselines", "wandb_entity": "synaderi-uc-davis"
+}

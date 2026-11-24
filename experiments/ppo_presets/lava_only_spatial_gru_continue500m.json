@@ -1,0 +1,39 @@
+{
+  "name": "lava_only_spatial_gru_continue500m_seed50",
+  "seed": 50,
+  "resume_from": "wandb/run-20261111_065352-734fe365/files/policies/581959680",
+  "architectures": [
+    {"name": "spatial_gru", "train_gpu": 0, "evaluation_gpu": 4}
+  ],
+  "rewards": {
+    "death_penalty": 0,
+    "lava_penalty": 2,
+    "diamond_reward": 1,
+    "plant_reward": 1
+  },
+  "ppo": {
+    "lr_horizon_timesteps": 10000000000
+  },
+  "budget": {
+    "max_hours": 9,
+    "evaluation_reserve_minutes": 15,
+    "max_steps": 1081959680
+  },
+  "checkpoint_milestones": [
+    582959680,
+    586959680,
+    601959680,
+    631959680,
+    681959680,
+    781959680,
+    881959680,
+    981959680
+  ],
+  "evaluation": {
+    "common_checkpoints": {"750m": 750000000, "1b": 1000000000},
+    "common_episodes": 1024,
+    "final_episodes": 256,
+    "batch": 32,
+    "seed": 18050
+  }
+}

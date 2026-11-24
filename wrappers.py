@@ -19,6 +19,111 @@ class GymnaxWrapper(object):
         return getattr(self._env, name)
 
 
+class ClassicDeathPenaltyWrapper(GymnaxWrapper):
+    """Add a death cost before reset, preserving time-limit-only rewards.
+
+    Wrap a Classic environment without automatic resets. Place reset and log
+    wrappers outside this wrapper so both PPO and episode returns see the cost.
+    """
+
+    def __init__(self, env, death_penalty):
+        super().__init__(env)
+        self.death_penalty = float(death_penalty)
+
+    @partial(jax.jit, static_argnums=(0, 4))
+    def step(self, rng, state, action, params=None):
+        from craftax.craftax_classic.constants import BlockType
+
+        obs, next_state, reward, done, info = self._env.step(
+            rng, state, action, params
+        )
+        in_lava = next_state.map[
+            next_state.player_position[0], next_state.player_position[1]
+        ] == BlockType.LAVA.value
+        died = done & ((next_state.player_health <= 0) | in_lava)
+        return obs, next_state, reward - self.death_penalty * died, done, info
+
+
+class ClassicDiamondRewardWrapper(GymnaxWrapper):
+    """Change the FIRST diamond achievement's total reward, before resets.
+
+    The base achievement reward is +1. Add only (target - 1), once; retain
+    health rewards, any death cost, all other achievements and game mechanics.
+    """
+    def __init__(self, env, diamond_reward=1.):
+        super().__init__(env)
+        if not np.isfinite(diamond_reward) or diamond_reward < 0:
+            raise ValueError('Diamond reward must be finite and nonnegative')
+        self.diamond_reward = float(diamond_reward)
+
+    @partial(jax.jit, static_argnums=(0, 4))
+    def step(self, rng, state, action, params=None):
+        from craftax.craftax_classic.constants import Achievement
+        obs, next_state, reward, done, info = self._env.step(rng, state, action, params)
+        index = Achievement.COLLECT_DIAMOND.value
+        newly_collected = next_state.achievements[index] & ~state.achievements[index]
+        return obs, next_state, reward+(self.diamond_reward-1.)*newly_collected, done, info
+
+
+class ClassicLavaPenaltyWrapper(GymnaxWrapper):
+    """Add a cost only for terminal lava entry; preserve all other rewards."""
+
+    def __init__(self, env, lava_penalty=2.):
+        super().__init__(env)
+        if not np.isfinite(lava_penalty) or lava_penalty < 0:
+            raise ValueError('lava_penalty must be finite and nonnegative')
+        self.lava_penalty=float(lava_penalty)
+
+    @partial(jax.jit, static_argnums=(0, 4))
+    def step(self, rng, state, action, params=None):
+        from craftax.craftax_classic.constants import BlockType
+        obs, next_state, reward, done, info=self._env.step(rng,state,action,params)
+        in_lava=next_state.map[next_state.player_position[0],next_state.player_position[1]]==BlockType.LAVA.value
+        return obs,next_state,reward-self.lava_penalty*(done&in_lava),done,info
+
+
+class ClassicAchievementRewardWrapper(GymnaxWrapper):
+    """Set first-diamond and first-plant achievement rewards before reset."""
+
+    def __init__(self, env, diamond_reward=1., plant_reward=1.):
+        super().__init__(env)
+        for name, value in [('diamond_reward', diamond_reward), ('plant_reward', plant_reward)]:
+            if not np.isfinite(value) or value < 0:
+                raise ValueError(f'{name} must be finite and nonnegative')
+        self.diamond_reward = float(diamond_reward)
+        self.plant_reward = float(plant_reward)
+
+    @partial(jax.jit, static_argnums=(0, 4))
+    def step(self, rng, state, action, params=None):
+        from craftax.craftax_classic.constants import Achievement
+        obs, next_state, reward, done, info = self._env.step(rng, state, action, params)
+        newly_earned = next_state.achievements & ~state.achievements
+        reward = (reward
+                  + (self.diamond_reward - 1.) * newly_earned[Achievement.COLLECT_DIAMOND.value]
+                  + (self.plant_reward - 1.) * newly_earned[Achievement.EAT_PLANT.value])
+        return obs, next_state, reward, done, info
+
+
+class ClassicCompletionWrapper(GymnaxWrapper):
+    """Treat earning the final missing Classic achievement as a terminal win."""
+
+    def __init__(self, env, bonus):
+        super().__init__(env)
+        if not np.isfinite(bonus) or bonus < 0:
+            raise ValueError("Completion bonus must be finite and nonnegative")
+        self.bonus = float(bonus)
+
+    @partial(jax.jit, static_argnums=(0, 4))
+    def step(self, rng, state, action, params=None):
+        from craftax.craftax_classic.envs.common import compute_score
+        obs, next_state, reward, done, info = self._env.step(rng, state, action, params)
+        won = next_state.achievements.all() & ~state.achievements.all()
+        done = done | won
+        info = {**info, **compute_score(next_state, done),
+                "discount": jnp.where(won, 0., info["discount"]), "all22_win": won}
+        return obs, next_state, reward + self.bonus * won, done, info
+
+
 class BatchEnvWrapper(GymnaxWrapper):
     """Batches reset and step functions"""
 

@@ -1,0 +1,70 @@
+{
+  "name": "sru_regular_14b_lr_restart_seed50",
+  "seed": 50,
+  "architectures": [
+    {
+      "name": "gru",
+      "train_gpu": 4,
+      "evaluation_gpu": 4
+    }
+  ],
+  "rewards": {
+    "death_penalty": 0,
+    "lava_penalty": 2,
+    "diamond_reward": 1,
+    "plant_reward": 1
+  },
+  "ppo": {
+    "num_envs": 1024,
+    "num_steps": 64,
+    "update_epochs": 4,
+    "num_minibatches": 8,
+    "gamma": 0.99,
+    "gae_lambda": 0.8,
+    "clip_eps": 0.2,
+    "vf_coef": 0.5,
+    "ent_coef": 0.01,
+    "lr": 1.2e-06,
+    "lr_horizon_timesteps": null,
+    "max_grad_norm": 1.0,
+    "layer_size": 512,
+    "anneal_lr": false,
+    "optimistic_resets": false,
+    "gru_concat_observation": true,
+    "motion_inputs": true,
+    "sru_gru": true,
+    "sru_warmup_steps": 0,
+    "sru_gate_lr": 1.2e-05,
+    "sru_identity_coef": 0.01,
+    "sru_lr_anneal_from": 12500008960,
+    "sru_lr_anneal_until": 14000062464,
+    "sru_lr_final_fraction": 0.25
+  },
+  "budget": {
+    "max_hours": 17,
+    "evaluation_reserve_minutes": 120,
+    "max_steps": 14000062464
+  },
+  "evaluation": {
+    "common_checkpoints": {
+      "reference_11p8b": 11800018944,
+      "parent_12p5b": 12500008960
+    },
+    "common_episodes": 1024,
+    "final_episodes": 1024,
+    "batch": 128,
+    "seed": 24261125,
+    "temperatures": [
+      1.0
+    ],
+    "world_seeds_file": "/home/shawheen/Craftax_Baselines/concept_mapping/runs/sru_regular_14b_lr_restart_seed50/heldout_worlds.json",
+    "defer_until_training_complete": true
+  },
+  "wandb_project": "Craftax_Baselines",
+  "wandb_entity": "synaderi-uc-davis",
+  "resume_from": "/home/shawheen/Craftax_Baselines/wandb/run-20261123_085328-23af3c0b/files/policies/12500008960",
+  "checkpoint_milestones": [
+    13000048640,
+    13500022784
+  ]
+}

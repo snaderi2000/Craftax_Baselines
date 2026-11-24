@@ -1,0 +1,59 @@
+{
+  "name": "lava_only_map_mlp_dp4_continue_to10b_seed50",
+  "seed": 50,
+  "architectures": [
+    {
+      "name": "map_mlp",
+      "train_gpus": [
+        0,
+        3,
+        4,
+        6
+      ],
+      "evaluation_gpu": 2
+    }
+  ],
+  "rewards": {
+    "lava_penalty": 2
+  },
+  "ppo": {
+    "map_view_size": 33,
+    "map_embedding_size": 4,
+    "lr_horizon_timesteps": 10000000000
+  },
+  "budget": {
+    "max_hours": 48,
+    "evaluation_reserve_minutes": 30,
+    "max_steps": 10000000000
+  },
+  "evaluation": {
+    "common_checkpoints": {
+      "6b": 6000000000,
+      "7b": 7000000000,
+      "8b": 8000000000,
+      "9b": 9000000000
+    },
+    "common_episodes": 1024,
+    "final_episodes": 1024,
+    "batch": 32,
+    "seed": 18050,
+    "temperatures": [
+      1.0,
+      0.25
+    ]
+  },
+  "checkpoint_milestones": [
+    5001003584,
+    5005003584,
+    5500000000,
+    6000000000,
+    6500000000,
+    7000000000,
+    7500000000,
+    8000000000,
+    8500000000,
+    9000000000,
+    9500000000
+  ],
+  "resume_from": "/home/shawheen/Craftax_Baselines/wandb/run-20261112_065028-b281078c/files/policies/5000003584"
+}

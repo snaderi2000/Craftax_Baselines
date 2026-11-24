@@ -1,0 +1,28 @@
+{
+  "name": "gru_concat_10b_temperature_sweep100",
+  "display_name": "GRU + concat \u00b7 10B checkpoint",
+  "checkpoint": "wandb/run-20261112_210552-4e33788f/files/policies/9999941632",
+  "source_config": "concept_mapping/runs/lava_only_gru_concat_dp2_10b_seed50/gru/inference_config.json",
+  "temperatures": [
+    1.0,
+    0.75,
+    0.5,
+    0.25,
+    0.1,
+    0.0
+  ],
+  "gpus": [
+    1
+  ],
+  "worlds_per_split": 100,
+  "repeats": 1,
+  "batch": 25,
+  "world_generator_seed": 42150,
+  "validation_rollout_seed": 58150,
+  "confirmation_rollout_seed": 68150,
+  "bootstrap_seed": 48151,
+  "bootstrap_samples": 10000,
+  "max_hours": 2,
+  "validation_worlds_file": "/home/shawheen/Craftax_Baselines/concept_mapping/runs/gru_concat_vs_map_mlp_10b_temperature_sweep100/validation_worlds.json",
+  "confirmation_worlds_file": "/home/shawheen/Craftax_Baselines/concept_mapping/runs/gru_concat_vs_map_mlp_10b_temperature_sweep100/confirmation_worlds.json"
+}

@@ -1,0 +1,47 @@
+{
+  "name": "lava_only_mlp_from100b_continue1b_seed50",
+  "seed": 50,
+  "resume_from": "wandb/run-20260914_223533-bcor2uze/files/policies/99999940608",
+  "architectures": [
+    {"name": "mlp", "train_gpu": 2, "evaluation_gpu": 7}
+  ],
+  "rewards": {
+    "death_penalty": 0,
+    "lava_penalty": 2,
+    "diamond_reward": 1,
+    "plant_reward": 1
+  },
+  "ppo": {
+    "lr": 0.0002,
+    "lr_horizon_timesteps": 110000000000,
+    "anneal_lr": true,
+    "optimistic_resets": true,
+    "optimistic_reset_ratio": 16
+  },
+  "budget": {
+    "max_hours": 6,
+    "evaluation_reserve_minutes": 30,
+    "max_steps": 100999940608
+  },
+  "checkpoint_milestones": [
+    100000940608,
+    100004940608,
+    100009940608,
+    100024940608,
+    100049940608,
+    100099940608,
+    100249940608,
+    100499940608,
+    100749940608
+  ],
+  "evaluation": {
+    "common_checkpoints": {
+      "after100m": 100099940608,
+      "after500m": 100499940608
+    },
+    "common_episodes": 256,
+    "final_episodes": 1024,
+    "batch": 32,
+    "seed": 18050
+  }
+}

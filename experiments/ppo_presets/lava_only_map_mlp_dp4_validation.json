@@ -1,0 +1,41 @@
+{
+  "name": "lava_only_map_mlp_dp4_validation_seed50",
+  "seed": 50,
+  "architectures": [
+    {
+      "name": "map_mlp",
+      "train_gpus": [
+        0,
+        3,
+        4,
+        6
+      ],
+      "evaluation_gpu": 7
+    }
+  ],
+  "rewards": {
+    "lava_penalty": 2
+  },
+  "ppo": {
+    "map_view_size": 33,
+    "map_embedding_size": 4,
+    "lr_horizon_timesteps": 10000000000
+  },
+  "budget": {
+    "max_hours": 0.5,
+    "evaluation_reserve_minutes": 5,
+    "max_steps": 1048576
+  },
+  "evaluation": {
+    "common_checkpoints": {},
+    "common_episodes": 32,
+    "final_episodes": 32,
+    "batch": 32,
+    "seed": 18050
+  },
+  "checkpoint_milestones": [
+    65536,
+    131072,
+    524288
+  ]
+}

@@ -1,0 +1,23 @@
+{
+  "name": "spatial_regions_from75m_lr6e5_300m",
+  "seed": 208051,
+  "resume_from": "concept_mapping/runs/spatial_regions_from75m_lr6e5_300m/fork_source/files/policies/12274958336",
+  "resume_reset_optimizer": false,
+  "architectures": [{"name": "map_mlp", "train_gpus": [0, 1, 2, 3], "evaluation_gpu": 6}],
+  "rewards": {"lava_penalty": 2.0},
+  "ppo": {
+    "num_envs": 1024, "num_steps": 64, "update_epochs": 4, "num_minibatches": 8,
+    "map_global_readout": true, "map_single_readout": true, "map_spatial_regions": true,
+    "layer_size": 512, "lr": 0.00006, "anneal_lr": false,
+    "optimistic_resets": true, "optimistic_reset_ratio": 16
+  },
+  "checkpoint_milestones": [12275220480, 12279939072, 12299993088, 12324962304, 12374966272, 12424970240, 12474974208, 12524978176],
+  "budget": {"max_steps": 12574982144, "max_hours": 12, "evaluation_reserve_minutes": 60},
+  "evaluation": {
+    "common_checkpoints": {"fork_start": 12274958336, "matched_parent_100m": 12299993088, "plus_100m": 12374966272},
+    "common_episodes": 1024, "final_episodes": 1024, "batch": 64, "seed": 209651,
+    "world_seeds_file": "concept_mapping/runs/global_map_ppo_200m/heldout_worlds.json",
+    "temperatures": [1.0]
+  },
+  "wandb_project": "Craftax_Baselines", "wandb_entity": "synaderi-uc-davis"
+}

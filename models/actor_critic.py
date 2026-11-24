@@ -337,60 +337,68 @@ class ActorCritic(nn.Module):
     activation: str = "tanh"
 
     @nn.compact
-    def __call__(self, x):
+    def __call__(self, x, *, input_offsets=None, from_first_hidden=False):
         if self.activation == "relu":
             activation = nn.relu
         else:
             activation = nn.tanh
 
-        actor_mean = nn.Dense(
-            self.layer_width,
-            kernel_init=orthogonal(np.sqrt(2)),
-            bias_init=constant(0.0),
-        )(x)
-        actor_mean = activation(actor_mean)
+        if from_first_hidden:
+            actor_mean = x[..., 0, :]
+        else:
+            actor_mean = nn.Dense(
+                self.layer_width, name='Dense_0',
+                kernel_init=orthogonal(np.sqrt(2)), bias_init=constant(0.0),
+            )(x)
+            if input_offsets is not None:
+                actor_mean = actor_mean + input_offsets[..., 0, :]
+            actor_mean = activation(actor_mean)
 
         actor_mean = nn.Dense(
-            self.layer_width,
-            kernel_init=orthogonal(np.sqrt(2)),
-            bias_init=constant(0.0),
-        )(actor_mean)
-        actor_mean = activation(actor_mean)
-
-        actor_mean = nn.Dense(
-            self.layer_width,
+            self.layer_width, name='Dense_1',
             kernel_init=orthogonal(np.sqrt(2)),
             bias_init=constant(0.0),
         )(actor_mean)
         actor_mean = activation(actor_mean)
 
         actor_mean = nn.Dense(
-            self.action_dim, kernel_init=orthogonal(0.01), bias_init=constant(0.0)
+            self.layer_width, name='Dense_2',
+            kernel_init=orthogonal(np.sqrt(2)),
+            bias_init=constant(0.0),
+        )(actor_mean)
+        actor_mean = activation(actor_mean)
+
+        actor_mean = nn.Dense(
+            self.action_dim, name='Dense_3', kernel_init=orthogonal(0.01), bias_init=constant(0.0)
         )(actor_mean)
         pi = distrax.Categorical(logits=actor_mean)
 
-        critic = nn.Dense(
-            self.layer_width,
-            kernel_init=orthogonal(np.sqrt(2)),
-            bias_init=constant(0.0),
-        )(x)
-        critic = activation(critic)
+        if from_first_hidden:
+            critic = x[..., 1, :]
+        else:
+            critic = nn.Dense(
+                self.layer_width, name='Dense_4',
+                kernel_init=orthogonal(np.sqrt(2)), bias_init=constant(0.0),
+            )(x)
+            if input_offsets is not None:
+                critic = critic + input_offsets[..., 1, :]
+            critic = activation(critic)
 
         critic = nn.Dense(
-            self.layer_width,
-            kernel_init=orthogonal(np.sqrt(2)),
-            bias_init=constant(0.0),
-        )(critic)
-        critic = activation(critic)
-
-        critic = nn.Dense(
-            self.layer_width,
+            self.layer_width, name='Dense_5',
             kernel_init=orthogonal(np.sqrt(2)),
             bias_init=constant(0.0),
         )(critic)
         critic = activation(critic)
 
-        critic = nn.Dense(1, kernel_init=orthogonal(1.0), bias_init=constant(0.0))(
+        critic = nn.Dense(
+            self.layer_width, name='Dense_6',
+            kernel_init=orthogonal(np.sqrt(2)),
+            bias_init=constant(0.0),
+        )(critic)
+        critic = activation(critic)
+
+        critic = nn.Dense(1, name='Dense_7', kernel_init=orthogonal(1.0), bias_init=constant(0.0))(
             critic
         )
 

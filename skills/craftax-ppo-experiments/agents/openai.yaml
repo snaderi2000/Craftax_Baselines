@@ -1,0 +1,4 @@
+interface:
+  display_name: "Craftax PPO experiments"
+  short_description: "Configure and run modular Craftax PPO studies"
+  default_prompt: "Use $craftax-ppo-experiments to configure and validate a Craftax PPO study using the shared runner."

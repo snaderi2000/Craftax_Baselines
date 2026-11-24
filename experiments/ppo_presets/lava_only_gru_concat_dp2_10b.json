@@ -1,0 +1,96 @@
+{
+  "name": "lava_only_gru_concat_dp2_10b_seed50",
+  "seed": 50,
+  "resume_from": "/home/shawheen/Craftax_Baselines/wandb/run-20261112_205614-99da87a7/files/policies/15007744",
+  "resume_after": null,
+  "resume_reset_optimizer": false,
+  "checkpoint_milestones": [
+    16007744,
+    20007744,
+    22000000,
+    33000000,
+    50000000,
+    75000000,
+    100000000,
+    150000000,
+    220000000,
+    330000000,
+    500000000,
+    750000000,
+    1000000000,
+    1500000000,
+    2200000000,
+    2500000000,
+    3300000000,
+    5000000000,
+    7500000000
+  ],
+  "architectures": [
+    {
+      "name": "gru",
+      "train_gpu": 5,
+      "train_gpus": [
+        5,
+        7
+      ],
+      "evaluation_gpu": 2
+    }
+  ],
+  "rewards": {
+    "death_penalty": 0,
+    "lava_penalty": 2,
+    "diamond_reward": 1,
+    "plant_reward": 1
+  },
+  "ppo": {
+    "num_envs": 1024,
+    "num_steps": 64,
+    "update_epochs": 4,
+    "num_minibatches": 8,
+    "gamma": 0.99,
+    "gae_lambda": 0.8,
+    "clip_eps": 0.2,
+    "vf_coef": 0.5,
+    "ent_coef": 0.01,
+    "lr": 0.0002,
+    "lr_horizon_timesteps": 10000000000,
+    "max_grad_norm": 1.0,
+    "layer_size": 512,
+    "anneal_lr": true,
+    "optimistic_resets": false,
+    "optimistic_reset_ratio": 16,
+    "map_view_size": 33,
+    "map_embedding_size": 4,
+    "reset_seed_bank": null,
+    "policy_temperature": 1.0,
+    "reset_gru_every_step": false,
+    "gru_concat_observation": true
+  },
+  "budget": {
+    "max_hours": 96,
+    "evaluation_reserve_minutes": 45,
+    "max_steps": 10000000000
+  },
+  "evaluation": {
+    "common_checkpoints": {
+      "100m": 100000000,
+      "1b": 1000000000,
+      "2p5b": 2500000000,
+      "5b": 5000000000,
+      "7p5b": 7500000000
+    },
+    "common_episodes": 1024,
+    "final_episodes": 1024,
+    "batch": 32,
+    "seed": 28050,
+    "temperatures": [
+      1,
+      0.25
+    ],
+    "world_seeds_file": null,
+    "repeats": 1,
+    "defer_until_training_complete": false
+  },
+  "wandb_project": "Craftax_Baselines",
+  "wandb_entity": "synaderi-uc-davis"
+}

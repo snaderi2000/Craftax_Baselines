@@ -1,0 +1,35 @@
+{
+  "gpu": 5,
+  "steps": 4194304,
+  "repeats": 3,
+  "timeout_seconds_per_run": 900,
+  "variants": {
+    "map_survival_mingru": {
+      "vec.total_agents": 1024,
+      "vec.num_buffers": 4,
+      "vec.num_threads": 8,
+      "policy.hidden_size": 512,
+      "policy.num_layers": 4,
+      "train.replay_ratio": 4,
+      "train.minibatch_size": 8192,
+      "train.horizon": 64,
+      "base.async": 0,
+      "train.learning_rate": 0.0002,
+      "train.gamma": 0.99,
+      "train.gae_lambda": 0.8,
+      "train.vf_coef": 0.5,
+      "train.ent_coef": 0.01,
+      "train.max_grad_norm": 1.0,
+      "train.total_timesteps": 4194304
+    }
+  },
+  "binary": "puffer_map_v100",
+  "limitations": [
+    "Same observed map crop, ages, learned 18x4 categorical embedding and 40 survival inputs; different encoder and MinGRU architecture",
+    "Muon and cosine LR schedule differ from JAX Adam and linear annealing",
+    "C simulator failed five deterministic JAX transition checks: resource floors, sleep fatigue and forced wake-up achievement",
+    "C world generation and stochastic dynamics have not passed distribution/transition parity",
+    "Extra terminal lava penalty is -2; verified against JAX",
+    "Timing only: do not treat as a validated replacement or learning comparison"
+  ]
+}

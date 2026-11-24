@@ -1,0 +1,45 @@
+{
+  "name": "death2_10b_50m_low_temperature_seed50",
+  "seed": 50,
+  "resume_from": "/home/shawheen/Craftax_Baselines/wandb/run-20261006_194739-uj5n3za2/files/policies/9999941632",
+  "resume_reset_optimizer": true,
+  "architectures": [
+    {
+      "name": "mlp",
+      "train_gpu": 3,
+      "evaluation_gpu": 7
+    }
+  ],
+  "rewards": {
+    "death_penalty": 2
+  },
+  "ppo": {
+    "lr": 2e-05,
+    "optimistic_resets": false,
+    "policy_temperature": 0.25,
+    "ent_coef": 0.01
+  },
+  "budget": {
+    "max_steps": 10049941632,
+    "max_hours": 9
+  },
+  "checkpoint_milestones": [
+    10000941632,
+    10004941632,
+    10009941632,
+    10019941632
+  ],
+  "evaluation": {
+    "common_checkpoints": {},
+    "common_episodes": 300,
+    "final_episodes": 300,
+    "batch": 100,
+    "seed": 49550,
+    "temperatures": [
+      1.0,
+      0.25
+    ],
+    "world_seeds_file": "/home/shawheen/Craftax_Baselines/concept_mapping/runs/death2_temperature_finetune_50m_seed50/evaluation_worlds.json",
+    "repeats": 3
+  }
+}

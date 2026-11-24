@@ -1,0 +1,16 @@
+{
+  "name": "death2_10b_randomness_sweep_seed50",
+  "checkpoint": "wandb/run-20261006_194739-uj5n3za2/files/policies/9999941632",
+  "source_config": "concept_mapping/runs/death2_10b_failed_world_memorization_seed50/source_inference_config.json",
+  "temperatures": [1.0, 0.5, 0.25, 0.0],
+  "gpus": [2, 3, 6, 7],
+  "worlds_per_split": 100,
+  "repeats": 3,
+  "batch": 128,
+  "world_generator_seed": 41450,
+  "validation_rollout_seed": 49450,
+  "confirmation_rollout_seed": 49451,
+  "bootstrap_seed": 59550,
+  "bootstrap_samples": 10000,
+  "max_hours": 2
+}

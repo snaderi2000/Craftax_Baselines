@@ -132,6 +132,7 @@ celerybeat.pid
 # Environments
 .env
 .venv
+.tools/
 env/
 venv/
 ENV/
@@ -182,3 +183,10 @@ craftax_classic_1M_dataset/
 craftax_env/
 *.npz
 *.npz
+
+/downloads/
+
+/third_party/EfficientZeroV2/
+/third_party/PufferLib/
+
+/concept_mapping/gru_atlas/

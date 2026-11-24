@@ -133,6 +133,52 @@ def render_inventory_panel(decoded: DecodedObs, textures: dict, block_size: int)
     return Image.fromarray(np.clip(panel, 0, 255).astype(np.uint8))
 
 
+def render_world_frame(state, obs, local_panel, textures):
+    """Fixed spectator camera on the current world, with the existing local HUD."""
+    decoded = decode_obs(obs)
+    tiles = np.asarray(textures["block_textures"], dtype=np.uint8)[..., :3]
+    ids = np.asarray(state.map)
+    side = tiles.shape[1]
+    height, width = ids.shape
+    pixels = tiles[ids].transpose(0, 2, 1, 3, 4).reshape(height*side, width*side, 3)
+    def sprite(row, col, rgb, alpha):
+        region = pixels[row*side:(row+1)*side, col*side:(col+1)*side]
+        region[:] = _overlay(region, rgb, alpha)
+
+    for name, group in zip(MOB_NAMES, (state.zombies,state.cows,state.skeletons,state.arrows)):
+        positions = np.asarray(group.position)[np.asarray(group.mask, dtype=bool)]
+        tex = textures[name + "_texture"]
+        alpha = textures[name + "_texture_alpha"]
+        if alpha.max() > 1:
+            alpha = alpha / 255.
+        for row, col in positions:
+            if 0 <= row < height and 0 <= col < width:
+                sprite(row, col, tex, alpha)
+    row, col = map(int, np.asarray(state.player_position))
+    player = textures["player_textures"][4 if decoded.sleeping else decoded.direction]
+    if 0 <= row < height and 0 <= col < width:
+        sprite(row, col, player[..., :3], player[..., 3:4]/255.)
+    world = Image.fromarray(pixels)
+    draw = ImageDraw.Draw(world)
+    draw.rectangle((max(0,col-4)*side, max(0,row-3)*side,
+                    (min(width-1,col+4)+1)*side-1, (min(height-1,row+3)+1)*side-1),
+                   outline="#46ffff", width=2)
+    draw.rectangle((col*side-1,row*side-1,(col+1)*side,(row+1)*side), outline="white")
+    pad, header = 8, 32
+    out = Image.new("RGB",(world.width+local_panel.width+3*pad,
+                            max(world.height,local_panel.height+60)+header+pad),(23,28,35))
+    out.paste(world,(pad,header))
+    right = world.width+2*pad
+    out.paste(local_panel,(right,header))
+    draw = ImageDraw.Draw(out)
+    draw.text((pad,9), f"World overview  |  {width} x {height}", fill="white")
+    draw.text((right,9), "Local view and inventory", fill="white")
+    y = header+local_panel.height+7
+    draw.text((right,y), f"Achievements  {int(np.asarray(state.achievements).sum())} / {len(state.achievements)}", fill="white")
+    draw.text((right,y+18), "Cyan: local view    White: player", fill="#7ffbff")
+    return out
+
+
 def render_local_view(
     obs: np.ndarray,
     block_size: int,

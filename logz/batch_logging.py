@@ -16,6 +16,8 @@ def create_log_dict(info, config):
     for k, v in info.items():
         if k.startswith("cumulative_"):
             to_log[k] = v
+        if k.startswith(("culture/", "training/", "curriculum/", "drill/", "stone/", "practice/", "rare_four/", "backward/", "cf/")):
+            to_log[k] = v
 
     sum_achievements = 0
     achievement_rates = []
@@ -73,7 +75,7 @@ def batch_log(update_step, log, config):
                         agg.append(val)
 
             if len(agg) > 0:
-                if key.startswith("cumulative_"):
+                if key.startswith(("cumulative_", "culture/", "training/", "curriculum/", "drill/", "stone/", "practice/", "rare_four/", "backward/", "cf/")):
                     agg_logs[key] = np.mean(agg)
                 elif key in [
                     "episode_length",
@@ -96,6 +98,7 @@ def batch_log(update_step, log, config):
                     agg_logs[key] = np.array(agg)
 
         log_times.append(time.time())
+        agg_logs["env_step"] = config.get("START_TIMESTEPS", 0) + (update_step + 1) * config["NUM_STEPS"] * config["NUM_ENVS"]
 
         if config["DEBUG"]:
             if len(log_times) == 1:

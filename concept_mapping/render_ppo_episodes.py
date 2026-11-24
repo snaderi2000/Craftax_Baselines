@@ -1,4 +1,6 @@
 import argparse
+import hashlib
+import json
 import os
 import sys
 from typing import Any
@@ -39,6 +41,10 @@ def _load_wandb_config(run_path: str) -> dict[str, Any]:
     files_dir = run_path if os.path.basename(run_path) == "files" else os.path.join(run_path, "files")
     config_path = os.path.join(files_dir, "config.yaml")
     if not os.path.exists(config_path):
+        explicit_path = os.path.join(files_dir, 'study_config.json')
+        if os.path.exists(explicit_path):
+            with open(explicit_path) as f:
+                return json.load(f)
         raise FileNotFoundError(f"Could not find W&B config at {config_path}")
     with open(config_path) as f:
         raw_config = yaml.load(f, Loader=yaml.Loader)
@@ -57,6 +63,12 @@ def _init_network(config: dict[str, Any], env, env_params):
     layer_size = int(config.get("LAYER_SIZE", 512))
     env_name = config.get("ENV_NAME", "Craftax-Classic-Symbolic-v1")
     if "Symbolic" in env_name:
+        if config.get('SYMBOLIC_ENCODER')=='map_mlp':
+            from models.actor_critic_map_mlp import map_mlp_network
+            return map_mlp_network(config,action_dim)
+        if config.get('SYMBOLIC_ENCODER', 'mlp') == 'spatial':
+            from models.conditioned_symbolic import ConditionedSymbolicActorCritic
+            return ConditionedSymbolicActorCritic(action_dim)
         return ActorCritic(action_dim, layer_size)
     return ActorCriticConv(action_dim, layer_size)
 
@@ -106,15 +118,16 @@ def _label_frame(
         textures=textures,
         panel_textures=panel_textures,
     )
-    label_h = max(24, 5 * display_scale + 22)
+    label_h = max(48, 5 * display_scale + 22)
     out = Image.new("RGB", (view.width, view.height + label_h), "white")
     out.paste(view, (0, 0))
     draw = ImageDraw.Draw(out)
     label = (
-        f"episode={episode} step={step} "
-        f"action={action}:{_action_name(action)} reward={reward:.3f} done={done}"
+        f"episode={episode} step={step}\n"
+        f"action={_action_name(action)} reward={reward:.3f}\n"
+        f"done={done}"
     )
-    draw.text((6, view.height + 6), label, fill=(0, 0, 0))
+    draw.multiline_text((6, view.height + 6), label, fill=(0, 0, 0), spacing=3)
     return out
 
 
@@ -156,9 +169,13 @@ def main() -> None:
     parser.add_argument("--episodes", type=int, default=5)
     parser.add_argument("--max_steps", type=int, default=512)
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--independent_episode_seeds", action="store_true",
+                        help="Fold episode index into seed so policies get matched starts regardless of prior episode lengths.")
     parser.add_argument("--fps", type=int, default=8)
     parser.add_argument("--block_size", type=int, default=7)
     parser.add_argument("--display_scale", type=int, default=4)
+    parser.add_argument("--death_penalty",type=float,default=None,
+                        help="Death cost magnitude; defaults to the saved training configuration.")
     parser.add_argument(
         "--greedy",
         action=argparse.BooleanOptionalAction,
@@ -175,6 +192,16 @@ def main() -> None:
     config["ENV_NAME"] = env_name
 
     env = make_craftax_env_from_name(env_name, auto_reset=False)
+    death_penalty=float(config.get('DEATH_PENALTY',0.) if args.death_penalty is None else args.death_penalty)
+    if death_penalty:
+        from wrappers import ClassicDeathPenaltyWrapper
+        env=ClassicDeathPenaltyWrapper(env,death_penalty)
+    if config.get('LAVA_PENALTY',0.):
+        from wrappers import ClassicLavaPenaltyWrapper
+        env=ClassicLavaPenaltyWrapper(env,config['LAVA_PENALTY'])
+    if config.get('DIAMOND_REWARD', 1.) != 1. or config.get('PLANT_REWARD', 1.) != 1.:
+        from wrappers import ClassicAchievementRewardWrapper
+        env=ClassicAchievementRewardWrapper(env, config.get('DIAMOND_REWARD', 1.), config.get('PLANT_REWARD', 1.))
     env_params = env.default_params
     network = _init_network(config, env, env_params)
     train_state, restored_step = _restore_train_state(
@@ -201,11 +228,17 @@ def main() -> None:
         return pi.sample(seed=action_rng)[0], rng
 
     rng = jax.random.PRNGKey(args.seed)
+    summaries=[]
     for episode in range(args.episodes):
         print(f"Rolling out episode {episode}/{args.episodes - 1}", flush=True)
+        if args.independent_episode_seeds:
+            rng = jax.random.fold_in(jax.random.PRNGKey(args.seed),episode)
         rng, reset_rng, policy_rng = jax.random.split(rng, 3)
         obs, env_state = reset_jit(reset_rng, env_params)
+        initial_map_sha256 = hashlib.sha256(np.asarray(env_state.map).tobytes()).hexdigest()
+        initial_position = np.asarray(env_state.player_position).tolist()
         frames = []
+        total_reward=0.
         actions_path = os.path.join(args.out_dir, f"episode_{episode:02d}_actions.txt")
         with open(actions_path, "w") as f:
             f.write("step,action,action_name,reward,done\n")
@@ -217,6 +250,7 @@ def main() -> None:
                     step_rng, env_state, action, env_params
                 )
                 reward_f = float(np.asarray(reward))
+                total_reward+=reward_f
                 done_b = bool(np.asarray(done))
                 frames.append(
                     _label_frame(
@@ -237,11 +271,30 @@ def main() -> None:
                 if done_b:
                     break
 
+        # Include the final post-action state as well as all pre-action frames.
+        frames.append(_label_frame(np.asarray(obs),action_i,reward_f,done_b,step+1,episode,
+                                   args.block_size,args.display_scale,textures,panel_textures))
+
         mp4_path = os.path.join(args.out_dir, f"episode_{episode:02d}.mp4")
         print(f"Encoding {mp4_path}", flush=True)
         _write_mp4(frames, mp4_path, args.fps)
         print(f"Saved {mp4_path} ({len(frames)} frames)")
         print(f"Saved {actions_path}")
+        from craftax.craftax_classic.constants import BlockType,Achievement
+        position=np.asarray(env_state.player_position)
+        summaries.append(dict(episode=episode,steps=step+1,frames=len(frames),done=done_b,
+            initial_map_sha256=initial_map_sha256,initial_position=initial_position,
+            truncated_by_renderer=not done_b,total_reward=total_reward,
+            collected_diamond=bool(np.asarray(env_state.achievements[Achievement.COLLECT_DIAMOND.value])),
+            woke_up=bool(np.asarray(env_state.achievements[Achievement.WAKE_UP.value])),
+            ended_in_lava=bool(np.asarray(env_state.map)[tuple(position)]==BlockType.LAVA.value),
+            final_health=int(np.asarray(env_state.player_health)),
+            mp4=mp4_path))
+        with open(os.path.join(args.out_dir,'summary.json'),'w') as f:
+            json.dump(dict(run=args.run_path,checkpoint=restored_step,seed=args.seed,
+                           independent_episode_seeds=args.independent_episode_seeds,
+                           death_penalty_magnitude=death_penalty,death_reward_cost=-death_penalty,
+                           fps=args.fps,max_steps=args.max_steps,greedy=args.greedy,episodes=summaries),f,indent=2)
 
 
 if __name__ == "__main__":

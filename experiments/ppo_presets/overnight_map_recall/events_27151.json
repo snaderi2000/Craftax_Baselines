@@ -1,0 +1,70 @@
+{
+  "name": "overnight_map_recall_events_27151",
+  "seed": 27151,
+  "resume_from": "/home/shawheen/Craftax_Baselines/wandb/run-20261120_094749-5860320f/files/policies/12199985152",
+  "resume_after": null,
+  "resume_reset_optimizer": true,
+  "checkpoint_milestones": [
+    12200247296,
+    12204985152,
+    12212485152
+  ],
+  "architectures": [
+    {
+      "name": "map_mlp",
+      "train_gpu": 6,
+      "evaluation_gpu": 6
+    }
+  ],
+  "rewards": {
+    "death_penalty": 0.0,
+    "lava_penalty": 2,
+    "diamond_reward": 1.0,
+    "plant_reward": 1.0
+  },
+  "ppo": {
+    "num_envs": 1024,
+    "num_steps": 64,
+    "update_epochs": 4,
+    "num_minibatches": 8,
+    "gamma": 0.99,
+    "gae_lambda": 0.8,
+    "clip_eps": 0.2,
+    "vf_coef": 0.5,
+    "ent_coef": 0.01,
+    "lr": 1e-05,
+    "lr_horizon_timesteps": null,
+    "max_grad_norm": 1.0,
+    "layer_size": 512,
+    "anneal_lr": false,
+    "optimistic_resets": true,
+    "optimistic_reset_ratio": 16,
+    "map_view_size": 33,
+    "map_embedding_size": 4,
+    "reset_seed_bank": null,
+    "policy_temperature": 1.0,
+    "reset_gru_every_step": false,
+    "gru_concat_observation": false,
+    "map_global_readout": true,
+    "map_landmarks": "events"
+  },
+  "budget": {
+    "max_hours": 8,
+    "evaluation_reserve_minutes": 45,
+    "max_steps": 12225019904
+  },
+  "evaluation": {
+    "common_checkpoints": {},
+    "common_episodes": 1024,
+    "final_episodes": 1024,
+    "batch": 64,
+    "seed": 571381,
+    "world_seeds_file": "/home/shawheen/Craftax_Baselines/concept_mapping/runs/overnight_map_recall/worlds.json",
+    "defer_until_training_complete": true,
+    "temperatures": [
+      1.0
+    ]
+  },
+  "wandb_project": "Craftax_Baselines",
+  "wandb_entity": "synaderi-uc-davis"
+}

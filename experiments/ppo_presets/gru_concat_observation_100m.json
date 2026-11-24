@@ -1,0 +1,44 @@
+{
+  "name": "gru_concat_observation_100m_seed50",
+  "seed": 50,
+  "architectures": [
+    {
+      "name": "gru",
+      "train_gpu": 5,
+      "evaluation_gpu": 5
+    }
+  ],
+  "rewards": {
+    "lava_penalty": 2
+  },
+  "ppo": {
+    "reset_gru_every_step": false,
+    "optimistic_resets": false,
+    "gru_concat_observation": true
+  },
+  "budget": {
+    "max_hours": 9,
+    "max_steps": 100007936,
+    "evaluation_reserve_minutes": 20
+  },
+  "checkpoint_milestones": [
+    1000000,
+    5000000,
+    10000000,
+    25000000,
+    50000000,
+    75000000
+  ],
+  "evaluation": {
+    "common_checkpoints": {
+      "10m": 10000000,
+      "25m": 25000000,
+      "50m": 50000000
+    },
+    "common_episodes": 1024,
+    "final_episodes": 1024,
+    "batch": 32,
+    "seed": 28050,
+    "defer_until_training_complete": true
+  }
+}
