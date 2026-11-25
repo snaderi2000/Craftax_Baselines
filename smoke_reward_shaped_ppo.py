@@ -276,7 +276,8 @@ def main():
         if int(state.step) <= warmup_minibatches(cfg):
             assert not updated, 'Pretrained parameters changed during SRU warmup'
         else:
-            assert {'Dense_0', 'ScannedRNN_0', 'Dense_1', 'Dense_4'} <= updated, updated
+            heads = {'actor_head','critic_head','memory_input'} if cfg.get('SRU_RESIDUAL_ACTOR_CRITIC') else {'Dense_1','Dense_4'}
+            assert {'Dense_0', 'ScannedRNN_0'} | heads <= updated, updated
         memory_report.update(sru_gate_updated=True, sru_updated_pretrained_groups=sorted(updated))
         if cfg.get('SRU_MAP_COEF', 0.) > 0:
             decoder_steps = int(source_state.get('decoder', {}).get('step', 0))

@@ -15,6 +15,26 @@ from ppo_rnn_og import ActorCriticRNN, initialize_recurrent_carry
 
 
 class SruGruTest(unittest.TestCase):
+    def test_normalized_residual_heads_share_the_observation_and_memory(self):
+        cfg = dict(LAYER_SIZE=16, SRU_GRU=True, GRU_CONCAT_OBSERVATION=True, SRU_RESIDUAL_ACTOR_CRITIC=True)
+        net = ActorCriticRNN(17, cfg)
+        key = jax.random.PRNGKey(52)
+        obs = jax.random.normal(key, (3, 4, 19))
+        resets = jnp.ones((3, 4), bool)
+        hidden = initialize_recurrent_carry(4, cfg)
+        params = net.init(key, hidden, (obs, resets))
+        h, pi, value = net.apply(params, hidden, (obs, resets))
+        h_alt, pi_alt, v_alt = net.apply(params, hidden + 1, (obs, resets))
+        self.assertEqual(pi.logits.shape, (3, 4, 17))
+        self.assertEqual(value.shape, (3, 4))
+        for a, b in ((h,h_alt), (pi.logits,pi_alt.logits), (value,v_alt)):
+            np.testing.assert_array_equal(a,b)
+        for name in ('actor_head','critic_head'):
+            head = params['params'][name]
+            self.assertEqual(head['Dense_0']['kernel'].shape, (32, 16))
+            self.assertIn('DenseResBlock_0', head)
+            self.assertIn('DenseResBlock_1', head)
+
     def test_identity_transfer_and_learnable_candidate(self):
         config = {'LAYER_SIZE': 16, 'GRU_CONCAT_OBSERVATION': True}
         key = jax.random.PRNGKey(19)

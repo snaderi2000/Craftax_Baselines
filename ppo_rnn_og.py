@@ -145,6 +145,10 @@ class ActorCriticRNN(nn.Module):
             embedding = embedding + world
         embedding = nn.relu(embedding)
         observation_embedding = embedding
+        residual_heads = self.config.get('SRU_RESIDUAL_ACTOR_CRITIC', False)
+        if residual_heads:
+            embedding = nn.relu(nn.Dense(self.config['LAYER_SIZE'], name='memory_input')(
+                nn.LayerNorm(name='memory_input_norm')(embedding)))
 
         # Apply identically during rollout, PPO sequence replay and inference.
         # Keep the exact same GRU parameters for the no-history control.
@@ -153,6 +157,14 @@ class ActorCriticRNN(nn.Module):
         rnn_in = (embedding, dones)
         hidden, embedding = ScannedRNN(spatial_gate=self.config.get('SRU_GRU', False))(hidden, rnn_in)
         memory_sequence = embedding
+        if residual_heads:
+            from models.sru_gru import ResidualDecisionHead
+            features = jnp.concatenate((observation_embedding, nn.relu(embedding)), axis=-1)
+            width = self.config['LAYER_SIZE']
+            logits = ResidualDecisionHead(width, self.action_dim, .01, name='actor_head')(features)
+            value = ResidualDecisionHead(width, 1, 1., name='critic_head')(features)
+            outputs = hidden, distrax.Categorical(logits=logits), value[..., 0]
+            return (*outputs, memory_sequence) if return_memory else outputs
         if self.config.get('GRU_CONCAT_OBSERVATION', False):
             embedding = jnp.concatenate((observation_embedding, embedding), axis=-1)
 
@@ -327,6 +339,9 @@ def make_train(config):
         lr = linear_schedule if config['ANNEAL_LR'] else config['LR']
         if use_sru:
             from models.sru_gru import make_optimizer
+            if config.get('SRU_RESIDUAL_ACTOR_CRITIC') and config['ANNEAL_LR']:
+                gate_lr = lambda count: linear_schedule(count) * (config['SRU_GATE_LR'] / config['LR'])
+                return make_optimizer(config, lr, gate_lr=gate_lr)
             return make_optimizer(config, lr)
         return optax.chain(optax.clip_by_global_norm(config['MAX_GRAD_NORM']),
                            optax.adam(lr, eps=1e-5))
@@ -654,6 +669,10 @@ def make_train(config):
             if use_sru_schedule:
                 metric['training/sru_gate_learning_rate'] = config['SRU_GATE_LR'] * lr_scale
                 metric['training/sru_pretrained_learning_rate'] = config['LR'] * lr_scale
+            elif config.get('SRU_RESIDUAL_ACTOR_CRITIC') and config['ANNEAL_LR']:
+                count = train_state.step - config['NUM_MINIBATCHES'] * config['UPDATE_EPOCHS']
+                metric['training/learning_rate'] = linear_schedule(count)
+                metric['training/sru_gate_learning_rate'] = linear_schedule(count) * (config['SRU_GATE_LR'] / config['LR'])
             rng = update_state[-1]
             if config["DEBUG"] and config["USE_WANDB"]:
 
@@ -733,10 +752,12 @@ def run_ppo(config):
     from ppo import _resolve_policy_checkpoint
     config['RESUME_FROM'],config['RESUME_STEP']=_resolve_policy_checkpoint(config.get('RESUME_FROM'))
     config['START_TIMESTEPS']=config['RESUME_STEP'] or 0
+    if config.get('SRU_RESIDUAL_ACTOR_CRITIC') and not config.get('SRU_GRU'):
+        raise ValueError('Residual SRU heads require --sru_gru')
     if config.get('SRU_GRU'):
         if (config['ENV_NAME'] != 'Craftax-Classic-Symbolic-v1' or config['MEMORY_TYPE'] != 'gru'
                 or config['SYMBOLIC_ENCODER'] != 'mlp' or not config['GRU_CONCAT_OBSERVATION']
-                or not config['MOTION_INPUTS'] or not config['RESUME_FROM']
+                or not config['MOTION_INPUTS'] or not (config['RESUME_FROM'] or config.get('SRU_RESIDUAL_ACTOR_CRITIC'))
                 or config.get('WORLD_VIEW') or config.get('RESET_GRU_EVERY_STEP')):
             raise ValueError('SRU continuation requires the regular motion-input GRU-concat policy')
         if (not np.isfinite(config['SRU_GATE_LR']) or config['SRU_GATE_LR'] <= 0
@@ -908,6 +929,7 @@ if __name__ == "__main__":
     parser.add_argument('--sru_failure_replay', action='store_true', help='Weight and retry failed training worlds until an all-22 episode.')
     parser.add_argument('--sru_warmup_steps', type=int, default=0, help='Additional environment steps training only the SRU gate.')
     parser.add_argument('--sru_gate_lr', type=float, default=3e-5)
+    parser.add_argument('--sru_residual_actor_critic', action='store_true')
     parser.add_argument('--sru_identity_coef', type=float, default=0.)
     parser.add_argument('--sru_map_coef', type=float, default=0.)
     parser.add_argument('--sru_lr_anneal_from', type=int, help='Absolute environment step where SRU rate decay starts.')

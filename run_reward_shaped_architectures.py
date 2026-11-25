@@ -3,7 +3,7 @@ import argparse,csv,fcntl,hashlib,json,os,re,shutil,subprocess,sys,time
 from pathlib import Path
 
 ROOT=Path(__file__).resolve().parent
-PYTHON='/home/shawheen/miniconda3/envs/jax-v100-cuda12/bin/python'
+PYTHON=os.environ.get('CRAFTAX_PYTHON', sys.executable)
 STUDY=ROOT/'concept_mapping/runs/reward_shaped_architectures_10b_seed50'
 ARCHITECTURES=('mlp','gru','spatial','spatial_gru')
 BUDGET=10000000000

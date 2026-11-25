@@ -17,6 +17,22 @@ import optax
 GATE_PATH = ('params', 'ScannedRNN_0', 'spatial_transform')
 
 
+class ResidualDecisionHead(nn.Module):
+    """Normalized actor or critic with two width-preserving residual layers."""
+    width: int
+    outputs: int
+    output_scale: float
+
+    @nn.compact
+    def __call__(self, features):
+        from models.actor_critic import DenseResBlock
+        x = nn.LayerNorm()(features)
+        x = nn.relu(nn.Dense(self.width, kernel_init=nn.initializers.orthogonal(2.))(x))
+        for _ in range(2):
+            x = nn.relu(DenseResBlock(self.width)(x))
+        return nn.Dense(self.outputs, kernel_init=nn.initializers.orthogonal(self.output_scale))(nn.LayerNorm()(x))
+
+
 def spatial_multiplier(inputs):
     return nn.Dense(inputs.shape[-1], kernel_init=nn.initializers.zeros,
                     bias_init=nn.initializers.ones, name=GATE_PATH[-1])(inputs)
@@ -56,13 +72,13 @@ def is_gate(path):
     return tuple(getattr(key, 'key', None) for key in path[:-1]) == GATE_PATH
 
 
-def make_optimizer(config, base_lr):
+def make_optimizer(config, base_lr, gate_lr=None):
     """Advance the phase counter while keeping pretrained Adam moments frozen."""
     labels = lambda params: jax.tree_util.tree_map_with_path(
         lambda path, _: 'gate' if is_gate(path) else 'pretrained', params)
     base = optax.conditionally_mask(optax.adam(base_lr, eps=1e-5),
                                     lambda step: step >= warmup_minibatches(config))
-    gate = optax.adam(config['SRU_GATE_LR'], eps=1e-5)
+    gate = optax.adam(config['SRU_GATE_LR'] if gate_lr is None else gate_lr, eps=1e-5)
     return optax.chain(optax.clip_by_global_norm(config['MAX_GRAD_NORM']),
                        optax.partition({'gate': gate, 'pretrained': base}, labels))
 

@@ -77,6 +77,7 @@ class PPO:
     gru_concat_observation:bool=False
     motion_inputs:bool=False
     sru_gru:bool=False
+    sru_residual_actor_critic:bool=False
     sru_failure_replay:bool=False
     sru_warmup_steps:int=0
     sru_gate_lr:float=3e-5
@@ -135,6 +136,8 @@ class PPO:
         if not isinstance(self.reset_gru_every_step,bool):raise ValueError('reset_gru_every_step must be boolean')
         if not isinstance(self.gru_concat_observation,bool):raise ValueError('gru_concat_observation must be boolean')
         if not isinstance(self.motion_inputs,bool):raise ValueError('motion_inputs must be boolean')
+        if type(self.sru_residual_actor_critic) is not bool or (self.sru_residual_actor_critic and not self.sru_gru):
+            raise ValueError('Residual SRU heads require an SRU policy')
         if (type(self.sru_gru) is not bool or type(self.sru_warmup_steps) is not int or self.sru_warmup_steps<0
                 or not math.isfinite(self.sru_gate_lr) or self.sru_gate_lr<=0
                 or not math.isfinite(self.sru_identity_coef) or self.sru_identity_coef<0):
@@ -339,7 +342,7 @@ class Experiment:
         if self.ppo.motion_inputs and any(j.name!='gru' for j in self.architectures):
             raise ValueError('motion_inputs currently requires the flat symbolic GRU model')
         if self.ppo.sru_gru and not (self.ppo.motion_inputs and self.ppo.gru_concat_observation
-                and (self.resume_from or self.resume_after) and not self.ppo.world_view
+                and (self.resume_from or self.resume_after or self.ppo.sru_residual_actor_critic) and not self.ppo.world_view
                 and not self.ppo.reset_gru_every_step):
             raise ValueError('SRU continuation requires the regular motion-input GRU-concat policy')
         if self.resume_after:
@@ -393,7 +396,7 @@ class Experiment:
                 command.append('--neural_map_reset_every_step' if value else '--no-neural_map_reset_every_step');continue
             if key=='map_survival_features' and value=='none':continue
             if key.startswith('ctec_') and not p.ctec_coef:continue
-            if key in ('sru_gru','sru_failure_replay'):
+            if key in ('sru_gru','sru_failure_replay','sru_residual_actor_critic'):
                 if value:command.append('--'+key)
                 continue
             if key.startswith('sru_') and not p.sru_gru:continue
