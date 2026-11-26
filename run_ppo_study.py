@@ -4,7 +4,7 @@ from pathlib import Path
 from ppo_experiment_config import Experiment
 from run_reward_shaped_architectures import ROOT,PYTHON,write_json,inference_config,environment,summarize,checkpoint_ready
 
-SOURCES=('ppo_experiment_config.py','run_ppo_study.py','ppo.py','ppo_rnn_og.py','wrappers.py',
+SOURCES=('fused_sru.py','sparse_resets.py','ppo_experiment_config.py','run_ppo_study.py','ppo.py','ppo_rnn_og.py','wrappers.py',
     'models/actor_critic.py','models/conditioned_symbolic.py','training_time_limit.py',
     'cap_reward_shaped_runs.py','run_reward_shaped_architectures.py','evaluate_reward_shaped_ppo.py',
     'smoke_reward_shaped_ppo.py','test_reward_shaped_spatial.py','test_rnn_death_penalty.py',

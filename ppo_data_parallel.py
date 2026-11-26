@@ -15,8 +15,8 @@ AXIS = 'ppo_data'
 
 def validate_data_parallel(config, available_devices=None):
     count = config.get('DATA_PARALLEL_DEVICES', 1)
-    if isinstance(count, bool) or not isinstance(count, int) or count not in (1, 2, 4):
-        raise ValueError('data_parallel_devices must be one of 1, 2, 4')
+    if isinstance(count, bool) or not isinstance(count, int) or count not in (1, 2, 4, 8):
+        raise ValueError('data_parallel_devices must be one of 1, 2, 4, 8')
     if count > 1:
         if jax.process_count() != 1:
             raise ValueError('Data-parallel PPO currently supports one host only')

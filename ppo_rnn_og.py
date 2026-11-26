@@ -155,7 +155,11 @@ class ActorCriticRNN(nn.Module):
         if self.config.get('RESET_GRU_EVERY_STEP', False):
             dones = jnp.ones_like(dones, dtype=bool)
         rnn_in = (embedding, dones)
-        hidden, embedding = ScannedRNN(spatial_gate=self.config.get('SRU_GRU', False))(hidden, rnn_in)
+        if self.config.get('SRU_PACKED') and not self.is_initializing():
+            from fused_sru import run_sru
+            hidden, embedding = run_sru(self.variables['params']['ScannedRNN_0'], hidden, embedding, dones)
+        else:
+            hidden, embedding = ScannedRNN(spatial_gate=self.config.get('SRU_GRU', False))(hidden, rnn_in)
         memory_sequence = embedding
         if residual_heads:
             from models.sru_gru import ResidualDecisionHead
@@ -314,7 +318,11 @@ def make_train(config):
             env = FailureSeedAutoReset(env)
         else:
             env = AutoResetEnvWrapper(env)
-        env = BatchEnvWrapper(env, num_envs=config["NUM_ENVS"])
+        if config.get('SRU_PACKED'):
+            from sparse_resets import SparseResetBatch
+            env = SparseResetBatch(env, num_envs=config["NUM_ENVS"])
+        else:
+            env = BatchEnvWrapper(env, num_envs=config["NUM_ENVS"])
 
     def linear_schedule(count):
         frac = (
@@ -929,6 +937,7 @@ if __name__ == "__main__":
     parser.add_argument('--sru_failure_replay', action='store_true', help='Weight and retry failed training worlds until an all-22 episode.')
     parser.add_argument('--sru_warmup_steps', type=int, default=0, help='Additional environment steps training only the SRU gate.')
     parser.add_argument('--sru_gate_lr', type=float, default=3e-5)
+    parser.add_argument('--sru_packed', action='store_true')
     parser.add_argument('--sru_residual_actor_critic', action='store_true')
     parser.add_argument('--sru_identity_coef', type=float, default=0.)
     parser.add_argument('--sru_map_coef', type=float, default=0.)

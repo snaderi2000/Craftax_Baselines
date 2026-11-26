@@ -77,6 +77,7 @@ class PPO:
     gru_concat_observation:bool=False
     motion_inputs:bool=False
     sru_gru:bool=False
+    sru_packed:bool=False
     sru_residual_actor_critic:bool=False
     sru_failure_replay:bool=False
     sru_warmup_steps:int=0
@@ -136,6 +137,8 @@ class PPO:
         if not isinstance(self.reset_gru_every_step,bool):raise ValueError('reset_gru_every_step must be boolean')
         if not isinstance(self.gru_concat_observation,bool):raise ValueError('gru_concat_observation must be boolean')
         if not isinstance(self.motion_inputs,bool):raise ValueError('motion_inputs must be boolean')
+        if self.sru_packed and (not self.sru_residual_actor_critic or self.optimistic_resets or self.sru_failure_replay):
+            raise ValueError('Packed SRU requires residual SRU heads and ordinary resets')
         if type(self.sru_residual_actor_critic) is not bool or (self.sru_residual_actor_critic and not self.sru_gru):
             raise ValueError('Residual SRU heads require an SRU policy')
         if (type(self.sru_gru) is not bool or type(self.sru_warmup_steps) is not int or self.sru_warmup_steps<0
@@ -294,7 +297,7 @@ class Experiment:
             if job.name not in ARCHITECTURES:raise ValueError(f'Unknown architecture {job.name}')
             count=len(job.training_devices)
             if len(set(job.training_devices))!=count:raise ValueError('Training GPU IDs must be unique')
-            if count not in (1,2,4):raise ValueError('Data-parallel training supports 1, 2, or 4 GPUs')
+            if count not in (1,2,4,8):raise ValueError('Data-parallel training supports 1, 2, 4, or 8 GPUs')
             if job.train_gpu!=job.training_devices[0]:raise ValueError('train_gpu must match the first train_gpus entry')
             if count>1:
                 if job.name not in ('gru','spatial_gru','spatial_map_gru','map_mlp','map_mlp_gru','neural_map_gru'):
@@ -396,7 +399,7 @@ class Experiment:
                 command.append('--neural_map_reset_every_step' if value else '--no-neural_map_reset_every_step');continue
             if key=='map_survival_features' and value=='none':continue
             if key.startswith('ctec_') and not p.ctec_coef:continue
-            if key in ('sru_gru','sru_failure_replay','sru_residual_actor_critic'):
+            if key in ('sru_gru','sru_failure_replay','sru_residual_actor_critic','sru_packed'):
                 if value:command.append('--'+key)
                 continue
             if key.startswith('sru_') and not p.sru_gru:continue
