@@ -109,6 +109,7 @@ class SymbolicMotionInputTests(unittest.TestCase):
         np.testing.assert_array_equal(obs[-2:], [1, 0])
         np.testing.assert_array_equal(simulator_state(state).player_position, expected.player_position)
 
+    @jax.default_matmul_precision('highest')
     def test_augmented_online_and_sequence_replay_match_and_motion_has_gradients(self):
         from ppo_rnn_og import ActorCriticRNN, ScannedRNN
         obs, state = self.initialize()
@@ -135,6 +136,29 @@ class SymbolicMotionInputTests(unittest.TestCase):
         self.assertTrue(bool(jnp.isfinite(grads).all()))
         self.assertGreater(float(jnp.linalg.norm(grads[..., 1345:1362])), 0.)
         self.assertGreater(float(jnp.linalg.norm(grads[..., -2:])), 0.)
+
+    def test_position_time_inputs_append_normalized_xy_timestep_and_fourier_features(self):
+        from symbolic_motion_inputs import POSITION_TIME_INPUT_SIZE
+        wrapped = with_motion_inputs(self.env, dict(MOTION_INPUTS=True, POSITION_TIME_INPUTS=True))
+        obs, state = wrapped.reset(self.key, self.env.default_params)
+        self.assertEqual(obs.shape, (1364 + POSITION_TIME_INPUT_SIZE,))
+        self.assertEqual(wrapped.observation_space().shape, obs.shape)
+        # Spawn is (32, 32), timestep is 0 -> x=0, y=0, t_norm=0, sin(0)=0, cos(0)=1
+        pt = np.asarray(obs[1364:])
+        np.testing.assert_allclose(pt[:5], [0., 0., 0., 0., 1.], atol=1e-6)
+        np.testing.assert_allclose(pt[5:9], [0., 1., 0., 1.], atol=1e-6)
+
+        _, mstate = self.initialize()
+        obs1, mstate, _, _, _ = wrapped.step(self.key, mstate, Action.RIGHT.value, self.env.default_params)
+        # Moved right by 1 col -> col=33, row=32, t=1
+        pt1 = np.asarray(obs1[1364:])
+        self.assertAlmostEqual(float(pt1[0]), 1.0 / 32.0, places=6)
+        self.assertAlmostEqual(float(pt1[1]), 0.0, places=6)
+        self.assertAlmostEqual(float(pt1[2]), 1.0 / 10000.0, places=6)
+        self.assertAlmostEqual(float(pt1[3]), np.sin(2.0 * np.pi / 300.0), places=6)
+        self.assertAlmostEqual(float(pt1[4]), np.cos(2.0 * np.pi / 300.0), places=6)
+        # Existing 1364 motion slice is unchanged
+        np.testing.assert_array_equal(obs1[1362:1364], [1., 0.])
 
 
 if __name__ == '__main__':

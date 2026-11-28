@@ -7,10 +7,12 @@ per-device optimizer is introduced.
 import jax
 import jax.numpy as jnp
 import numpy as np
+from jax.experimental.shard_map import shard_map
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
 
 
 AXIS = 'ppo_data'
+_ACTIVE_MESH = None
 
 
 def validate_data_parallel(config, available_devices=None):
@@ -77,6 +79,75 @@ def replicate(tree, config):
         lambda x: jax.lax.with_sharding_constraint(jnp.asarray(x), PartitionSpec()), tree)
 
 
+def local_minibatches(batch, rng, num_minibatches, config):
+    """Stratified per-device shuffle to avoid cross-GPU observation all-to-all traffic.
+
+    Each device independently permutes its local i.i.d. environments and packs
+    them into (num_minibatches, T, local_mb, ...), yielding the exact global
+    (num_minibatches, T, global_mb, ...) sharded across devices on axis 2.
+    """
+    count = config['DATA_PARALLEL_DEVICES']
+    mesh = _ACTIVE_MESH if _ACTIVE_MESH is not None else Mesh(np.asarray(jax.local_devices()[:count]), (AXIS,))
+    local_envs = config['NUM_ENVS'] // count
+    local_mb = local_envs // num_minibatches
+    dev_keys = jax.random.split(rng, count)
+    in_spec = jax.tree_util.tree_map(lambda x: PartitionSpec(None, AXIS, *([None] * (x.ndim - 2))), batch)
+    out_spec = jax.tree_util.tree_map(lambda x: PartitionSpec(None, None, AXIS, *([None] * (x.ndim - 2))), batch)
+
+    def _shuffle(local_batch, key_slice):
+        perm = jax.random.permutation(key_slice[0], local_envs)
+        shuffled = jax.tree_util.tree_map(lambda x: jnp.take(x, perm, axis=1), local_batch)
+        return jax.tree_util.tree_map(
+            lambda x: jnp.swapaxes(
+                jnp.reshape(x, [x.shape[0], num_minibatches, local_mb] + list(x.shape[2:])),
+                1,
+                0,
+            ),
+            shuffled,
+        )
+
+    return shard_map(
+        _shuffle,
+        mesh=mesh,
+        in_specs=(in_spec, PartitionSpec(AXIS)),
+        out_specs=out_spec,
+        check_rep=False,
+    )(batch, dev_keys)
+
+
+def sharded_value_and_grad_bf16(local_loss_fn, params, init_hstate, traj_batch, advantages, targets, config):
+    """Run local forward/backward per device and all-reduce gradients in bfloat16.
+
+    Advantages are normalized globally across the full minibatch before entering
+    shard_map, preserving global PPO normalization while halving NCCL traffic.
+    """
+    count = config['DATA_PARALLEL_DEVICES']
+    mesh = _ACTIVE_MESH if _ACTIVE_MESH is not None else Mesh(np.asarray(jax.local_devices()[:count]), (AXIS,))
+    norm_advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
+
+    def _spec(tree):
+        return jax.tree_util.tree_map(lambda x: PartitionSpec(None, AXIS, *([None] * (x.ndim - 2))), tree)
+
+    def _per_device(p, ih, tb, adv, tgt):
+        loss, grads = jax.value_and_grad(local_loss_fn, has_aux=True)(
+            p, jax.tree_util.tree_map(lambda a: a[0], ih), tb, adv, tgt
+        )
+        grads = jax.tree_util.tree_map(
+            lambda g: jax.lax.pmean(g.astype(jnp.bfloat16), AXIS).astype(jnp.float32),
+            grads,
+        )
+        loss = jax.tree_util.tree_map(lambda x: jax.lax.pmean(x, AXIS), loss)
+        return loss, grads
+
+    return shard_map(
+        _per_device,
+        mesh=mesh,
+        in_specs=(PartitionSpec(), _spec(init_hstate), _spec(traj_batch), _spec(norm_advantages), _spec(targets)),
+        out_specs=(PartitionSpec(), PartitionSpec()),
+        check_rep=False,
+    )(params, init_hstate, traj_batch, norm_advantages, targets)
+
+
 def compile_train(config, devices=None):
     """Compile a conventional unbatched train function for 1/2/4 devices.
 
@@ -94,11 +165,17 @@ def compile_train(config, devices=None):
     if count == 1:
         return jax.jit(make_train(config), device=devices[0])
 
+    global _ACTIVE_MESH
     mesh = Mesh(np.asarray(devices), (AXIS,))
     execution = dict(config, _DATA_PARALLEL_ACTIVE=True)
-    with mesh:
-        function = make_train(execution)
-        compiled = jax.jit(function, in_shardings=NamedSharding(mesh, PartitionSpec()))
+    prev_mesh = _ACTIVE_MESH
+    _ACTIVE_MESH = mesh
+    try:
+        with mesh:
+            function = make_train(execution)
+            compiled = jax.jit(function, in_shardings=NamedSharding(mesh, PartitionSpec()))
+    finally:
+        _ACTIVE_MESH = prev_mesh
     for name in ('START_TIMESTEPS', 'TOTAL_UPDATES', 'LR_HORIZON_UPDATES',
                  'NUM_UPDATES', 'MINIBATCH_SIZE'):
         config[name] = execution[name]

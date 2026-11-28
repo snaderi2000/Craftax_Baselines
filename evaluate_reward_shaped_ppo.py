@@ -33,6 +33,7 @@ def build_evaluator(env,net,params,cfg,*,seed,batch,world_seeds=None,temperature
         raise ValueError('Resource timing is available for untraced evaluations')
     resources = jnp.array([Achievement.COLLECT_DRINK.value, Achievement.COLLECT_DIAMOND.value])
     track_map = resource_timing and cfg.get('MAP_SPATIAL_REGIONS', False)
+    track_trail = resource_timing and bool(cfg.get("SRU_EPISODE_MEMORY"))
     recurrent=bool(cfg.get('RECURRENT','MEMORY_TYPE' in cfg))
     def spectator_fields(raw):
         return dict(map=raw.map.astype(jnp.uint8),player_position=raw.player_position,
@@ -73,6 +74,8 @@ def build_evaluator(env,net,params,cfg,*,seed,batch,world_seeds=None,temperature
             initial+=((frames,transitions),)
         if resource_timing:
             initial += (jnp.full((batch, 6 if cfg.get('MAP_LANDMARKS') else 2), -1, dtype=jnp.int32),)
+        if track_trail:
+            initial += (jnp.zeros((batch, 5), jnp.int32), jnp.zeros((batch,16),bool))
         if track_map:
             initial += (jnp.zeros_like(state.terrain, dtype=bool),
                         jnp.full((batch, 3), -1, dtype=jnp.int32))
@@ -142,6 +145,29 @@ def build_evaluator(env,net,params,cfg,*,seed,batch,world_seeds=None,temperature
                     events = jnp.concatenate((events,extra),axis=1)
                 reached = active[:, None] & (first < 0) & events
                 updated += (jnp.where(reached, t+1, first),)
+            if track_trail:
+                # A move into a tile visited in the previous 64 steps closes a short walk.
+                # Attribute those moves to a successful resource return once if the
+                # remembered tile is mined/harvested within the following 16 ticks.
+                from craftax.craftax_classic.constants import DIRECTIONS
+                counts, recent = c[14:16]
+                row, col = raw.player_position.T
+                moved = active & (raw.player_position != previous.player_position).any(1)
+                last = state.visited[jnp.arange(batch),row,col].astype(jnp.int32)
+                revisit = moved & (last >= 0) & ((t+1-last) <= 64)
+                front = previous.player_position + DIRECTIONS[previous.player_direction]
+                targets = state.landmarks
+                at_target = (targets[:,:,:2] == front[:, None, ::-1]).all(2) & (targets[:,:,2] >= 0)
+                tile_before = previous.map[jnp.arange(batch),front[:,0],front[:,1]]
+                tile_after = raw.map[jnp.arange(batch),front[:,0],front[:,1]]
+                used = active & (tile_before != tile_after) & (
+                    (at_target[:,0] & (tile_before == BlockType.DIAMOND.value)) |
+                    (at_target[:,1] & (tile_before == BlockType.RIPE_PLANT.value)))
+                credit = jnp.where(used, recent.sum(1), 0)
+                recent = jnp.concatenate((recent[:,1:] & ~used[:,None], revisit[:,None]),axis=1)
+                counts += jnp.stack((moved, revisit, credit, active & ~moved & previous.is_sleeping,
+                                     active & ~moved & ~previous.is_sleeping),axis=1).astype(jnp.int32)
+                updated += (counts, recent)
             if track_map:
                 from craftax.craftax_classic.constants import DIRECTIONS
                 remembered, first = c[14:16]
@@ -230,12 +256,17 @@ def main():
     rows=[];executed=0
     for offset in range(0,args.episodes,batch):
         t,finished,returns,shaped,lengths,ach,lava,other_death,timeout,first,*map_times=jax.device_get(evaluate(jnp.arange(offset,offset+batch)))
+        trail_counts = map_times.pop(0) if cfg.get('SRU_EPISODE_MEMORY') else None
+        if trail_counts is not None:
+            map_times.pop(0)
         if coverage_metrics:
             coverage = map_times.pop()
         executed+=int(t)*batch
         for i in range(min(batch,args.episodes-offset)):rows.append(dict(episode=offset+i,original_return=float(returns[i]),
             shaped_return=float(shaped[i]),length=int(lengths[i]),terminated=bool(finished[i]),
             lava=bool(lava[i]),nonlava_death=bool(other_death[i]),timeout=bool(timeout[i]),all_22=bool(ach[i].all()),
+            **(dict(zip(('moves','short_revisits','revisits_before_resource_return',
+                          'sleeping_still','awake_still'),map(int,trail_counts[i]))) if trail_counts is not None else {}),
             first_drink_step=int(first[i,0]) if first[i,0]>=0 else None,
             first_diamond_step=int(first[i,1]) if first[i,1]>=0 else None,
             **(dict(seen_tiles=int(coverage[i,0]),seen_tiles_by_1000_or_end=int(coverage[i,1])) if coverage_metrics else {}),
@@ -303,6 +334,13 @@ def main():
         timeout_pct=100*float(np.mean([r['timeout'] for r in rows])),
         evaluation_executed_transitions=executed,seconds=time.time()-began,
         caveat='One training seed; episode confidence intervals do not measure training-seed variability. Observed 100% is not a guarantee on unseen episodes.')
+    if cfg.get('SRU_EPISODE_MEMORY'):
+        planted = [r for r in rows if r['place_plant']]
+        report.update(sru_episode_memory=cfg['SRU_EPISODE_MEMORY'],
+                      planted_episodes=len(planted), planted_then_ate=sum(r['eat_plant'] for r in planted),
+                      plant_to_harvest_pct=100*np.mean([r['eat_plant'] for r in planted]) if planted else None,
+                      moves=sum(r['moves'] for r in rows), short_revisits=sum(r['short_revisits'] for r in rows),
+                      revisits_before_resource_return=sum(r['revisits_before_resource_return'] for r in rows))
     if coverage_metrics:
         report.update(mean_seen_tiles=float(np.mean([r['seen_tiles'] for r in rows])),
                       mean_seen_tiles_by_1000_or_end=float(np.mean([r['seen_tiles_by_1000_or_end'] for r in rows])),

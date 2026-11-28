@@ -1,0 +1,67 @@
+{
+  "name": "v3-xyt-memory-trail-300m",
+  "seed": 50,
+  "resume_from": "/home/synaderi/Craftax_Baselines-fast/wandb/run-20261126_200838-b3b66cd2/files/policies/14000062464",
+  "checkpoint_milestones": [
+    14150062464
+  ],
+  "architectures": [
+    {
+      "name": "gru",
+      "train_gpu": 2,
+      "evaluation_gpu": 2
+    }
+  ],
+  "rewards": {
+    "death_penalty": 0,
+    "lava_penalty": 2,
+    "diamond_reward": 1,
+    "plant_reward": 1
+  },
+  "ppo": {
+    "num_envs": 2048,
+    "num_steps": 64,
+    "update_epochs": 3,
+    "num_minibatches": 4,
+    "gamma": 0.99,
+    "gae_lambda": 0.8,
+    "clip_eps": 0.2,
+    "vf_coef": 0.5,
+    "ent_coef": 0.01,
+    "lr": 0.0002,
+    "lr_horizon_timesteps": 15000000000,
+    "max_grad_norm": 1.0,
+    "layer_size": 1024,
+    "anneal_lr": true,
+    "optimistic_resets": false,
+    "gru_concat_observation": true,
+    "motion_inputs": true,
+    "position_time_inputs": true,
+    "sru_gru": true,
+    "sru_packed": true,
+    "sru_bf16": true,
+    "sru_residual_actor_critic": true,
+    "sru_warmup_steps": 0,
+    "sru_gate_lr": 0.0002,
+    "sru_identity_coef": 0.0,
+    "sru_episode_memory": "trail"
+  },
+  "budget": {
+    "max_hours": 16,
+    "evaluation_reserve_minutes": 45,
+    "max_steps": 14300086272
+  },
+  "evaluation": {
+    "common_checkpoints": {},
+    "common_episodes": 1024,
+    "final_episodes": 1024,
+    "batch": 64,
+    "seed": 27112689,
+    "temperatures": [
+      1.0
+    ],
+    "defer_until_training_complete": true
+  },
+  "wandb_project": "Craftax_Baselines",
+  "wandb_entity": "synaderi-uc-davis"
+}

@@ -84,7 +84,11 @@ class RewardShapedSpatialTests(unittest.TestCase):
                 self.assertTrue(bool(raw[3]));self.assertTrue(bool(actual[3]))
                 self.assertAlmostEqual(float(actual[2]-raw[2]),-cost,places=5)
                 for a,b in zip(jax.tree_util.tree_leaves(raw[1]),jax.tree_util.tree_leaves(actual[1])):
-                    np.testing.assert_array_equal(a,b)
+                    if np.issubdtype(np.asarray(a).dtype, np.floating):
+                        # Wrapped and bare GPU kernels can round state updates differently.
+                        np.testing.assert_allclose(a, b, rtol=1e-5, atol=1e-7, equal_nan=False)
+                    else:
+                        np.testing.assert_array_equal(a, b)
         for tile,event in [(BlockType.DIAMOND,Achievement.COLLECT_DIAMOND),(BlockType.RIPE_PLANT,Achievement.EAT_PLANT)]:
             state=self.state.replace(map=self.state.map.at[32,33].set(tile.value),
                 inventory=self.state.inventory.replace(iron_pickaxe=1))

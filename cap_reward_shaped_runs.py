@@ -13,6 +13,12 @@ def checkpoints(roots):
     return result
 
 
+def inherited_checkpoints(roots,fork):
+    if fork is None:
+        return {}
+    return {step:path for step,path in checkpoints(roots).items() if step<=int(Path(fork).name)}
+
+
 def terminate_verified(pid,needle):
     source=Path(f'/proc/{pid}/cmdline')
     if not source.exists():return
@@ -98,6 +104,8 @@ def controller(study,arch,adopt_pid=None):
         progress.update(kw,time=time.time());write_json(out/'progress.json',progress)
     status()
     roots=[plan['previous_local_run']] if plan.get('previous_local_run') else []
+    # Freeze inherited checkpoints at the fork. The parent may keep training.
+    inherited=inherited_checkpoints(roots,plan.get('resume_checkpoint'))
     run=None;current=None;eval_proc=None;eval_log=None;eval_lock=None
     done={label for label in [x[0] for x in targets]+[x[0] for x in final_targets]
           if (out/f'evaluation_{label}/summary.json').exists()}
@@ -140,7 +148,7 @@ def controller(study,arch,adopt_pid=None):
                     'overall_deadline':deadline,'training_deadline':train_deadline,
                     'wandb_url':None if env.get('WANDB_MODE')=='offline' else 'https://wandb.ai/synaderi-uc-davis/Craftax_Baselines/runs/'+plan['wandb_run_id']})
                 status(local_run=str(run))
-        available=checkpoints(roots)
+        available={**inherited,**(checkpoints([run]) if run else {})}
         if available:status(latest_checkpoint=max(available))
         if eval_proc is not None and eval_proc.poll() is not None:
             code=eval_proc.returncode;eval_log.close()
@@ -159,9 +167,10 @@ def controller(study,arch,adopt_pid=None):
             train_closed=True;log.close();train_failed=code!=0
             for lock in training_locks:lock.close()
             training_locks=[]
-            available=checkpoints(roots)
-            if not available:raise RuntimeError('No saved state available after training')
-            final_checkpoint=available[max(available)]
+            own=checkpoints([run]) if run else {}
+            if not own:raise RuntimeError('No checkpoint saved by the current trainer')
+            available={**inherited,**own}
+            final_checkpoint=own[max(own)]
             status(state='evaluating_final',training_exit_code=code,
                 final_checkpoint=str(final_checkpoint),actual_training_steps=int(final_checkpoint.name))
         if eval_proc is None:

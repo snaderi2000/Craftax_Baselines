@@ -902,11 +902,12 @@ class ImpalaStack(nn.Module):
 
 class DenseResBlock(nn.Module):
     width: int
+    dtype: object = None
 
     @nn.compact
     def __call__(self, x):
         residual = x
-        x = nn.Dense(self.width, kernel_init=orthogonal(2))(x)
+        x = nn.Dense(self.width, kernel_init=orthogonal(2), dtype=self.dtype, param_dtype=jnp.float32)(x)
         #x = nn.relu(x)
         return x + residual
 

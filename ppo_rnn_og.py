@@ -46,7 +46,13 @@ from wrappers import (
 from logz.batch_logging import create_log_dict, batch_log
 
 from craftax.craftax_env import make_craftax_env_from_name
-from ppo_data_parallel import active as parallel_active, shard_batch, replicate
+from ppo_data_parallel import (
+    active as parallel_active,
+    local_minibatches,
+    replicate,
+    shard_batch,
+    sharded_value_and_grad_bf16,
+)
 
 _CHECKPOINT_WRITE_LOCK = threading.Lock()
 
@@ -136,19 +142,28 @@ class ActorCriticRNN(nn.Module):
             obs = features.reshape((*shape, features.shape[-1]))
             if env_major:
                 obs = jnp.swapaxes(obs, 0, 1)
+        compute_dtype = (
+            jnp.bfloat16
+            if (self.config.get('SRU_BF16', False) and not self.is_initializing())
+            else None
+        )
         embedding = nn.Dense(
             self.config["LAYER_SIZE"],
             kernel_init=orthogonal(np.sqrt(2)),
             bias_init=constant(0.0),
-        )(obs)
+            dtype=compute_dtype,
+            param_dtype=jnp.float32,
+        )(obs.astype(compute_dtype) if compute_dtype is not None else obs)
         if world is not None:
-            embedding = embedding + world
+            embedding = embedding + (world.astype(compute_dtype) if compute_dtype is not None else world)
         embedding = nn.relu(embedding)
         observation_embedding = embedding
         residual_heads = self.config.get('SRU_RESIDUAL_ACTOR_CRITIC', False)
         if residual_heads:
-            embedding = nn.relu(nn.Dense(self.config['LAYER_SIZE'], name='memory_input')(
-                nn.LayerNorm(name='memory_input_norm')(embedding)))
+            embedding = nn.relu(nn.Dense(
+                self.config['LAYER_SIZE'], name='memory_input',
+                dtype=compute_dtype, param_dtype=jnp.float32,
+            )(nn.LayerNorm(name='memory_input_norm', dtype=compute_dtype, param_dtype=jnp.float32)(embedding)))
 
         # Apply identically during rollout, PPO sequence replay and inference.
         # Keep the exact same GRU parameters for the no-history control.
@@ -157,16 +172,22 @@ class ActorCriticRNN(nn.Module):
         rnn_in = (embedding, dones)
         if self.config.get('SRU_PACKED') and not self.is_initializing():
             from fused_sru import run_sru
-            hidden, embedding = run_sru(self.variables['params']['ScannedRNN_0'], hidden, embedding, dones)
+            hidden, embedding = run_sru(
+                self.variables['params']['ScannedRNN_0'], hidden, embedding, dones,
+                compute_dtype=compute_dtype,
+            )
         else:
             hidden, embedding = ScannedRNN(spatial_gate=self.config.get('SRU_GRU', False))(hidden, rnn_in)
         memory_sequence = embedding
         if residual_heads:
             from models.sru_gru import ResidualDecisionHead
-            features = jnp.concatenate((observation_embedding, nn.relu(embedding)), axis=-1)
+            mem_act = nn.relu(embedding)
+            if compute_dtype is not None:
+                mem_act = mem_act.astype(compute_dtype)
+            features = jnp.concatenate((observation_embedding, mem_act), axis=-1)
             width = self.config['LAYER_SIZE']
-            logits = ResidualDecisionHead(width, self.action_dim, .01, name='actor_head')(features)
-            value = ResidualDecisionHead(width, 1, 1., name='critic_head')(features)
+            logits = ResidualDecisionHead(width, self.action_dim, .01, dtype=compute_dtype, name='actor_head')(features)
+            value = ResidualDecisionHead(width, 1, 1., dtype=compute_dtype, name='critic_head')(features)
             outputs = hidden, distrax.Categorical(logits=logits), value[..., 0]
             return (*outputs, memory_sequence) if return_memory else outputs
         if self.config.get('GRU_CONCAT_OBSERVATION', False):
@@ -220,7 +241,7 @@ class Transition(NamedTuple):
     info: jnp.ndarray
 
 
-def recurrent_ppo_loss(params, network, init_hstate, traj_batch, gae, targets, config, decoder=None):
+def recurrent_ppo_loss(params, network, init_hstate, traj_batch, gae, targets, config, decoder=None, prenormalized_gae=False):
     """PPO loss over a GLOBAL recurrent minibatch, including normalization."""
     outputs = network.apply(params, init_hstate, (traj_batch.obs, traj_batch.done),
                             **({'return_memory': True} if decoder is not None else {}))
@@ -232,7 +253,8 @@ def recurrent_ppo_loss(params, network, init_hstate, traj_batch, gae, targets, c
     value_losses_clipped = jnp.square(value_pred_clipped-targets)
     value_loss = .5*jnp.maximum(value_losses, value_losses_clipped).mean()
     ratio = jnp.exp(log_prob-traj_batch.log_prob)
-    gae = (gae-gae.mean())/(gae.std()+1e-8)
+    if not prenormalized_gae:
+        gae = (gae-gae.mean())/(gae.std()+1e-8)
     loss_actor1 = ratio*gae
     loss_actor2 = jnp.clip(ratio, 1.-config['CLIP_EPS'], 1.+config['CLIP_EPS'])*gae
     loss_actor = -jnp.minimum(loss_actor1, loss_actor2)
@@ -324,12 +346,13 @@ def make_train(config):
         else:
             env = BatchEnvWrapper(env, num_envs=config["NUM_ENVS"])
 
+    start_updates = config['START_TIMESTEPS'] // (config['NUM_STEPS'] * config['NUM_ENVS'])
+    start_opt_step_ref = [0]
+
     def linear_schedule(count):
-        frac = (
-            1.0
-            - (count // (config["NUM_MINIBATCHES"] * config["UPDATE_EPOCHS"]))
-            / config["LR_HORIZON_UPDATES"]
-        )
+        steps_per_update = config["NUM_MINIBATCHES"] * config["UPDATE_EPOCHS"]
+        elapsed_updates = (count - start_opt_step_ref[0]) // steps_per_update
+        frac = jnp.maximum(0.0, 1.0 - (start_updates + elapsed_updates) / config["LR_HORIZON_UPDATES"])
         return config["LR"] * frac
 
     use_sru = config.get('SRU_GRU', False)
@@ -390,13 +413,29 @@ def make_train(config):
         # PyTree payload, which would otherwise fall back to fresh weights.
         checkpointer = PyTreeCheckpointer()
         if use_sru:
-            from models.sru_gru import has_spatial_gate, transplant_gru
+            from models.sru_gru import expand_input_train_state, has_spatial_gate, transplant_gru
             payload = checkpointer.restore(checkpoint_path)
             source = payload['params']
+            source_in = source['params']['Dense_0']['kernel'].shape[0]
+            target_in = restore_params['params']['Dense_0']['kernel'].shape[0]
             if not has_spatial_gate(source):
                 restored_train_state = template.replace(params=transplant_gru(restore_params, source))
                 print(f'Transferred pretrained GRU weights at {config["START_TIMESTEPS"]:,}; '
                       'initialized the SRU gate to identity and restarted Adam.', flush=True)
+            elif config.get('POSITION_TIME_INPUTS', False) and source_in < target_in:
+                old_params = restore_net.init(
+                    jax.random.PRNGKey(0),
+                    initialize_recurrent_carry(1, config),
+                    (jnp.zeros((1, 1, source_in)), jnp.zeros((1, 1), bool)),
+                )
+                old_template = state_class.create(
+                    apply_fn=restore_net.apply, params=old_params, tx=optimizer(),
+                    **extra_state(jax.random.PRNGKey(0)),
+                )
+                source_state = checkpointer.restore(checkpoint_path, item=old_template)
+                restored_train_state = expand_input_train_state(template, source_state)
+                print(f'Expanded Dense_0 input rows {source_in} -> {target_in} with zero-init '
+                      f'at {config["START_TIMESTEPS"]:,}; retained pretrained weights and Adam state.', flush=True)
             elif (use_map and 'decoder' not in payload) or (use_replay and 'replay_keys' not in payload):
                 base = TrainState.create(apply_fn=restore_net.apply, params=restore_params, tx=optimizer())
                 base = checkpointer.restore(checkpoint_path, item=base)
@@ -406,6 +445,7 @@ def make_train(config):
         else:
             restored_train_state = checkpointer.restore(checkpoint_path, item=template)
         if restored_train_state is None:raise ValueError('Checkpoint did not contain a recurrent train state')
+        start_opt_step_ref[0] = int(restored_train_state.step)
         print(f'Loaded recurrent weights at {config["START_TIMESTEPS"]:,}; environment and hidden state reset.',flush=True)
 
     def train(rng):
@@ -576,6 +616,18 @@ def make_train(config):
                         total_loss, (grads, decoder_grads) = grad_fn(train_state.params, train_state.decoder.params)
                         decoder = train_state.decoder.apply_gradients(grads=replicate(decoder_grads, config))
                         train_state = train_state.replace(decoder=decoder)
+                    elif config.get('SRU_BF16', False) and parallel_active(config):
+                        total_loss, grads = sharded_value_and_grad_bf16(
+                            lambda p, ih, tb, adv, tgt: recurrent_ppo_loss(
+                                p, network, ih, tb, adv, tgt, config, prenormalized_gae=True
+                            ),
+                            train_state.params,
+                            init_hstate,
+                            traj_batch,
+                            advantages,
+                            targets,
+                            config,
+                        )
                     else:
                         total_loss, grads = jax.value_and_grad(_loss_fn, has_aux=True)(train_state.params)
                     if use_sru:
@@ -594,32 +646,35 @@ def make_train(config):
                 (
                     train_state,
                     init_hstate,
-                    traj_batch,
+                    ppo_traj_batch,
                     advantages,
                     targets,
                     rng,
                 ) = update_state
 
                 rng, _rng = jax.random.split(rng)
-                permutation = jax.random.permutation(_rng, config["NUM_ENVS"])
-                batch = (init_hstate, traj_batch, advantages, targets)
+                batch = (init_hstate, ppo_traj_batch, advantages, targets)
 
-                shuffled_batch = jax.tree.map(
-                    lambda x: jnp.take(x, permutation, axis=1), batch
-                )
+                if (config.get('SRU_PACKED') or config.get('SRU_BF16')) and parallel_active(config):
+                    minibatches = local_minibatches(batch, _rng, config["NUM_MINIBATCHES"], config)
+                else:
+                    permutation = jax.random.permutation(_rng, config["NUM_ENVS"])
+                    shuffled_batch = jax.tree.map(
+                        lambda x: jnp.take(x, permutation, axis=1), batch
+                    )
 
-                minibatches = jax.tree.map(
-                    lambda x: jnp.swapaxes(
-                        jnp.reshape(
-                            x,
-                            [x.shape[0], config["NUM_MINIBATCHES"], -1]
-                            + list(x.shape[2:]),
+                    minibatches = jax.tree.map(
+                        lambda x: jnp.swapaxes(
+                            jnp.reshape(
+                                x,
+                                [x.shape[0], config["NUM_MINIBATCHES"], -1]
+                                + list(x.shape[2:]),
+                            ),
+                            1,
+                            0,
                         ),
-                        1,
-                        0,
-                    ),
-                    shuffled_batch,
-                )
+                        shuffled_batch,
+                    )
 
                 train_state, total_loss = jax.lax.scan(
                     _update_minbatch, train_state, minibatches
@@ -627,7 +682,7 @@ def make_train(config):
                 update_state = (
                     train_state,
                     init_hstate,
-                    traj_batch,
+                    ppo_traj_batch,
                     advantages,
                     targets,
                     rng,
@@ -635,10 +690,13 @@ def make_train(config):
                 return update_state, total_loss
 
             init_hstate = jax.tree_util.tree_map(lambda a:a[None,...],initial_hstate)
+            ppo_traj_batch = traj_batch if use_map else traj_batch._replace(info={})
+            if config.get('SRU_BF16', False):
+                ppo_traj_batch = ppo_traj_batch._replace(obs=ppo_traj_batch.obs.astype(jnp.bfloat16))
             update_state = (
                 train_state,
                 init_hstate,
-                traj_batch,
+                ppo_traj_batch,
                 advantages,
                 targets,
                 rng,
@@ -683,12 +741,20 @@ def make_train(config):
                 metric['training/sru_gate_learning_rate'] = linear_schedule(count) * (config['SRU_GATE_LR'] / config['LR'])
             rng = update_state[-1]
             if config["DEBUG"] and config["USE_WANDB"]:
+                log_every = 10 if config.get('SRU_BF16', False) else 1
 
                 def callback(metric, update_step):
                     to_log = create_log_dict(metric, config)
                     batch_log(update_step, to_log, config)
 
-                jax.debug.callback(callback, metric, update_step)
+                if log_every > 1:
+                    should_log = (update_step % log_every == 0) | (update_step == config["NUM_UPDATES"] - 1)
+                    def _do_log(_):
+                        jax.debug.callback(callback, metric, update_step)
+                        return jnp.asarray(0)
+                    jax.lax.cond(should_log, _do_log, lambda _: jnp.asarray(0), operand=None)
+                else:
+                    jax.debug.callback(callback, metric, update_step)
 
             if config["SAVE_POLICY"] and config["USE_WANDB"] and config.get("SAVE_POLICY_MILESTONES"):
                 batch_size = config["NUM_ENVS"] * config["NUM_STEPS"]
@@ -938,6 +1004,9 @@ if __name__ == "__main__":
     parser.add_argument('--sru_warmup_steps', type=int, default=0, help='Additional environment steps training only the SRU gate.')
     parser.add_argument('--sru_gate_lr', type=float, default=3e-5)
     parser.add_argument('--sru_packed', action='store_true')
+    parser.add_argument('--sru_bf16', action='store_true')
+    parser.add_argument('--sru_episode_memory',choices=('control','landmarks','trail','both'))
+    parser.add_argument('--position_time_inputs', action='store_true')
     parser.add_argument('--sru_residual_actor_critic', action='store_true')
     parser.add_argument('--sru_identity_coef', type=float, default=0.)
     parser.add_argument('--sru_map_coef', type=float, default=0.)

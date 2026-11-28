@@ -36,6 +36,7 @@ class GRUMemoryControlTests(unittest.TestCase):
         _,different_pi,_=self.normal.apply(self.params,self.hidden,(changed,self.dones))
         self.assertGreater(float(jnp.max(jnp.abs(normal_pi.logits[-1]-different_pi.logits[-1]))),1e-6)
 
+    @jax.default_matmul_precision('highest')
     def test_streaming_collection_matches_sequence_replay_and_ratio_one(self):
         concat=ActorCriticRNN(3,dict(self.cfg,GRU_CONCAT_OBSERVATION=True))
         for net in (self.normal,self.reset,concat):

@@ -160,7 +160,7 @@ def main():
             'USE_OPTIMISTIC_RESETS','OPTIMISTIC_RESET_RATIO','DEATH_PENALTY','LAVA_PENALTY',
             'DIAMOND_REWARD','PLANT_REWARD','ALL22_TERMINAL_BONUS','SEED','LR_HORIZON_TIMESTEPS','MAP_VIEW_SIZE',
             'RECOVERY_BANK','RECOVERY_PROBABILITY','RESET_SEED_BANK','RESUME_RESET_OPTIMIZER','POLICY_TEMPERATURE','MAP_EMBEDDING_SIZE','MAP_GLOBAL_READOUT',
-            'MAP_LANDMARKS','MAP_WARMSTART_CROP_FROM','MAP_FULL_TERRAIN','MAP_SINGLE_READOUT','MAP_INTERNAL_CROP','MAP_PATCH_MLP','MAP_SPATIAL_REGIONS','DATA_PARALLEL_DEVICES','RESET_GRU_EVERY_STEP','GRU_CONCAT_OBSERVATION','WORLD_VIEW','LOCAL_POLICY_INIT','MOTION_INPUTS','MAP_SURVIVAL_FEATURES','NEURAL_MAP_CHANNELS','NEURAL_MAP_RESET_EVERY_STEP')
+            'MAP_LANDMARKS','MAP_WARMSTART_CROP_FROM','MAP_FULL_TERRAIN','MAP_SINGLE_READOUT','MAP_INTERNAL_CROP','MAP_PATCH_MLP','MAP_SPATIAL_REGIONS','DATA_PARALLEL_DEVICES','RESET_GRU_EVERY_STEP','GRU_CONCAT_OBSERVATION','WORLD_VIEW','LOCAL_POLICY_INIT','MOTION_INPUTS','SRU_EPISODE_MEMORY','POSITION_TIME_INPUTS','MAP_SURVIVAL_FEATURES','NEURAL_MAP_CHANNELS','NEURAL_MAP_RESET_EVERY_STEP')
         cfg.update({k:supplied[k] for k in allowed if k in supplied})
         cfg['MAP_FINE_SHORTCUT'] = supplied.get('MAP_FINE_SHORTCUT', False)
         cfg['MAP_BOARD_ONLY'] = supplied.get('MAP_BOARD_ONLY', False)
@@ -389,10 +389,18 @@ def main():
         memory_report['ctec_optimizer_updates']=int(curiosity.learner.step)
         memory_report['ctec_parameters']=sum(x.size for x in jax.tree_util.tree_leaves(curiosity.learner.params))
     if cfg.get('MOTION_INPUTS',False):
+        from symbolic_motion_inputs import POSITION_TIME_INPUT_SIZE
         variables=state.params.get('params',state.params)
-        assert variables['Dense_0']['kernel'].shape[0]==1364, 'Motion suffix did not reach the network'
+        extra_pt = POSITION_TIME_INPUT_SIZE if cfg.get('POSITION_TIME_INPUTS', False) else 0
+        from symbolic_episode_memory import FEATURES
+        expected_in = 1364 + extra_pt + (FEATURES if cfg.get('SRU_EPISODE_MEMORY') else 0)
+        assert variables['Dense_0']['kernel'].shape[0]==expected_in, 'Motion suffix did not reach the network'
         assert recurrent, 'Motion inputs require the recurrent trainer'
-        memory_report.update(motion_inputs=True,observation_size=5462 if cfg.get('WORLD_VIEW') else 1364,explicit_odometry=True)
+        if extra_pt:
+            new_rows = np.asarray(variables['Dense_0']['kernel'][1364:, :])
+            assert np.any(new_rows != 0), 'Position-time input rows did not receive gradient updates'
+        memory_report.update(motion_inputs=True,position_time_inputs=bool(extra_pt),
+            observation_size=5462 if cfg.get('WORLD_VIEW') else expected_in,explicit_odometry=True)
         if cfg.get('SRU_FAILURE_REPLAY'):
             replay = result['runner_state'][1]
             np.testing.assert_array_equal(replay.failures[0], state.replay_failures)

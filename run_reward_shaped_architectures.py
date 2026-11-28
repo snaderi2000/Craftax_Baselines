@@ -67,6 +67,7 @@ def inference_config(plan):
         GRU_CONCAT_OBSERVATION=plan.get('gru_concat_observation',False),
         WORLD_VIEW=plan.get('world_view'),LOCAL_POLICY_INIT=plan.get('local_policy_init'),
         MOTION_INPUTS=plan.get('motion_inputs',False),
+        POSITION_TIME_INPUTS=plan.get('position_time_inputs',False),
         MAP_SURVIVAL_FEATURES=plan.get('map_survival_features','none'),
         NEURAL_MAP_CHANNELS=plan.get('neural_map_channels',0),
         NEURAL_MAP_RESET_EVERY_STEP=plan.get('neural_map_reset_every_step',False),

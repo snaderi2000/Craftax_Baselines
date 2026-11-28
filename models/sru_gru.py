@@ -6,6 +6,7 @@ https://github.com/leggedrobotics/sru-pytorch-spatial-learning/blob/main/network
 The caller keeps Flax's GRU reset convention and pretrained parameter names.
 """
 
+from typing import Any
 import flax.linen as nn
 from flax.core import FrozenDict, freeze, unfreeze
 from flax.traverse_util import flatten_dict, unflatten_dict
@@ -22,15 +23,20 @@ class ResidualDecisionHead(nn.Module):
     width: int
     outputs: int
     output_scale: float
+    dtype: Any = None
 
     @nn.compact
     def __call__(self, features):
         from models.actor_critic import DenseResBlock
-        x = nn.LayerNorm()(features)
-        x = nn.relu(nn.Dense(self.width, kernel_init=nn.initializers.orthogonal(2.))(x))
+        x = nn.LayerNorm(dtype=self.dtype, param_dtype=jnp.float32)(features)
+        x = nn.relu(nn.Dense(self.width, kernel_init=nn.initializers.orthogonal(2.),
+                             dtype=self.dtype, param_dtype=jnp.float32)(x))
         for _ in range(2):
-            x = nn.relu(DenseResBlock(self.width)(x))
-        return nn.Dense(self.outputs, kernel_init=nn.initializers.orthogonal(self.output_scale))(nn.LayerNorm()(x))
+            x = nn.relu(DenseResBlock(self.width, dtype=self.dtype)(x))
+        x = nn.LayerNorm(dtype=self.dtype, param_dtype=jnp.float32)(x)
+        out = nn.Dense(self.outputs, kernel_init=nn.initializers.orthogonal(self.output_scale),
+                       dtype=self.dtype, param_dtype=jnp.float32)(x)
+        return out.astype(jnp.float32) if self.dtype is not None else out
 
 
 def spatial_multiplier(inputs):
@@ -54,6 +60,29 @@ def transplant_gru(target, source):
             raise ValueError(f'GRU checkpoint differs at {path}')
     result = unflatten_dict({**new, **old})
     return freeze(result) if isinstance(target, FrozenDict) else result
+
+
+def expand_input_train_state(template, source_state):
+    """Function-preserving zero-init expansion of Dense_0 input rows across params and Adam state."""
+    def _expand(path, new_leaf, old_leaf):
+        new_arr = jnp.asarray(new_leaf)
+        old_arr = jnp.asarray(old_leaf)
+        if new_arr.shape == old_arr.shape:
+            return old_arr.astype(new_arr.dtype)
+        keys = tuple(getattr(p, 'key', getattr(p, 'name', None)) for p in path)
+        if (keys[-2:] == ('Dense_0', 'kernel')
+                and new_arr.ndim == 2 and old_arr.ndim == 2
+                and new_arr.shape[1] == old_arr.shape[1]
+                and new_arr.shape[0] > old_arr.shape[0]):
+            return jnp.zeros(new_arr.shape, dtype=new_arr.dtype).at[:old_arr.shape[0], :].set(
+                old_arr.astype(new_arr.dtype)
+            )
+        raise ValueError(f'Incompatible leaf at {keys}: source {old_arr.shape} vs target {new_arr.shape}')
+
+    new_params, new_opt_state = jax.tree_util.tree_map_with_path(
+        _expand, (template.params, template.opt_state), (source_state.params, source_state.opt_state)
+    )
+    return template.replace(step=source_state.step, params=new_params, opt_state=new_opt_state)
 
 
 def gate_penalty(parameters):

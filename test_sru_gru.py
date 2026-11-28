@@ -101,6 +101,82 @@ class SruGruTest(unittest.TestCase):
             np.testing.assert_allclose(actual, full, rtol=2e-7, atol=0.)
         self.assertEqual(int(scaled.step), int(reference.step))
 
+    @jax.default_matmul_precision('highest')
+    def test_packed_and_bf16_match_stock_sru_and_preserve_fp32_params(self):
+        base_cfg = dict(LAYER_SIZE=16, SRU_GRU=True, GRU_CONCAT_OBSERVATION=True, SRU_RESIDUAL_ACTOR_CRITIC=True)
+        packed_cfg = dict(base_cfg, SRU_PACKED=True)
+        bf16_cfg = dict(packed_cfg, SRU_BF16=True)
+        key = jax.random.PRNGKey(73)
+        hidden = initialize_recurrent_carry(4, base_cfg)
+        stock_net = ActorCriticRNN(17, base_cfg)
+        packed_net = ActorCriticRNN(17, packed_cfg)
+        bf16_net = ActorCriticRNN(17, bf16_cfg)
+        obs6 = jax.random.normal(key, (6, 4, 19))
+        dones6 = jnp.zeros((6, 4), dtype=bool).at[3, 1].set(True)
+        params = stock_net.init(key, hidden, (obs6, dones6))
+        bf16_init = bf16_net.init(key, hidden, (obs6, dones6))
+        self.assertEqual(
+            jax.tree_util.tree_structure(params),
+            jax.tree_util.tree_structure(bf16_init),
+        )
+        for leaf in jax.tree_util.tree_leaves(bf16_init):
+            self.assertEqual(leaf.dtype, jnp.float32)
+
+        for obs, dones in [(obs6[:1], dones6[:1]), (obs6, dones6)]:
+            sh, spi, sv = stock_net.apply(params, hidden, (obs, dones))
+            ph, ppi, pv = packed_net.apply(params, hidden, (obs, dones))
+            bh, bpi, bv = bf16_net.apply(params, hidden, (obs, dones))
+            for a, b in ((sh, ph), (spi.logits, ppi.logits), (sv, pv)):
+                np.testing.assert_allclose(b, a, rtol=1e-5, atol=1e-5)
+            self.assertEqual(bh.dtype, jnp.float32)
+            self.assertEqual(bpi.logits.dtype, jnp.float32)
+            self.assertEqual(bv.dtype, jnp.float32)
+            for a, b in ((sh, bh), (spi.logits, bpi.logits), (sv, bv)):
+                np.testing.assert_allclose(b, a, rtol=3e-2, atol=3e-2)
+
+        g_stock = jax.grad(lambda p: stock_net.apply(p, hidden, (obs6, dones6))[2].sum())(params)
+        g_packed = jax.grad(lambda p: packed_net.apply(p, hidden, (obs6, dones6))[2].sum())(params)
+        g_bf16 = jax.grad(lambda p: bf16_net.apply(p, hidden, (obs6, dones6))[2].sum())(params)
+        for a, b in zip(jax.tree_util.tree_leaves(g_stock), jax.tree_util.tree_leaves(g_packed)):
+            np.testing.assert_allclose(b, a, rtol=1e-4, atol=1e-4)
+        for g in jax.tree_util.tree_leaves(g_bf16):
+            self.assertEqual(g.dtype, jnp.float32)
+            self.assertTrue(np.isfinite(np.asarray(g)).all())
+
+    @jax.default_matmul_precision('highest')
+    def test_expand_input_train_state_preserves_exact_outputs_and_adam_state(self):
+        from flax import serialization
+        from models.sru_gru import expand_input_train_state
+        old_cfg = dict(LAYER_SIZE=16, SRU_GRU=True, GRU_CONCAT_OBSERVATION=True,
+                       SRU_RESIDUAL_ACTOR_CRITIC=True, NUM_ENVS=4, NUM_STEPS=4,
+                       NUM_MINIBATCHES=2, UPDATE_EPOCHS=1, SRU_WARMUP_STEPS=0,
+                       SRU_GATE_LR=2e-4, MAX_GRAD_NORM=1.0)
+        key = jax.random.PRNGKey(101)
+        hidden = initialize_recurrent_carry(3, old_cfg)
+        obs_old = jax.random.normal(key, (5, 3, 19))
+        extra = jax.random.normal(jax.random.PRNGKey(102), (5, 3, 21))
+        obs_new = jnp.concatenate((obs_old, extra), axis=-1)
+        dones = jnp.zeros((5, 3), dtype=bool)
+        net = ActorCriticRNN(17, old_cfg)
+        tx = make_optimizer(old_cfg, 2e-4)
+        old_params = net.init(key, hidden, (obs_old, dones))
+        old_state = TrainState.create(apply_fn=net.apply, params=old_params, tx=tx)
+        old_grads = jax.grad(lambda p: net.apply(p, hidden, (obs_old, dones))[2].sum())(old_params)
+        old_state = old_state.apply_gradients(grads=old_grads)
+
+        new_params = net.init(key, hidden, (obs_new, dones))
+        template = TrainState.create(apply_fn=net.apply, params=new_params, tx=tx)
+        expanded = expand_input_train_state(template, old_state)
+
+        self.assertEqual(int(expanded.step), int(old_state.step))
+        np.testing.assert_array_equal(expanded.params['params']['Dense_0']['kernel'][19:, :], 0.)
+        old_h, old_pi, old_v = net.apply(old_state.params, hidden, (obs_old, dones))
+        new_h, new_pi, new_v = net.apply(expanded.params, hidden, (obs_new, dones))
+        for a, b in ((old_h, new_h), (old_pi.logits, new_pi.logits), (old_v, new_v)):
+            np.testing.assert_allclose(b, a, rtol=1e-6, atol=1e-6)
+        new_grads = jax.grad(lambda p: net.apply(p, hidden, (obs_new, dones))[2].sum())(expanded.params)
+        self.assertGreater(float(jnp.linalg.norm(new_grads['params']['Dense_0']['kernel'][19:, :])), 0.)
+
 
 if __name__ == '__main__':
     unittest.main()
